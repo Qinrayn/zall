@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zall"
+version = "0.2.0"
+description = "zall — a falsifiable, reproducible coding agent CLI. Model-agnostic, chain-hashed, replayable."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "zall contributors" }]
+keywords = ["coding-agent", "cli", "ai", "llm", "developer-tools", "reproducible"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Debuggers",
+]
+dependencies = [
+    "pydantic>=2.5",
+    "cryptography>=42",
+    "httpx>=0.24",
+    "rich>=13",
+    "prompt_toolkit>=3.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "mypy>=1.7",
+    "ruff>=0.1",
+    "pytest-cov>=4.0",
+]
+bs4 = [
+    "beautifulsoup4>=4.0",
+]
+all = [
+    "zall[dev,bs4]",
+]
+
+[project.urls]
+Homepage = "https://github.com/zall/zall"
+Repository = "https://github.com/zall/zall"
+Documentation = "https://github.com/zall/zall"
+Issues = "https://github.com/zall/zall/issues"
+
+[project.scripts]
+zall = "zall.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+# 模型无关的 CI 即使是 mypy 检验也强约束 (见 IMPL.md IPR-3)
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# CI 将加自定义规则禁止 core/ 出现 openai / anthropic 等 import (IPR-3)
+# 见 scripts/check_ipr3.py (实现层下轮)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["zall"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise AssertionError",
+    "raise NotImplementedError",
+]

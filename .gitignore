@@ -1,0 +1,60 @@
+# zall ― Python project
+
+# Byte-compiled / optimized / cached
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+.pytest_cache/
+test_output.txt
+_stream_*.py
+_v*.txt
+
+# Type checking
+.mypy_cache/
+.ruff_cache/
+
+# Project-local zall config (may contain API keys / rules)
+.zall/config.toml
+.zall/trust_anchor_key
+.zall/trust_anchor.log
+.zall/trust_anchor_init.txt
+.zall/checkpoints/
+
+# Agent platform traces (never commit these)
+.zcode/
+.codebuddy/
+
+# OS artifacts
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Misc project sprawl
+nul
+
+# Agent artifacts
+.codebuddy/
+.zall_test/
+_apitest/
+Microsoft/

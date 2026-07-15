@@ -1,0 +1,8 @@
+# zall project rules (§4.2.1 context_judge)
+[allow]
+tools = []
+[deny]
+tools = []
+commands = ["rm -rf", "git push --force", "git reset --hard"]
+[settings]
+judge = "none"

@@ -1,0 +1,5 @@
+# zall MCP server registration (§9.2.11)
+# [[servers]]
+# name = "filesystem"
+# command = "mcp-server-filesystem"
+# args = ["/abs/path/to/root"]

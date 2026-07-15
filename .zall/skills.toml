@@ -1,0 +1,10 @@
+# zall skills (§9.2.7)
+[[skills]]
+name = "review"
+description = "review current git diff for bugs and regressions"
+prompt = "Review the current git working-tree diff. Focus on correctness bugs, regressions, and missing tests."
+
+[[skills]]
+name = "explain"
+description = "explain a file's purpose and structure"
+prompt = "Read {input} and explain its purpose, structure, and key functions."

@@ -1,0 +1,60 @@
+# zall CI — test, lint, IPR-3 check
+#
+# Runs on push/pull_request to main branch + daily cron.
+# Matrix: Python 3.10, 3.11, 3.12, 3.13 on ubuntu-latest.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"  # Every Monday 06:00 UTC
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pillow          # read_image tool dependency
+
+      - name: Lint with ruff
+        run: ruff check src/ tests/ --output-format=github
+
+      - name: Type-check with mypy
+        run: mypy src/zall/ --ignore-missing-imports
+
+      - name: IPR-3 check (no model SDK in core/)
+        run: python scripts/check_ipr3.py
+
+      - name: Test with pytest
+        run: python -m pytest tests/ -v --tb=short -q --no-header 2>&1 | tail -30
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.python-version }}
+          path: |
+            .pytest_cache/
+            tests/__pycache__/
+          retention-days: 7
