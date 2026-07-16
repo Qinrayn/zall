@@ -176,15 +176,26 @@ class ReadFileTool:
                 next_line = f.readline()
                 if next_line:
                     exact_total = False
-                    # 从sample估算average行宽 → 推算总行数 (避免全量扫描)
-                    # B5 fix: sample<3行时估算不可靠, 用保守上界
-                    if len(lines) >= 3:
-                        sample_bytes = sum(len(line.encode(file_enc)) for line in lines)
-                        avg_bytes_per_line = sample_bytes / len(lines)
-                        total_lines = int(file_size / max(avg_bytes_per_line, 1))
-                    else:
-                        # sample太小: 用file大小 / 256 字节作为保守估算
-                        total_lines = max(actual_end, int(file_size / 256))
+                    # v0.2.5: 如果已读行数足够多, 扫描剩余 newline 数得到精确行数
+                    # 避免 ~681 vs 725 的估算差异让模型困惑(导致重复读相同段)
+                    if actual_end >= 100:
+                        try:
+                            rest = f.read()
+                            remaining_lines = rest.count("\n")
+                            total_lines = actual_end + remaining_lines
+                            exact_total = True
+                        except (OSError, MemoryError):
+                            pass
+                    if not exact_total:
+                        # 从sample估算average行宽 → 推算总行数 (避免全量扫描)
+                        # B5 fix: sample<3行时估算不可靠, 用保守上界
+                        if len(lines) >= 3:
+                            sample_bytes = sum(len(line.encode(file_enc)) for line in lines)
+                            avg_bytes_per_line = sample_bytes / len(lines)
+                            total_lines = int(file_size / max(avg_bytes_per_line, 1))
+                        else:
+                            # sample太小: 用file大小 / 256 字节作为保守估算
+                            total_lines = max(actual_end, int(file_size / 256))
                 else:
                     total_lines = actual_end  # 精确总行数
         except UnicodeDecodeError as e:
