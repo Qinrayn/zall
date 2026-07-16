@@ -718,7 +718,9 @@ class CliRenderer:
                     pass
 
         body_lines = body.split("\n")
-        MAX_PREVIEW_LINES = 5
+        # v0.2.5: 大幅提升折叠阈值 (5→200). Cursor 不折叠, zall 也不该默认折叠.
+        # 只有超长输出(>200行)才折叠, 例如大型 build log.
+        MAX_PREVIEW_LINES = 200
         needs_fold = len(body_lines) > MAX_PREVIEW_LINES and not self._verbose
 
         if needs_fold:
