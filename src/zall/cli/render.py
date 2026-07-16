@@ -734,7 +734,7 @@ class CliRenderer:
                 self._console.print(f"    [{_C.SUBTLE}]{_G.DEPTH}[/] {truncated}")
             self._console.print(
                 f"    [{_C.SUBTLE}]{_G.DEPTH_END}[/] "
-                f"[{_C.INFO}]{remaining} more lines ({_G.ARROW} /expand {tool_idx})[/]"
+                f"[{_C.INFO}]{remaining} more lines (type \"/expand {tool_idx}\" to show all)[/]"
             )
         else:
             self._console.print(

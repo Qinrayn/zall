@@ -247,6 +247,7 @@ def repl(
                   max_steps=state["max_steps"],
                   verbose=state["verbose"], plan=state.get("plan_mode", False))
     out.write("  /help for commands \u00b7 Ctrl-D to exit \u00b7 /plan = read-only mode\n")
+    out.write("  Folded output? Type /expand <N> at the prompt to expand. /expand all to show all.\n")
     out.flush()
 
     # v2: background update check (non-blocking)
