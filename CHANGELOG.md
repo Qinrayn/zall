@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.7] — 2026-07-16
+
+### Added
+- Unified logging module (`zall._util.logging`) — replaces silent `except Exception: pass` with observable warnings, strengthening IPR-0 self-falsifiability across all CLI and core modules
+- `AgentBuilder` now fully adopted by both `orchestrator.run()` and REPL `build_repl_loop()`, eliminating duplicated `AgentLoop` construction logic
+
+### Changed
+- Version bumped to `0.2.7`
+- `cli/app.py` cleaned up — removed 42-line backward-compat re-export block and unused test-compat imports, aligning with composition-root principle
+- `core/builder.py` fixed boolean field propagation (`stream=False`, `allow_downgrade=False`, `plan_mode=False` no longer silently coerced to `None`)
+- All critical `except Exception: pass` sites now log via `get_zall_logger()` before fallback, preserving IPR-0 safety while making errors observable
+
+### Removed
+- Legacy `from zall.cli.app import ...` re-exports — all consumers migrated to direct module imports
+
 ## [0.2.1] — 2026-07-16
 
 ### Fixed
