@@ -48,6 +48,7 @@ from typing import Protocol, runtime_checkable
 
 from zall.core.action import Action
 from zall.core.accountability import AccountabilityResult, Judge
+from zall.core.chat_state import ChatState, ChatStateHandle
 from zall.core.context import Context
 from zall.core.events import EventBus
 from zall.core.extension import ExtensionRegistry
@@ -270,6 +271,8 @@ class AgentConfig:
     compactor: Compactor | None = None
     anchor: TrustAnchor | None = None
     ext_registry: ExtensionRegistry | None = None
+    chat_state: ChatState | None = None
+    """ChatState 实例 — 提供 Actor 模式的消息管理 (v0.4.0)"""
 
     # ── 从离散参数构造 AgentConfig (O9: 统一化入口) ──
 
@@ -288,6 +291,7 @@ class AgentConfig:
         compactor: Compactor | None = None,
         anchor: TrustAnchor | None = None,
         ext_registry: ExtensionRegistry | None = None,
+        chat_state: ChatState | None = None,
     ) -> AgentConfig:
         """从离散参数构造 AgentConfig (O9: 统一化入口)。
 
@@ -307,6 +311,7 @@ class AgentConfig:
             compactor=compactor,
             anchor=anchor,
             ext_registry=ext_registry,
+            chat_state=chat_state,
         )
 
 
@@ -418,9 +423,14 @@ class AgentLoop:
         # ToolExecutor: extracted tool execution orchestrator (v0.3.0)
         self._tool_executor = ToolExecutor(self)
 
+        # ── v0.4.0: ChatState 集成 — Actor 模式消息管理 ──
+        self._chat_state: ChatState | None = config.chat_state
+        # 向后兼容: 保持 _messages 作为原始列表
+        self._messages: list[Message] = []
+
         self._run_id = uuid4().hex
         self._recorder = RunRecorder(self._run_id)
-        self._messages: list[Message] = []
+        # _messages 通过 messages property 访问 (见 messages())
         self._step_count = 0
         self._tool_call_count = 0
         self._model_call_count = 0
@@ -529,7 +539,24 @@ class AgentLoop:
     @property
     def messages(self) -> list[Message]:
         """当前 model context (只读snapshot, 不可直接修改)。"""
+        if self._chat_state is not None:
+            return self._chat_state.messages
         return list(self._messages)
+
+    @property
+    def chat_state(self) -> ChatState | None:
+        """ChatState 实例 (v0.4.0)。如果未启用, 可惰性创建。"""
+        return self._chat_state
+
+    def get_chat_state(self) -> ChatState:
+        """获取或惰性创建 ChatState 实例。
+
+        首次调用时基于当前 _messages 创建 ChatState。
+        之后返回同一个实例。
+        """
+        if self._chat_state is None:
+            self._chat_state = ChatState(messages=list(self._messages))
+        return self._chat_state
 
     @property
     def model_adapter(self) -> ModelAdapter:

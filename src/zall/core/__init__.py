@@ -7,6 +7,9 @@
   accountabil.. .  §5 Accountability 维度的代码投影
   verifiabil.. .  §6 Verifiability 维度的代码投影
 
+  agent       .  §9.2 AgentDefinition + ToolsetPreset + SubagentCapabilityMode (v0.3.0)
+  toolset     .  §4.2 工具集预设系统 (v0.3.0)
+
 constraints (来自 IMPL.md):
   - IPR-3: 本包内**禁止** import 任何模型 SDK
   - IPR-4: 本包不写主 Loop; 主 Loop 在 zall.safety 之上的 orchestrator 中
@@ -14,7 +17,24 @@ constraints (来自 IMPL.md):
   - IPR-1: 每个 primitive 必须 DESIGN.md 节号对应
 """
 
-# placeholder聚合, 本轮不立interface (守 IPR-2: 单 step only 1 primitive + invariant test)
-# 下一轮起逐个推 primitive。
-
 from zall.core.extension import Extension, ExtensionRegistry  # noqa: F401
+
+# v0.3.0: AgentDefinition system
+from zall.core.agent import (  # noqa: F401
+    AgentDefinition,
+    AgentScope,
+    PermissionMode,
+    SubagentCapabilityMode,
+    ToolsetPreset,
+    discover_agents,
+    filter_tools_by_capability,
+    get_named_agent,
+)
+
+# v0.3.0: Toolset presets
+from zall.core.toolset import (  # noqa: F401
+    build_native_tools_for_preset,
+    filter_tools_by_ids,
+    get_tool_ids_for_preset,
+    list_presets,
+)

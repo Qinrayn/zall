@@ -181,6 +181,33 @@ def _get_native_tools() -> tuple[Any, ...]:
     return _NATIVE_TOOLS_CACHE
 
 
+# ── v0.3.0: 工具集预设支持 ──
+
+
+def build_tools_for_preset(preset: str) -> ToolRegistry:
+    """按工具集预设构建 ToolRegistry。
+
+    Args:
+        preset: 预设名称 (zall / explore / plan / codex / opencode)
+
+    Returns:
+        ToolRegistry with the preset's tools + list_subagents
+    """
+    from zall.core.toolset import build_native_tools_for_preset
+
+    tools = build_native_tools_for_preset(preset)
+
+    # 添加 list_subagents (如果包含 spawn_subagent)
+    spawn = next(
+        (t for t in tools if t.tool_id == "spawn_subagent"),
+        None,
+    )
+    if spawn is not None:
+        tools.append(_ListSubagentsTool(spawn))
+
+    return ToolRegistry(tools=tuple(tools))
+
+
 class _ListSubagentsTool:
     """Team Mode: query子 agent state (委托给 SpawnSubagentTool)."""
 
@@ -327,11 +354,15 @@ def run(
     verbose: bool = False,
     out: Any = None,
     enable_repo_map: bool = True,
+    agent_definition: Any = None,
+    toolset_preset: str | None = None,
 ) -> RunEgress:
     """接线 AgentLoop 并execute (薄接线层, 不重新编排primitive)。
 
     stream: True 且 adapter 支持 complete_stream → token 级流式显示
     out: 输出流 (默认 sys.stderr); REPL/测试可注入
+    agent_definition: 可选 AgentDefinition, 用于覆盖工具集/权限模式
+    toolset_preset: 可选工具集预设名 (覆盖 AgentDefinition 和默认工具集)
     """
     out_stream = out or sys.stderr
 
@@ -347,8 +378,23 @@ def run(
             step_count=0, total_tool_calls=0, total_model_calls=0, error=str(e),
         )
 
-    # 2. tools
-    native_tools = build_tools()
+    # 2. tools — 支持 toolset 预设
+    if toolset_preset is not None:
+        # 使用预设构建工具集
+        native_tools = build_tools_for_preset(toolset_preset)
+    elif agent_definition is not None:
+        # 从 AgentDefinition 构建工具集
+        from zall.core.toolset import build_native_tools_for_preset
+        tool_list = build_native_tools_for_preset(agent_definition.toolset.value)
+        # 过滤 disallowed_tools
+        if agent_definition.disallowed_tools:
+            tool_list = [t for t in tool_list if t.tool_id not in agent_definition.disallowed_tools]
+        # 过滤 tools allowlist
+        if agent_definition.tools:
+            tool_list = [t for t in tool_list if t.tool_id in agent_definition.tools]
+        native_tools = ToolRegistry(tools=tuple(tool_list))
+    else:
+        native_tools = build_tools()
     mcp_tools = build_mcp_tools(out_stream)
     tools = merge_tools(native_tools.tools, mcp_tools)
 

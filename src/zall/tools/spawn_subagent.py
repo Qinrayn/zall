@@ -158,6 +158,59 @@ class _SubagentResponder:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# 子 agent 系统提示构建
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _build_subagent_prompt(subagent_type: str, write_access: bool = False) -> str:
+    """根据子 agent 类型构建系统提示。
+
+    Args:
+        subagent_type: 子 agent 类型 (general-purpose / explore / plan)
+        write_access: 是否允许写文件
+
+    Returns:
+        系统提示字符串
+    """
+    if subagent_type == "explore":
+        return (
+            "You are an EXPLORE sub-agent. Your ONLY job is to read and explore the codebase.\n"
+            "You have read-only tools. You CANNOT modify files or run write commands.\n"
+            "Use read_file, grep, glob, list_dir, and search tools to investigate.\n"
+            "Report your findings concisely. Do not ask questions.\n"
+            "When done, stop and summarize what you found."
+        )
+
+    if subagent_type == "plan":
+        return (
+            "You are a PLAN sub-agent. Your ONLY job is to analyze and design.\n"
+            "You have read-only tools plus a todo list for tracking plans.\n"
+            "You CANNOT modify files or run shell commands.\n"
+            "Explore the codebase, understand the current state, and design a plan.\n"
+            "Output your analysis clearly: Understanding -> Analysis -> Proposed Changes.\n"
+            "Do not ask questions. When done, stop and present your plan."
+        )
+
+    # general-purpose (默认)
+    if write_access:
+        return (
+            "You are a sub-agent of the main coding agent. "
+            "You have write access to files. Complete the delegated task "
+            "using available tools, then report your results. "
+            "Do not ask questions (you have no user interaction)."
+        )
+    else:
+        return (
+            "You are a sub-agent of the main coding agent. "
+            "Your task is delegated by the main agent. "
+            "You may read files, search code, and run commands to complete the task. "
+            "Write operations (write_file, edit_file) are restricted. "
+            "Do not ask questions (you have no user interaction). "
+            "When done, stop and report your findings."
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # SpawnSubagentTool
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -176,7 +229,7 @@ class _SubagentCwdMeta:
 
 
 class SpawnSubagentTool:
-    """生成子 agent execute独立子task (§4.2, §9.3)。
+    """生成子 agent execute独立子task (§4.2, §9.3).
 
     用途:
       - 主 agent 把复杂子任务委托给子 agent
@@ -186,6 +239,7 @@ class SpawnSubagentTool:
     参数:
       prompt: str          — 子任务的描述 (子 agent 的 user_raw)
       goal_type: str       — 子任务的 GoalType (默认 "investigate")
+      subagent_type: str   — 子 agent 类型: "general-purpose" | "explore" | "plan" (默认 "general-purpose")
       write_access: bool   — 是否允许子 agent 写文件 (默认 False, 只读)
 
     IPR-0 不变量:
@@ -199,6 +253,11 @@ class SpawnSubagentTool:
 
     MAX_SUBAGENT_STEPS: int = 10
     _MAX_PARALLEL: int = 5  # 并行子 agent 上限
+    _SUBAGENT_OPTIONS = [
+        "general-purpose",
+        "explore",
+        "plan",
+    ]
 
     def __init__(
         self,
@@ -258,6 +317,17 @@ class SpawnSubagentTool:
                             "description": "Goal type for the sub-task (default: investigate)",
                             "default": "investigate",
                         },
+                        "subagent_type": {
+                            "type": "string",
+                            "enum": self._SUBAGENT_OPTIONS,
+                            "description": (
+                                "Type of sub-agent to spawn: "
+                                "'general-purpose' (read/write/execute, default), "
+                                "'explore' (read-only codebase exploration), "
+                                "'plan' (read-only planning and analysis)."
+                            ),
+                            "default": "general-purpose",
+                        },
                         "write_access": {
                             "type": "boolean",
                             "description": "Allow the sub-agent to write files (default: false, read-only)",
@@ -278,7 +348,8 @@ class SpawnSubagentTool:
         """execute子 agent 并return结果.
 
         Args:
-            args: {"prompt": str, "goal_type"?: str, "write_access"?: bool, "parallel"?: bool}
+            args: {"prompt": str, "goal_type"?: str,
+                   "subagent_type"?: str, "write_access"?: bool, "parallel"?: bool}
 
         Returns:
             ToolResult with subagent output (synchronous) or tracking ID (parallel)
@@ -304,6 +375,10 @@ class SpawnSubagentTool:
         except ValueError:
             goal_type = GoalType.INVESTIGATE
 
+        subagent_type = args.get("subagent_type", "general-purpose")
+        if not isinstance(subagent_type, str) or subagent_type not in self._SUBAGENT_OPTIONS:
+            subagent_type = "general-purpose"
+
         write_access = args.get("write_access", False)
         if not isinstance(write_access, bool):
             write_access = False
@@ -314,7 +389,7 @@ class SpawnSubagentTool:
 
         # construct子 agent 的 Goal, Context, Rules, Tools
         sub_goal, sub_context, sub_rules, sub_tools, sub_system_prompt = (
-            self._build_subagent_env(prompt, goal_type, write_access)
+            self._build_subagent_env(prompt, goal_type, subagent_type, write_access)
         )
 
         if parallel:
@@ -324,8 +399,20 @@ class SpawnSubagentTool:
             return self._execute_sync(prompt, sub_goal, sub_context, sub_rules,
                                       sub_tools, sub_system_prompt)
 
-    def _build_subagent_env(self, prompt: str, goal_type: GoalType, write_access: bool) -> tuple[GoalTriple, Context, RuleSet, ToolRegistry, str]:
-        """construct子 agent 运行环境 (Goal, Context, Rules, Tools, SystemPrompt)."""
+    def _build_subagent_env(self, prompt: str, goal_type: GoalType,
+                            subagent_type: str, write_access: bool,
+                            ) -> tuple[GoalTriple, Context, RuleSet, ToolRegistry, str]:
+        """construct子 agent 运行环境 (Goal, Context, Rules, Tools, SystemPrompt).
+
+        使用 AgentDefinition 根据 subagent_type 选择工具集和系统提示。
+        """
+        from zall.core.agent import (
+            AgentDefinition,
+            SubagentCapabilityMode,
+            get_named_agent,
+        )
+        from zall.core.toolset import build_native_tools_for_preset, filter_tools_by_ids
+
         class _SubTermination:
             exposed_dependency_set: tuple[str, ...] | None = None
             def __call__(self, state: object) -> TerminationState:
@@ -349,24 +436,34 @@ class SpawnSubagentTool:
         )
 
         sub_rules = _build_subagent_rules(self._rules, write_access=write_access)
-        sub_tools = _build_subagent_tools(self._tools) if self._tools is not None else ToolRegistry(tools=())
 
-        if write_access:
-            sub_system_prompt = (
-                "You are a sub-agent of the main coding agent. "
-                "You have write access to files. Complete the delegated task "
-                "using available tools, then report your results. "
-                "Do not ask questions (you have no user interaction)."
-            )
+        # 根据 subagent_type 获取 AgentDefinition 并构建工具集
+        agent_def = get_named_agent(subagent_type)
+        if agent_def is not None:
+            # 从 AgentDefinition 构建工具集
+            sub_tools_list = build_native_tools_for_preset(agent_def.toolset.value)
+
+            # 应用能力模式过滤
+            cap_mode = agent_def.capability_mode
+            if cap_mode is not None and cap_mode != SubagentCapabilityMode.FULL:
+                # 读取预设工具 ID 列表, 再根据能力模式过滤
+                from zall.core.toolset import get_tool_ids_for_preset
+                tool_ids = get_tool_ids_for_preset(agent_def.toolset.value)
+                from zall.core.agent import filter_tools_by_capability
+                allowed_ids = filter_tools_by_capability(tool_ids, cap_mode)
+                sub_tools_list = filter_tools_by_ids(sub_tools_list, allowed_ids)
+
+            sub_tools = ToolRegistry(tools=tuple(sub_tools_list))
+
+            # 使用 AgentDefinition 的提示
+            if agent_def.prompt_body:
+                sub_system_prompt = agent_def.prompt_body
+            else:
+                sub_system_prompt = _build_subagent_prompt(subagent_type, write_access)
         else:
-            sub_system_prompt = (
-                "You are a sub-agent of the main coding agent. "
-                "Your task is delegated by the main agent. "
-                "Use read-only tools (read_file, grep, glob, list_dir) to complete it. "
-                "Write operations (bash, write_file, edit_file) will be auto-rejected. "
-                "Do not ask questions (you have no user interaction). "
-                "When done, stop and report your findings."
-            )
+            # 回退: 继承父 agent 工具集
+            sub_tools = _build_subagent_tools(self._tools) if self._tools is not None else ToolRegistry(tools=())
+            sub_system_prompt = _build_subagent_prompt(subagent_type, write_access)
 
         return sub_goal, sub_context, sub_rules, sub_tools, sub_system_prompt
 

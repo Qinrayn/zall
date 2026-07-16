@@ -575,6 +575,92 @@ class PromptBuilder:
             pass  # Memory loading failure does not block
         return self
 
+    def add_lsp_diagnostics(
+        self,
+        lsp_manager: Any | None = None,
+        max_errors: int = 10,
+    ) -> PromptBuilder:
+        """LSP 诊断摘要 (v0.4.0)."""
+        if lsp_manager is None:
+            return self
+        try:
+            summary = lsp_manager.summary()
+            err_count = summary.get("diagnostics_errors", 0)
+            warn_count = summary.get("diagnostics_warnings", 0)
+            if err_count == 0 and warn_count == 0:
+                return self  # Clean, skip section
+
+            lines = [
+                "",
+                "CODE DIAGNOSTICS (from language server — fix these before running builds):",
+                f"  {err_count} errors, {warn_count} warnings across project",
+            ]
+
+            # Show top errors
+            all_diags = lsp_manager.all_diagnostics
+            shown = 0
+            for fpath in sorted(all_diags.keys()):
+                if shown >= max_errors:
+                    break
+                for d in all_diags[fpath]:
+                    if shown >= max_errors:
+                        break
+                    label = getattr(d, "severity_label", "?")
+                    if label == "error":
+                        msg = getattr(d, "message", "?")
+                        line = getattr(d, "line", 0) + 1
+                        col = getattr(d, "column", 0) + 1
+                        lines.append(f"  {fpath}:{line}:{col}: {msg[:120]}")
+                        shown += 1
+
+            self._parts.append("\n".join(lines))
+        except Exception:
+            pass  # LSP failure does not block
+        return self
+
+    def add_codegraph_context(
+        self,
+        codegraph: Any | None = None,
+        key_files: list[str] | None = None,
+    ) -> PromptBuilder:
+        """CodeGraph 代码结构上下文 (v0.4.0)."""
+        if codegraph is None:
+            return self
+        try:
+            stats = codegraph.get_stats()
+            if stats.get("status") != "indexed" or stats.get("symbol_count", 0) == 0:
+                return self
+
+            lines = [
+                "",
+                "CODE STRUCTURE (codebase index available):",
+                f"  {stats.get('file_count', 0)} files indexed, "
+                f"{stats.get('symbol_count', 0)} symbols",
+            ]
+
+            # Show outline for key files
+            if key_files:
+                for fpath in key_files:
+                    try:
+                        outline = codegraph.get_outline(fpath)
+                        if outline:
+                            symbols_str = ", ".join(
+                                f"{e['kind']} {e['name']}" for e in outline[:10]
+                            )
+                            lines.append(f"  {fpath}: {symbols_str}")
+                    except Exception:
+                        pass
+
+            lines.append(
+                "  Tools: codegraph_search (find symbols), "
+                "codegraph_outline (file structure)"
+            )
+
+            self._parts.append("\n".join(lines))
+        except Exception:
+            pass  # CodeGraph failure does not block
+        return self
+
     def build(self) -> str:
         return "".join(self._parts)
 
@@ -603,17 +689,21 @@ def build_system_prompt(
     context: Context, mcp_tools: tuple[MCPTool, ...] = (),
     *, enable_repo_map: bool = True, plan_mode: bool = False,
     skills: list[Any] | None = None,
+    lsp_manager: Any | None = None,
+    codegraph: Any | None = None,
 ) -> str:
     """Build the system prompt: base rules + runtime env + project memory + repo map.
 
     Lets the model know it's running in zall, where it is, git status,
-    project conventions, avoiding guesswork. Both run() and REPL use this
-    function for zero-duplicate project memory injection.
+    project conventions, avoiding guesswork. Both run() and REPL use
+    this function for zero-duplicate project memory injection.
 
     mcp_tools: registered MCP tools, appended to the tool list.
     enable_repo_map: whether to inject repo map (default True).
     plan_mode: whether to inject analysis-first plan mode prompt.
     skills: available skills for progressive disclosure (name + description only).
+    lsp_manager: LspManager for live diagnostics injection (v0.4.0).
+    codegraph: CodeGraph for code structure context (v0.4.0).
 
     O9: 缓存结果 (参数不变时复用), 避免 REPL 每轮都重建 system prompt。
     """
@@ -631,6 +721,8 @@ def build_system_prompt(
               .add_mcp_tools(mcp_tools)
               .add_skills(skills)
               .add_session_memory()
+              .add_lsp_diagnostics(lsp_manager)
+              .add_codegraph_context(codegraph)
               .build())
 
     # O9: 缓存, 上限 8 条防内存泄漏

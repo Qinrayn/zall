@@ -1,6 +1,48 @@
 # Changelog
 
-## [0.2.7] — 2026-07-16
+## [0.4.0] — 2026-07-17
+
+### Added
+- **ChatState 管理层** — Actor 模式的消息管理 (`src/zall/core/chat_state.py`). 借鉴 Grok Build 的 `xai-chat-state`. 支持事件追踪 (`StateEvent`)、用量分类账 (`UsageLedger`)、摘要压缩 (`SummaryCompaction`)、快照保存/恢复 (`Snapshot`)、可插拔持久化 (`ChatPersistence`).
+- **ChatState → AgentLoop 集成** — `AgentLoop` 新增 `chat_state` 属性和 `get_chat_state()` 方法. `AgentConfig` 新增 `chat_state` 参数. 向后兼容.
+- **LSP 集成** — `src/zall/lsp/__init__.py`. 多语言语言服务器 (pyright/typescript-language-server/rust-analyzer/gopls/clangd). JSON-RPC 传输层, go-to-definition, hover, completions, diagnostics.
+- **LSP Agent 工具** — `src/zall/tools/lsp_diagnostics.py`. Agent 可直接调用: `lsp_diagnostics`, `lsp_hover`, `lsp_goto_definition`.
+- **CodeGraph Agent 工具** — `src/zall/tools/codegraph.py`. Agent 可直接调用: `codegraph_search`, `codegraph_outline`, `codegraph_stats`, `codegraph_index`.
+- **沙箱模式** — `src/zall/sandbox/__init__.py`. 三种隔离级别: NONE, WORKTREE (Git worktree), PROCESS (子进程). `ResourceLimits` 控制超时/输出/网络/写入.
+- **CLI 命令** — `/lsp`, `/sandbox`, `/codegraph`, `/chatstate`, `/plugin` — 控制 v0.4.0 新系统.
+- **系统提示注入** — `PromptBuilder.add_lsp_diagnostics()` 注入实时诊断摘要, `add_codegraph_context()` 注入代码结构概览.
+
+### Changed
+- Version bumped to `0.4.0`
+- `AgentConfig` 新增 `chat_state` 字段
+- `AgentLoop.__init__` 初始化 `ChatState` 实例, 通过 `self.chat_state` 属性访问
+- `loop.messages` 属性在 ChatState 可用时返回 ChatState 的消息快照
+
+### New files
+- `src/zall/core/chat_state.py` — ChatState 管理层
+- `src/zall/lsp/__init__.py` — LSP 集成
+- `src/zall/sandbox/__init__.py` — 沙箱模式
+- `tests/test_chat_state_invariants.py` — 25 个 ChatState 测试
+- `tests/test_lsp_invariants.py` — 21 个 LSP 测试
+- `tests/test_sandbox_invariants.py` — 25 个沙箱测试
+
+## [0.3.0] — 2026-07-16
+
+### Added
+- **AgentDefinition system** — YAML frontmatter agent definitions from `.zall/agents/*.md` files, inspired by Grok Build's `AgentDefinition`. Supports toolset presets, permission modes, capability modes, model overrides, and MCP server configuration.
+- **ToolsetPreset system** — Five built-in toolset presets: `zall` (full), `explore` (read-only), `plan` (read-only+todo), `codex` (Codex-compatible), `opencode` (OpenCode-compatible). Enables role-specific tool configurations.
+- **SubagentCapabilityMode** — Three capability modes for sub-agents: `read_only`, `plan_only`, `no_bash`. Filter tools at spawn time for security isolation.
+- **Default agent files** — `.zall/agents/explore.md` and `.zall/agents/plan.md` with full system prompt bodies.
+- **Agent discovery** — `discover_agents()` searches `.zall/agents/` (project, user, bundled scopes) with proper priority ordering.
+- `AgentBuilder.with_agent_definition()` and `with_agent_file()` — construct AgentLoop directly from AgentDefinition.
+- `orchestrator.build_tools_for_preset()` — build ToolRegistry from a preset name.
+- `orchestrator.run()` now accepts `agent_definition` and `toolset_preset` parameters.
+
+### Changed
+- Version bumped to `0.3.0`
+- `pyproject.toml` — added `pyyaml>=6.0` dependency for YAML frontmatter parsing
+- `SpawnSubagentTool` now supports `subagent_type` parameter (`general-purpose`, `explore`, `plan`) with capability-appropriate tool sets and system prompts.
+- `zall.core.__init__` now exports all new types from `agent` and `toolset` modules.
 
 ### Added
 - Unified logging module (`zall._util.logging`) — replaces silent `except Exception: pass` with observable warnings, strengthening IPR-0 self-falsifiability across all CLI and core modules

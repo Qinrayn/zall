@@ -4,6 +4,11 @@ Inspired by Grok Build's AgentBuilder pattern. Eliminates wiring duplication
 between orchestator.run() and repl_ui.build_repl_loop() by providing a single
 builder that both paths use.
 
+v0.3.0: 新增 AgentDefinition 支持:
+  - with_agent_definition(): 从 AgentDefinition 构建
+  - with_agent_file(): 从 .zall/agents/*.md 文件构建
+  - AgentDefinition 自动选择工具集预设、权限模式、模型等
+
 Usage:
     loop = AgentBuilder() \\
         .with_model(adapter) \\
@@ -21,6 +26,13 @@ Usage:
         .with_plan_mode(True) \\
         .build()
 
+    # 或使用 AgentDefinition:
+    loop = AgentBuilder() \\
+        .with_agent_definition(agent_def) \\
+        .with_model(adapter) \\
+        ... \\
+        .build()
+
 Corresponds to:
   §9.2.1  Goal confirmation wiring
   §4.2    ToolRegistry construction
@@ -35,7 +47,7 @@ IPR constraints:
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 
 class AgentBuilder:
@@ -46,7 +58,7 @@ class AgentBuilder:
 
     Required fields:
       - model
-      - tools
+      - tools (or agent_definition)
       - rules
       - goal
       - context
@@ -65,6 +77,7 @@ class AgentBuilder:
       - compactor: None
       - anchor: None
       - ext_registry: None
+      - agent_definition: None
     """
 
     def __init__(self) -> None:
@@ -88,6 +101,7 @@ class AgentBuilder:
         self._compactor: Any = None
         self._anchor: Any = None
         self._ext_registry: Any = None
+        self._agent_definition: Any = None
 
     # ═══════════════════════════════════════════════════════════════
     # Required fields
@@ -121,6 +135,26 @@ class AgentBuilder:
     def with_responder(self, responder: Any) -> AgentBuilder:
         """Set the UserResponder."""
         self._user_responder = responder
+        return self
+
+    # ═══════════════════════════════════════════════════════════════
+    # AgentDefinition support (v0.3.0)
+    # ═══════════════════════════════════════════════════════════════
+
+    def with_agent_definition(self, agent_def: Any) -> AgentBuilder:
+        """Set the AgentDefinition.
+
+        设置后, build() 会从 AgentDefinition 自动提取工具集、权限模式等。
+        如果未单独设置 plan_mode, 会根据 AgentDefinition 的 permission_mode 自动设置。
+        """
+        self._agent_definition = agent_def
+        return self
+
+    def with_agent_file(self, path: str) -> AgentBuilder:
+        """从 .md 文件加载 AgentDefinition。"""
+        from zall.core.agent import AgentDefinition
+        agent_def = AgentDefinition.from_file(path)
+        self._agent_definition = agent_def
         return self
 
     # ═══════════════════════════════════════════════════════════════
@@ -200,6 +234,9 @@ class AgentBuilder:
         Raises:
             ValueError: If any required field is missing.
         """
+        # 如果设置了 AgentDefinition, 应用其配置
+        self._apply_agent_definition()
+
         self._validate()
 
         from zall.core.loop import AgentLoop, AgentConfig
@@ -228,6 +265,47 @@ class AgentBuilder:
             user_responder=self._user_responder,
             config=config,
         )
+
+    def _apply_agent_definition(self) -> None:
+        """从 AgentDefinition 应用配置到 builder。
+
+        如果 AgentDefinition 设定了 toolset, 则使用预设构建工具集。
+        如果设定了 permission_mode/plan_mode, 自动设置 plan_mode。
+        如果设定了 model, 可覆盖模型选择。
+        """
+        if self._agent_definition is None:
+            return
+
+        ad = self._agent_definition
+
+        # 如果未手动设置 tools, 从 AgentDefinition 构建
+        if self._tools is None:
+            from zall.core.toolset import build_native_tools_for_preset
+            tool_list = build_native_tools_for_preset(ad.toolset.value)
+            from zall.core.tool import ToolRegistry
+            self._tools = ToolRegistry(tools=tuple(tool_list))
+
+        # 根据 permission_mode 设置 plan_mode
+        if ad.permission_mode.value == "plan":
+            self._plan_mode = True
+
+        # 如果 AgentDefinition 有 disallowed_tools, 过滤工具
+        if ad.disallowed_tools and self._tools is not None:
+            filtered = [
+                t for t in self._tools.tools
+                if t.tool_id not in ad.disallowed_tools
+            ]
+            from zall.core.tool import ToolRegistry
+            self._tools = ToolRegistry(tools=tuple(filtered))
+
+        # 如果 AgentDefinition 有 tools allowlist, 只保留这些
+        if ad.tools and self._tools is not None:
+            filtered = [
+                t for t in self._tools.tools
+                if t.tool_id in ad.tools
+            ]
+            from zall.core.tool import ToolRegistry
+            self._tools = ToolRegistry(tools=tuple(filtered))
 
     def _validate(self) -> None:
         """Check that all required fields are set.
@@ -288,6 +366,39 @@ def build_loop_minimal(
     builder.with_responder(responder)
 
     # Optional kwargs
+    for key, val in kwargs.items():
+        method_name = f"with_{key}"
+        if hasattr(builder, method_name):
+            getattr(builder, method_name)(val)
+
+    return builder.build()
+
+
+def build_from_agent_definition(
+    agent_def: Any,
+    model: Any,
+    rules: Any,
+    goal: Any,
+    context: Any,
+    responder: Any,
+    **kwargs: Any,
+) -> Any:
+    """从 AgentDefinition 构建 AgentLoop。
+
+    Usage:
+        loop = build_from_agent_definition(
+            agent_def, model, rules, goal, context, responder,
+            judge=judge, compactor=ModelCompactor(),
+        )
+    """
+    builder = AgentBuilder()
+    builder.with_agent_definition(agent_def)
+    builder.with_model(model)
+    builder.with_rules(rules)
+    builder.with_goal(goal)
+    builder.with_context(context)
+    builder.with_responder(responder)
+
     for key, val in kwargs.items():
         method_name = f"with_{key}"
         if hasattr(builder, method_name):

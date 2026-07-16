@@ -148,3 +148,12 @@ from zall.cli.commands.system import (  # noqa: F401
 from zall.cli.commands.reload import (  # noqa: F401
     cmd_reload,
 )
+
+# v0.4.0: 新系统命令
+from zall.cli.commands.v040 import (  # noqa: F401
+    cmd_lsp,
+    cmd_sandbox,
+    cmd_codegraph,
+    cmd_chatstate,
+    cmd_plugin,
+)
