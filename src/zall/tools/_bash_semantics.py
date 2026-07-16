@@ -18,7 +18,6 @@ from __future__ import annotations
 import re
 import shlex
 from enum import Enum
-from typing import Any
 
 
 class CommandSemantics(str, Enum):

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 
 # Allowed progress statuses
 _STATUS_ALLOWED = ("pending", "in_progress", "completed")

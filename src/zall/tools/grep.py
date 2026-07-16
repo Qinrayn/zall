@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 from zall._util import is_binary, NOISE_DIRS
 from zall._util.path import resolve_path
 
@@ -146,7 +146,7 @@ class GrepTool:
                 cmd, capture_output=True, text=True, timeout=30, encoding="utf-8",
                 errors="replace",
             )
-        except (subprocess.TimeoutExpired, OSError) as e:
+        except (subprocess.TimeoutExpired, OSError):
             # rg 失败 → 退化到 Python
             return self._grep_python(pattern, path, fixed, ignore_case, max_results)
 
@@ -204,7 +204,10 @@ class GrepTool:
             def _search_file(fpath: Path) -> None:
                 nonlocal local_files_searched
                 try:
-                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    # Use system preferred encoding (e.g., cp936 on Chinese Windows, not hardcoded UTF-8)
+                    import locale as _locale
+                    _sys_enc = _locale.getpreferredencoding(False) or "utf-8"
+                    with open(fpath, "r", encoding=_sys_enc, errors="replace") as f:
                         local_files_searched += 1
                         for lineno, line in enumerate(f, 1):
                             if regex.search(line):

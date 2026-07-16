@@ -223,6 +223,7 @@ class CliRenderer:
         self._spinner_active = False
         self._spinner_thread: threading.Thread | None = None
         self._spinner_stop = threading.Event()
+        self._spinner_trigger = threading.Event()  # O9: persistent spinner trigger
         self._spinner_step: int = 0
         self._spinner_model: str = ""
         self._spinner_start: float = 0.0
@@ -353,32 +354,51 @@ class CliRenderer:
             self._console.print(f"  [{_C.SUBTLE}]{_G.BULLET} {kind} (step {step})[/]")
 
     # ── Spinner: rotating braille precision pattern ──
+    # O9: 单线程复用 (而非每次 model_call_start 创建新 Thread)
 
     _SPIN_FRAMES = ("\u28cb", "\u28d9", "\u28f6", "\u28e7", "\u28cf", "\u28df",
                      "\u28bf", "\u28fb", "\u28fd", "\u28fe")
 
-    def _spin_loop(self) -> None:
-        idx = 0
-        while not self._spinner_stop.is_set():
-            elapsed = time.time() - self._spinner_start
-            frame = self._SPIN_FRAMES[idx % len(self._SPIN_FRAMES)]
-            label = self._spinner_model or "model"
-            idx += 1
-            if elapsed > 0.8:
-                status = f"  {frame} {label} {elapsed:.1f}s"
-            else:
-                status = f"  {frame} {label}"
-            with self._write_lock:
-                if self._spinner_stop.is_set():
-                    return
-                self._raw_stream.write(f"\r{status}")
-                self._raw_stream.flush()
-            time.sleep(0.08)
+    def _spinner_loop(self) -> None:
+        """持久 spinner 线程: 循环等待 _spinner_trigger, 触发后旋转直到 _spinner_stop。"""
+        while True:
+            self._spinner_trigger.wait()
+            if self._spinner_stop.is_set():
+                # 线程退出信号
+                return
+            self._spinner_trigger.clear()
+            idx = 0
+            while not self._spinner_stop.is_set():
+                elapsed = time.time() - self._spinner_start
+                frame = self._SPIN_FRAMES[idx % len(self._SPIN_FRAMES)]
+                label = self._spinner_model or "model"
+                idx += 1
+                if elapsed > 0.8:
+                    status = f"  {frame} {label} {elapsed:.1f}s"
+                else:
+                    status = f"  {frame} {label}"
+                with self._write_lock:
+                    if self._spinner_stop.is_set():
+                        break
+                    self._raw_stream.write(f"\r{status}")
+                    self._raw_stream.flush()
+                time.sleep(0.08)
+
+    def _start_spinner(self) -> None:
+        """启动/重启 spinner (复用持久线程)。"""
+        if self._spinner_active:
+            return
+        self._spinner_stop.clear()
+        self._spinner_active = True
+        self._spinner_trigger.set()
 
     def _stop_spinner(self) -> None:
         if not self._spinner_active:
             return
         self._spinner_stop.set()
+        # 如果是持久线程在等待, 触发它唤醒并退出
+        self._spinner_trigger.set()
+        # 等待线程确认
         if self._spinner_thread and self._spinner_thread.is_alive():
             self._spinner_thread.join(timeout=0.5)
         self._spinner_thread = None
@@ -402,16 +422,16 @@ class CliRenderer:
             self._raw_stream.write(f"  step {step} ...\n")
             self._raw_stream.flush()
             return
-        if not self._spinner_active:
-            self._spinner_step = step
-            self._spinner_model = p.get("model", "")
-            self._spinner_start = time.time()
-            self._spinner_active = True
-            self._spinner_stop.clear()
+        # O9: 首次调用时创建持久 spinner 线程, 后续复用
+        if self._spinner_thread is None or not self._spinner_thread.is_alive():
             self._spinner_thread = threading.Thread(
-                target=self._spin_loop, daemon=True
+                target=self._spinner_loop, daemon=True
             )
             self._spinner_thread.start()
+        self._spinner_step = step
+        self._spinner_model = p.get("model", "")
+        self._spinner_start = time.time()
+        self._start_spinner()
 
     def _render_model_thinking(self, step: int, p: dict[str, Any]) -> None:
         token = p.get("token", "")
@@ -535,7 +555,6 @@ class CliRenderer:
             return
 
         content = p.get("content", "")
-        stop_reason = p.get("stop_reason", "")
         tool_calls = p.get("tool_calls", [])
 
         if content:
@@ -754,12 +773,12 @@ class CliRenderer:
                         return f"{m.group(2)} lines"
             return body.split("\n")[0][:60]
         if tool_id == "list_dir":
-            lines = [l for l in body.split("\n") if l.strip()]
+            lines = [line for line in body.split("\n") if line.strip()]
             return f"{len(lines)} entries"
         if tool_id == "grep":
             if "(no matches)" in body:
                 return "no matches"
-            count = len([l for l in body.split("\n") if l.strip() and not l.startswith("...")])
+            count = len([line for line in body.split("\n") if line.strip() and not line.startswith("...")])
             return f"{count} matches"
         if tool_id == "edit_file":
             for line in body.split("\n"):

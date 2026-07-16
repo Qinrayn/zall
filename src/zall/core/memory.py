@@ -184,7 +184,7 @@ class SessionMemory:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             # 写临时file, 再原子 rename
             import tempfile as _tf
-            tmp_path = self._path.parent / f".memory_{_tf._get_default_tempdir().replace('/', '_')}.tmp"
+            tmp_path = self._path.parent / f".memory_{_tf._get_default_tempdir().replace('/', '_')}.tmp"  # type: ignore[attr-defined]
             with open(tmp_path, "w", encoding="utf-8", newline="") as f:
                 for m in self._memories:
                     f.write(json.dumps(m, ensure_ascii=False) + "\n")

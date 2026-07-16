@@ -271,20 +271,16 @@ def context_judge(action: Action, context: Context, rules: RuleSet) -> Judgement
         )
 
     # ── 第二趟: user_local_rules + domain_rules, deny 优先
-    # B2: single-pass loop with early return on deny hit (avoid dead post-loop checks).
-    # deny_hits variablepreserve以compatible外部reference, 实际逻辑用 early return。
+    # deny 优先: 命中 BLACKLIST 立即返回, 不继续匹配
     user_domain: tuple[Rule, ...] = rules.user_local_rules + rules.domain_rules
-    deny_hits: list[Rule] = []
     grey_hits: list[Rule] = []
     white_hits: list[Rule] = []
     for r in user_domain:
         if r.matches(action, context):
             if r.level == SafeLevel.BLACKLIST:
-                # deny 优先: 找到后立即return, 不继续匹配
-                deny_hits.append(r)
                 return Judgement(
                     level=SafeLevel.BLACKLIST,
-                    matched_rule_ids=tuple(r.rule_id for r in deny_hits),
+                    matched_rule_ids=(r.rule_id,),
                 )
             elif r.level == SafeLevel.GREYLIST:
                 grey_hits.append(r)

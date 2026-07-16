@@ -22,13 +22,11 @@ from __future__ import annotations
 import base64
 import io as _io
 import os
-import sys
-from pathlib import Path
 from typing import Any
 
 from zall._util.path import resolve_path
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 
 # 图片最大大小 (超过此数reject, prevents context pollution)
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10MB

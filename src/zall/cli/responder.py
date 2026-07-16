@@ -98,11 +98,11 @@ class CliUserResponder(UserResponder):
         original_type = action.args.get("original_type", "?")
         original_intent = action.args.get("original_intent", "")
 
-        self._print(f"  Goal downgrade proposed:")
+        self._print("  Goal downgrade proposed:")
         self._print(f"    original [{original_type}]: {original_intent[:100]}")
 
         if candidates_desc and len(candidates_desc) > 0:
-            self._print(f"    candidates:")
+            self._print("    candidates:")
             for cd in candidates_desc:
                 idx = cd.get("index", 0)
                 gt = cd.get("goal_type", "?")
@@ -195,7 +195,6 @@ class CliUserResponder(UserResponder):
             if not isinstance(val, str):
                 new_args[key] = val
                 continue
-            preview = val if len(val) <= 80 else val[:80] + "…"
             try:
                 new_val = self._ask(f"    {key} = ").strip()
             except (EOFError, KeyboardInterrupt):

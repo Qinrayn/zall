@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 
 # 单次最大字符数 (超过此数truncate, prevents context pollution)
 MAX_CHARS = 10000
@@ -252,13 +252,26 @@ class WebFetchTool:
                 error=str(e),
             )
 
-        # 手动重定向循环 (最多 5 次), 每次check SSRF
+# H1: 只允许 http/https scheme (防 file:/// gopher:// 等 scheme bypass)
+        _SAFE_SCHEMES = frozenset({"http", "https"})
+
+        # 手动重定向循环 (最多 5 次), 每次 check SSRF + scheme
         redirect_count = 0
         max_redirects = 5
         current_url = url
 
-        while redirect_count <= max_redirects:
-            # SSRF check on each URL (including redirect targets)
+        while redirect_count < max_redirects:
+            # H1: 验证 URL scheme (每次重定向后重新验证)
+            from urllib.parse import urlparse as _urlparse
+            parsed = _urlparse(current_url)
+            if parsed.scheme.lower() not in _SAFE_SCHEMES:
+                return ToolResult(
+                    success=False,
+                    output=f"[ERROR: unsafe URL scheme '{parsed.scheme}' blocked. Only http/https allowed.]",
+                    error="unsafe URL scheme",
+                )
+
+            # H1: SSRF check 在请求前 + 请求后双重验证 (缩小 TOCTOU 窗口)
             is_blocked, block_reason = _is_ssrf_blocked(current_url)
             if is_blocked:
                 return ToolResult(
@@ -294,12 +307,23 @@ class WebFetchTool:
                     error=str(e),
                 )
 
+            # H1: 请求后再次验证 SSRF (防 DNS rebinding)
+            is_blocked2, block_reason2 = _is_ssrf_blocked(current_url)
+            if is_blocked2:
+                resp.close()
+                return ToolResult(
+                    success=False,
+                    output=f"[ERROR: {block_reason2}]",
+                    error="SSRF blocked (post-request)",
+                )
+
             if resp.status_code == 200:
                 break  # success
             elif resp.status_code in (301, 302, 303, 307, 308):
                 redirect_count += 1
                 location = resp.headers.get("location", "")
                 if not location:
+                    resp.close()
                     return ToolResult(
                         success=False,
                         output=f"[ERROR: redirect without Location header for {current_url}]",
@@ -310,13 +334,15 @@ class WebFetchTool:
                 resp.close()
                 continue
             else:
+                resp.close()
                 return ToolResult(
                     success=False,
                     output=f"[ERROR: HTTP {resp.status_code} for {current_url}]",
                     error=f"HTTP {resp.status_code}",
                 )
 
-        if redirect_count > max_redirects:
+        if redirect_count >= max_redirects:
+            resp.close()
             return ToolResult(
                 success=False,
                 output=f"[ERROR: too many redirects for {url}]",
@@ -339,20 +365,20 @@ class WebFetchTool:
         total_bytes = 0
         truncated = False
         chunk = b""
-        for chunk in resp.iter_bytes(chunk_size=8192):
-            if total_bytes + len(chunk) > MAX_RESPONSE_BYTES:
-                remaining = MAX_RESPONSE_BYTES - total_bytes
-                if remaining > 0:
-                    content_parts.append(chunk[:remaining].decode("utf-8", errors="replace"))
-                truncated = True
-                break
-            content_parts.append(chunk.decode("utf-8", errors="replace"))
-            total_bytes += len(chunk)
+        try:
+            for chunk in resp.iter_bytes(chunk_size=8192):
+                if total_bytes + len(chunk) > MAX_RESPONSE_BYTES:
+                    remaining = MAX_RESPONSE_BYTES - total_bytes
+                    if remaining > 0:
+                        content_parts.append(chunk[:remaining].decode("utf-8", errors="replace"))
+                    truncated = True
+                    break
+                content_parts.append(chunk.decode("utf-8", errors="replace"))
+                total_bytes += len(chunk)
+        finally:
+            resp.close()
 
         content = "".join(content_parts)
-        actual_bytes = total_bytes + (len(chunk) if truncated else 0)
-        resp.close()
-
         if truncated:
             content += (
                 f"\n\n[Note: response was truncated at {MAX_RESPONSE_BYTES} bytes "

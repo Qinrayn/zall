@@ -15,7 +15,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 
 def ensure_utf8_stdio() -> None:

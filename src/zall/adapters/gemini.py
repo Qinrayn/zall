@@ -214,7 +214,6 @@ class GeminiAdapter:
           - The "user" messages and "model" responses interleaved
           - A final user message sent separately
         """
-        import google.generativeai as genai
 
         # Filter out system messages
         non_system = [m for m in messages if m.role != "system"]

@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+import locale
 from pathlib import Path
-from typing import IO
+
+
+def _preferred_encoding() -> str:
+    """Get the system's preferred encoding (Windows Chinese is GBK/CP936, do not hardcode UTF-8)."""
+    try:
+        enc = locale.getpreferredencoding(False)
+        if enc:
+            return enc
+    except (ValueError, LookupError):
+        pass
+    return "utf-8"  # fallback
 
 
 def is_binary(path: Path) -> bool:
@@ -20,14 +31,16 @@ def is_binary(path: Path) -> bool:
         return True
 
 
-def read_text_file(path: Path, encoding: str = "utf-8") -> str:
+def read_text_file(path: Path, encoding: str | None = None) -> str:
     """read文本file, 统一exceptionhandle。
 
     B22: 统一 edit_file.py 和 batch_edit.py 的文件读取逻辑。
     自动解析相对路径, 检查存在性/类型, 返回文件内容。
     抛出 OSError 时调用方自行处理。
+    编码默认使用系统preferred encoding (非硬编码 UTF-8)。
     """
-    if not path.is_absolute():
+    if encoding is None:
+        encoding = _preferred_encoding()
         path = Path.cwd() / path
     if not path.exists():
         raise FileNotFoundError(f"file not found: {path}")
@@ -36,7 +49,7 @@ def read_text_file(path: Path, encoding: str = "utf-8") -> str:
     return path.read_text(encoding=encoding)
 
 
-def atomic_write(path: Path, content: str, encoding: str = "utf-8") -> Path:
+def atomic_write(path: Path, content: str, encoding: str | None = None) -> Path:
     """原子writefile — 使用唯一临时file名, 避免 concurrent write竞态。
 
     v2 fix: 旧实现 path.with_suffix(suffix + ".zall_tmp") 在两个 agent
@@ -48,6 +61,8 @@ def atomic_write(path: Path, content: str, encoding: str = "utf-8") -> Path:
     """
     import os
     import uuid
+    if encoding is None:
+        encoding = _preferred_encoding()
     tmp_name = f".zall_tmp_{uuid.uuid4().hex[:8]}"
     tmp = path.parent / tmp_name
     try:

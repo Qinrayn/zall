@@ -34,8 +34,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install pillow          # read_image tool dependency
+          pip install -e ".[dev,images]"
 
       - name: Lint with ruff
         run: ruff check src/ tests/ --output-format=github
@@ -47,14 +46,12 @@ jobs:
         run: python scripts/check_ipr3.py
 
       - name: Test with pytest
-        run: python -m pytest tests/ -v --tb=short -q --no-header 2>&1 | tail -30
+        run: python -m pytest tests/ -v --tb=short -q --no-header --junitxml=pytest-results.xml 2>&1 | tail -30
 
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pytest-results-${{ matrix.python-version }}
-          path: |
-            .pytest_cache/
-            tests/__pycache__/
+          path: pytest-results.xml
           retention-days: 7

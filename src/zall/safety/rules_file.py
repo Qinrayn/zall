@@ -67,14 +67,15 @@ def _parse_toml_like(text: str) -> dict[str, Any]:
     """
     # P7: 提取共用parsefunction, 消除 args/context 双份代码
     def _parse_single_line_dict(line: str, prefix: str) -> dict[str, Any]:
-        """parse单行 key = { k1 = "v1", k2 = "v2" } 格式。"""
+        """parse单行 key = { k1 = "v1", k2 = "v2" } 格式。支持带引号/点号的键。"""
         inner = line[len(prefix):-1].strip().strip("}")
         result: dict[str, Any] = {}
         if inner:
             import re as _re
-            for kv_match in _re.finditer(r'(\w+)\s*=\s*("[^"]*"|\'[^\']*\'|\S+)', inner):
-                k = kv_match.group(1)
-                v = unquote_value(kv_match.group(2))
+            # Match both quoted keys ("cwd_meta.git_branch") and bare keys (k1, k2)
+            for kv_match in _re.finditer(r'(?:"([^"]+)"|\'([^\']+)\'|(\w+))\s*=\s*("[^"]*"|\'[^\']*\'|\S+)', inner):
+                k = kv_match.group(1) or kv_match.group(2) or kv_match.group(3)
+                v = unquote_value(kv_match.group(4))
                 result[k] = v
         return result
     rules: list[dict[str, Any]] = []
@@ -464,11 +465,12 @@ def load_rules(
             import warnings
             warnings.warn(f"Failed to parse project rules from {path}: {e}")
 
-    # 无 user/project rules → inject开箱即用securitydefault
-    if not user_rules and not project_rules:
-        default_rules = _default_safe_rules()
-    else:
-        default_rules = []
+    # Always include default safe rules for basic usability, even when
+    # user or project rules exist. Custom rules are additive — they can
+    # override defaults by matching the same tool_id_pattern (blacklist > whitelist
+    # via priority chain in context_judge), but removing defaults entirely
+    # would make all standard tools greylist, breaking the out-of-box experience.
+    default_rules = _default_safe_rules()
 
     # v0.0.13: todo_list 是 zall 原生显示型tool (无副作用, §9.2.6),
     # default whitelist 且 **无条件**应用 (不论用户是否有自定义 rules.toml)。

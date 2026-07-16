@@ -145,7 +145,8 @@ class TestCmdModel:
         out = _FakeTTY()
         state["_input_fn"] = lambda _p: "1"
         cmd_model("", out, None, state)
-        assert state["model"] == "agnes-2.0-flash"
+        # First item in sorted list (by provider group 0, then by alias): agnes-1.5-flash
+        assert state["model"] == "agnes-1.5-flash"
 
     def test_picker_type_name(self) -> None:
         state: dict = {}
@@ -168,7 +169,8 @@ class TestCmdModel:
         state["_input_fn"] = lambda _p: "继续，"
         cmd_model("", out, None, state)
         assert state["model"] == "keep-me"  # 未改
-        assert "model name contains invalid characters" in out.getvalue()
+        # New smart mode: fuzzy search shows "no match" message instead of "invalid chars"
+        assert "no match" in out.getvalue() or "model name contains invalid characters" in out.getvalue()
 
     def test_picker_accepts_custom_alnum_model(self) -> None:
         """Happy path: picker input自定义model名 (字母数字) → accept (用户 api_base 支持)."""
@@ -371,7 +373,7 @@ class TestGoalConfirmUsesInputFn:
                     content="REPLY", stop_reason=StopReason.STOP,
                     usage={"prompt": 1, "completion": 1, "total": 2}))
 
-        monkeypatch.setattr(config_mod, "_build_adapter", lambda provider=None, model=None: _Ad(model=model))
+        monkeypatch.setattr(config_mod, "_build_adapter", lambda provider=None, model=None, **kwargs: _Ad(model=model))
         return calls
 
     def test_reject_does_not_call_model(self, monkeypatch: pytest.MonkeyPatch) -> None:

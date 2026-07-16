@@ -27,7 +27,7 @@ from typing import Protocol, runtime_checkable, Any
 
 from pydantic import BaseModel, ConfigDict
 
-from zall.core.model import Message, ModelAdapter, ToolChoice
+from zall.core.model import Message, ModelAdapter
 from zall._util.model_registry import get_window_size as _get_window_size
 
 
@@ -86,8 +86,9 @@ class CompactResult(BaseModel):
 # 粗略 token 估算: 每字符约 0.25 token (英文) / 0.6 token (中文)
 # 这是保守估算, 实际window由model决定, 我们只做水位预警。
 # v0.1.2: 使用语言感知加权, 而非fixed chars/token。
-_CHARS_PER_TOKEN_EN = 4.0    # 英文: ~4 chars/token
-_CHARS_PER_TOKEN_CJK = 1.6   # 中文/日文/韩文: ~1.6 chars/token (6/10 字节)
+# O9: 模型感知 — 不同模型的 tokenizer 效率不同, 通过 model_name 前缀调整。
+_CHARS_PER_TOKEN_EN = 4.0    # 英文: ~4 chars/token (GPT-4 baseline)
+_CHARS_PER_TOKEN_CJK = 1.6   # 中文/日文/韩文: ~1.6 chars/token (GPT-4 baseline)
 _SAMPLE_SIZE = 1000           # 采样字符数用于估算语言比例
 _SAFE_WATERMARK = 0.75       # 水位 > 75% 触发预警压缩
 _CRITICAL_WATERMARK = 0.9    # 水位 > 90% 强制压缩
@@ -103,16 +104,41 @@ _CJK_RANGES: tuple[tuple[int, int], ...] = (
     (0x2F800, 0x2FA1F), # CJK Compatibility Ideographs Supplement
 )
 
+# O9: 模型感知 tokenizer 效率调整因子 (相对于 GPT-4 baseline)
+# 值越小 = 同样的字符数占用更多 token
+_MODEL_TOKEN_EFFICIENCY: dict[str, float] = {
+    "agnes-": 0.65,       # DeepSeek tokenizer: ~2.6 chars/token EN
+    "deepseek": 0.65,      # DeepSeek tokenizer
+    "claude": 0.85,        # Claude: ~3.4 chars/token EN
+    "gemini": 0.75,        # Gemini: ~3.0 chars/token EN
+    "gpt-4": 1.0,          # GPT-4 baseline
+    "gpt-3.5": 1.0,        # GPT-3.5 same as GPT-4
+    "qwen": 0.70,          # Qwen tokenizer: ~2.8 chars/token
+    "glm": 0.75,           # GLM tokenizer
+    "llama": 0.80,         # Llama tokenizer: ~3.2 chars/token
+}
 
-def _estimate_chars_per_token(text: str) -> float:
-    """根据文本中 CJK 字符比例估算 chars/token 系数 (v0.1.2)。
 
-    采样 text 前 _SAMPLE_SIZE 字符, 统计 CJK 占比后加权计算。
-    纯英文 → 4.0, 纯中文 → 1.6, 混合 → 加权平均。
+def _get_model_efficiency(model_name: str) -> float:
+    """根据模型名前缀查找 tokenizer 效率因子, 未知模型返回 1.0 (GPT-4 baseline)。"""
+    name_lower = model_name.lower()
+    for prefix, factor in _MODEL_TOKEN_EFFICIENCY.items():
+        if name_lower.startswith(prefix):
+            return factor
+    return 1.0
+
+
+def _estimate_chars_per_token(text: str, model_name: str = "") -> float:
+    """根据文本中 CJK 字符比例和模型类型估算 chars/token 系数 (v0.1.2, O9)。
+
+    采样 text 前 _SAMPLE_SIZE 字符, 统计 CJK 占比后加权计算,
+    再乘以模型 tokenizer 效率因子。
+    纯英文 GPT-4 → 4.0, 纯中文 GPT-4 → 1.6,
+    DeepSeek 纯英文 → 4.0×0.65≈2.6, DeepSeek 纯中文 → 1.6×0.65≈1.0。
     """
     sample = text[:_SAMPLE_SIZE]
     if not sample:
-        return _CHARS_PER_TOKEN_EN
+        return _CHARS_PER_TOKEN_EN * _get_model_efficiency(model_name)
     cjk_count = 0
     for ch in sample:
         cp = ord(ch)
@@ -121,8 +147,8 @@ def _estimate_chars_per_token(text: str) -> float:
                 cjk_count += 1
                 break
     ratio = cjk_count / len(sample)
-    # 加权: 英文占比用 EN, CJK 占比用 CJK
-    return (1 - ratio) * _CHARS_PER_TOKEN_EN + ratio * _CHARS_PER_TOKEN_CJK
+    efficiency = _get_model_efficiency(model_name)
+    return ((1 - ratio) * _CHARS_PER_TOKEN_EN + ratio * _CHARS_PER_TOKEN_CJK) * efficiency
 
 
 # 常见modelwindow大小 (token) 已迁移至 _util/model_meta.py (C1)
@@ -152,10 +178,11 @@ class WatermarkMonitor:
         self._cached_token_estimate: int = 0
         self._token_estimate_dirty: bool = True
 
-    def estimate_tokens(self, messages: list[Message]) -> int:
-        """粗略估算messagelist的 token 数 (v0.1.2: 语言感知加权)。
+    def estimate_tokens(self, messages: list[Message], model_name: str = "") -> int:
+        """粗略估算messagelist的 token 数 (v0.1.2: 语言感知加权, O9: 模型感知)。
 
-        收集全部消息文本, 抽样估算 CJK 比例后加权计算 chars/token。
+        收集全部消息文本, 抽样估算 CJK 比例后加权计算 chars/token,
+        再根据模型 tokenizer 效率调整。
         不考虑 tokenizer 差异, 只做水位预警参考。
 
         O1: cached with dirty flag — avoids O(n) re-scan when messages haven't changed.
@@ -177,8 +204,8 @@ class WatermarkMonitor:
                     total_chars += len(tc_str)
                     text_parts.append(tc_str)
         combined_text = "".join(text_parts)
-        # 语言感知的 chars/token 系数 (v0.1.2)
-        chars_per_token = _estimate_chars_per_token(combined_text)
+        # 语言感知 + 模型感知的 chars/token 系数 (O9)
+        chars_per_token = _estimate_chars_per_token(combined_text, model_name=model_name)
         # 每条message的 role + overhead 约 10 token
         overhead = len(messages) * 10
         self._cached_token_estimate = int(total_chars / chars_per_token) + overhead
@@ -206,7 +233,7 @@ class WatermarkMonitor:
             # 刚压缩过, 等水位稳定
             return None
 
-        tokens = self.estimate_tokens(messages)
+        tokens = self.estimate_tokens(messages, model_name=model_name)
         window = self.get_window_size(model_name)
         ratio = tokens / window if window > 0 else 0
 
@@ -226,7 +253,7 @@ class WatermarkMonitor:
 
     def get_watermark_report(self, messages: list[Message], model_name: str) -> dict[str, Any]:
         """return水位报告 (供 /doctor 或调试用)。"""
-        tokens = self.estimate_tokens(messages)
+        tokens = self.estimate_tokens(messages, model_name=model_name)
         window = self.get_window_size(model_name)
         ratio = tokens / window if window > 0 else 0
         return {

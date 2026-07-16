@@ -17,17 +17,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from zall.core.tool import Tool, ToolResult
-from zall._util import NOISE_DIRS
+from zall.core.tool import ToolResult
+from zall._util import NOISE_DIRS as _SKIP_DIRS
 from zall._util.path import resolve_path
 
 MAX_DEPTH = 3  # 最大深度 (prevents context pollution)
 MAX_ENTRIES = 500  # 最大条目数
 
-# skip这些directory (噪声, 不展示)
-_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
-              ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build",
-              ".egg-info"}
+# skip噪声目录 (使用 _util.py 中的 NOISE_DIRS, 避免重复维护)
 
 
 class ListDirTool:
@@ -127,7 +124,7 @@ class ListDirTool:
 
             raw_entries.sort(key=lambda x: (not x[0], x[1]))
             for is_dir, _, entry in raw_entries:
-                if is_dir and (entry.name in _SKIP_DIRS or entry.name in NOISE_DIRS):
+                if is_dir and (entry.name in _SKIP_DIRS):
                     continue
                 if entry_count >= MAX_ENTRIES:
                     truncated = True

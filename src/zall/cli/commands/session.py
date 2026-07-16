@@ -79,19 +79,20 @@ def cmd_replay(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
 
 @slash_command("/cost", description="show token usage", category=_CATEGORY_SESSION)
 def cmd_cost(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
-    u = (state or {}).get("usage", {"prompt": 0, "completion": 0})
-    total = u["prompt"] + u["completion"]
+    u = (state or {}).get("usage", {})
+    prompt_tokens = u.get("prompt", 0) if isinstance(u, dict) else 0
+    completion_tokens = u.get("completion", 0) if isinstance(u, dict) else 0
+    total = prompt_tokens + completion_tokens
     model = (state or {}).get("model") or ""
     price_in, price_out = _get_model_price(model)
-    cost_in = u["prompt"] * price_in / 1_000_000
-    cost_out = u["completion"] * price_out / 1_000_000
+    cost_in = prompt_tokens * price_in / 1_000_000
+    cost_out = completion_tokens * price_out / 1_000_000
     cost = cost_in + cost_out
 
     if hasattr(out, "isatty") and out.isatty():
         c = _shared_console(out)
         # v0.2.1: table layout for cost display
         from rich.table import Table
-        from rich.style import Style
         tbl = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
         tbl.add_column("", style="dim")
         tbl.add_column("", justify="right", style="yellow")
@@ -102,7 +103,7 @@ def cmd_cost(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] 
         tbl.add_row("output", f"{u['completion']:>8,}", "tokens", f"× ${price_out:.2f}/M → ${cost_out:.4f}")
         tbl.add_row("total", f"{total:>8,}", "tokens", f"[bold]${cost:.4f}[/]", style="bold")
         c.print()
-        c.print(f"  [cyan]cost[/]")
+        c.print("  [cyan]cost[/]")
         c.print(tbl)
     else:
         out.write(f"  cost · model: {model or '(default)'}\n")
@@ -174,7 +175,8 @@ def cmd_compact(arg: str, out: Any, loop: Any | None = None, state: dict[str, An
                 f" ({ratio:.1f}x compression), timeline preserved[/]")
         if result.summary:
             preview = result.summary[:120]
-            c.print(f"    [dim]summary: {preview}{'\u2026' if len(result.summary) > 120 else ''}[/]")
+            ellipsis = '\u2026'
+            c.print(f"    [dim]summary: {preview}{ellipsis if len(result.summary) > 120 else ''}[/]")
     else:
         out.write(f"  compacted {result.compacted_count} \u2192 {remaining} messages (timeline preserved)\n")
     return "handled"
@@ -213,11 +215,23 @@ def cmd_undo(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] 
                 last_tool_id = last_tool_end.payload.get("tool_id", "")
                 if last_tool_id in write_tools:
                     git_protect.rollback()
-                    out.write(f"  \u21b6 file changes reverted via git checkpoint\n")
+                    out.write("  \u21b6 file changes reverted via git checkpoint\n")
                 else:
                     out.write(f"  \u00b7 last tool ({last_tool_id}) is not a write \u2014 no git rollback needed\n")
         except Exception as e:
             out.write(f"  \u26a0 git rollback failed: {e} (continuing with message undo)\n")
+
+    # H2: 也尝试 checkpoint_manager 回退 (git 不可用时兜底)
+    checkpoint_mgr = getattr(loop, "checkpoint_manager", None)
+    if checkpoint_mgr is not None and hasattr(checkpoint_mgr, "restore_checkpoint"):
+        try:
+            if git_protect is None:
+                latest = checkpoint_mgr.get_latest_checkpoint()
+                if latest is not None:
+                    checkpoint_mgr.restore_checkpoint(latest.id)
+                    out.write("  \u21b6 files reverted via checkpoint snapshot\n")
+        except Exception as e:
+            out.write(f"  \u26a0 checkpoint restore failed: {e} (continuing with message undo)\n")
 
     msgs = list(getattr(loop, "messages", getattr(loop, "_messages", [])))
     last_tool_result_idx = -1
@@ -333,14 +347,12 @@ def cmd_remember(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
         # 在corresponds to section 下add, 如果该 key 已存在则replace
         lines = content.split("\n")
         in_section = False
-        section_found = False
         replaced = False
         new_lines = []
         for line in lines:
             stripped = line.strip()
             if stripped == section:
                 in_section = True
-                section_found = True
             elif stripped.startswith("## ") and in_section and stripped != section:
                 # 下一个 section, 追加到当前 section 末尾
                 if not replaced:

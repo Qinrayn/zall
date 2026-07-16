@@ -30,4 +30,4 @@ Before contributing, read `DESIGN.md` (design doc) and `IMPL.md` (implementation
 
 ## License
 
-Proprietary — research project.
+[MIT](../LICENSE) © 2025 zall contributors

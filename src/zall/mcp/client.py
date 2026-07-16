@@ -20,7 +20,7 @@ import json
 import subprocess
 import threading
 import time
-from typing import Any, cast
+from typing import Any
 
 from zall.core.tool import ToolResult
 

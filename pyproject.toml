@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zall"
-version = "0.2.0"
+version = "0.2.1"
 description = "zall — a falsifiable, reproducible coding agent CLI. Model-agnostic, chain-hashed, replayable."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,15 +43,18 @@ dev = [
 bs4 = [
     "beautifulsoup4>=4.0",
 ]
+images = [
+    "pillow>=10.0",
+]
 all = [
-    "zall[dev,bs4]",
+    "zall[dev,bs4,images]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/zall/zall"
-Repository = "https://github.com/zall/zall"
-Documentation = "https://github.com/zall/zall"
-Issues = "https://github.com/zall/zall/issues"
+Homepage = "https://github.com/qinrayn/zall"
+Repository = "https://github.com/qinrayn/zall"
+Documentation = "https://github.com/qinrayn/zall"
+Issues = "https://github.com/qinrayn/zall/issues"
 
 [project.scripts]
 zall = "zall.cli:main"

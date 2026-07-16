@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from zall._util.toml import unquote_value as _unquote
+
 _INPUT_PLACEHOLDER = "{input}"
 
 
@@ -181,9 +183,6 @@ def _emit(skills: list[Skill], d: dict[str, Any]) -> None:
     skill = _skill_from(d)
     if skill is not None:
         skills.append(skill)
-
-
-from zall._util.toml import unquote_value as _unquote
 
 
 def _skill_from(d: dict[str, Any]) -> Skill | None:

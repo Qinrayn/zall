@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from zall._util.toml import unquote_value as _unquote
+
 
 @dataclass(frozen=True)
 class MCPServerSpec:
@@ -102,13 +104,22 @@ def _parse_servers(text: str) -> list[MCPServerSpec]:
         if current is None:
             continue
 
+        # Strip inline comments (space before # outside quotes). Simple approach:
+        # find the first unquoted # and truncate. This is a best-effort parser
+        # for MCP config files — complex cases like # inside strings are rare.
+        _line_no_comment = line
+        _idx = line.find("  #")
+        if _idx == -1:
+            _idx = line.find(" #")
+        if _idx >= 0:
+            _line_no_comment = line[:_idx]
         # 单行 args 数组: args = ["a", "b"]
-        m = re.match(r'args\s*=\s*\[(.*)\]\s*$', line)
+        m = re.match(r'args\s*=\s*\[(.*)\]\s*$', _line_no_comment)
         if m:
             current.setdefault("args", []).extend(_split_inline_array(m.group(1)))
             continue
         # 单行 env 内联表: env = { "K" = "V", "K2" = "V2" }
-        m2 = re.match(r'env\s*=\s*\{(.*)\}\s*$', line)
+        m2 = re.match(r'env\s*=\s*\{(.*)\}\s*$', _line_no_comment)
         if m2:
             current.setdefault("env", {}).update(_parse_inline_env(m2.group(1)))
             continue
@@ -145,9 +156,6 @@ def _parse_servers(text: str) -> list[MCPServerSpec]:
     if current:
         servers.append(_spec_from(current))
     return servers
-
-
-from zall._util.toml import unquote_value as _unquote
 
 
 def _split_inline_array(s: str) -> list[str]:

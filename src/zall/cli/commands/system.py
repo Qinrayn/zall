@@ -14,7 +14,6 @@ import re
 import subprocess
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 from rich.panel import Panel
@@ -25,7 +24,7 @@ from zall.cli.commands._common import (
     _CATEGORY_NAV, _CATEGORY_TOOLS, _CATEGORY_CONTEXT, _CATEGORY_SESSION,
     slash_command,
     _print_about, _print_help,
-    _auto_step_loop, _check_network_basic, _cmd_init_simple,
+    _auto_step_loop, _cmd_init_simple,
 )
 from zall.cli.render import _shared_console
 from zall.core.verifiability import EventType

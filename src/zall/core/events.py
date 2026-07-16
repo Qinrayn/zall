@@ -41,6 +41,8 @@ class EventBus:
     """eventbus — 多 listener 订阅/取消/broadcast。
 
     O1 写时复制: listeners 以 tuple 存储, emit 时在锁外执行 handler。
+    O1b: 通配符 `*` handlers 在 register/注销时预展开到 _resolved,
+         避免每次 emit 时 tuple 拼接 `handlers + wildcard`。
     线程安全: on/off/clear 使用 RLock, emit 无锁 (只读 tuple)。
     """
 
@@ -49,52 +51,80 @@ class EventBus:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         # O1: 使用 tuple (不可变), emit 时直接读, 无需锁
-        # register/注销时复制整个list为新 tuple
         self._listeners: dict[str, tuple[EventListener, ...]] = {}
+        # O1b: 预展开缓存: key=kind → tuple(该 kind 的 handlers + 通配符 handlers)
+        # 在 on/off/clear 时失效, emit 时直接读取
+        self._resolved: dict[str, tuple[EventListener, ...]] = {}
+
+    def _rebuild_resolved(self, kind: str) -> None:
+        """重建指定 kind 的预展开缓存。"""
+        handlers = self._listeners.get(kind, ())
+        if kind != "*" and "*" in self._listeners:
+            wildcard = self._listeners["*"]
+            if wildcard:
+                self._resolved[kind] = handlers + wildcard
+                return
+        self._resolved[kind] = handlers
+
+    def _invalidate_all_resolved(self) -> None:
+        """使所有预展开缓存失效。"""
+        self._resolved.clear()
 
     def on(self, kind: str, handler: EventListener) -> None:
         """订阅event。相同 handler 重复register不会重复add。"""
         with self._lock:
             existing = self._listeners.get(kind, ())
             if handler not in existing:
-                # O1: copy-on-write, replace为新的 tuple
                 self._listeners[kind] = existing + (handler,)
+                # O1b: 使该 kind 和 '*' 的预展开缓存失效
+                self._resolved.pop(kind, None)
+                if kind != "*":
+                    self._resolved.pop("*", None)
+                else:
+                    # 注册通配符: 所有已有 kind 的缓存都失效
+                    for k in list(self._resolved.keys()):
+                        self._resolved.pop(k, None)
 
     def off(self, kind: str, handler: EventListener) -> None:
         """取消订阅。若 handler 未register则静默ignore。"""
         with self._lock:
             existing = self._listeners.get(kind, ())
             if handler in existing:
-                # O1: copy-on-write, remove handler
                 self._listeners[kind] = tuple(h for h in existing if h is not handler)
+                # O1b: 使缓存失效
+                self._resolved.pop(kind, None)
+                if kind != "*":
+                    self._resolved.pop("*", None)
 
     def clear(self, kind: str | None = None) -> None:
         """清除所有 listener。kind=None 时清除全部。"""
         with self._lock:
             if kind is None:
                 self._listeners.clear()
+                self._resolved.clear()
             else:
                 self._listeners.pop(kind, None)
+                self._resolved.pop(kind, None)
 
     def emit(self, kind: str, payload: dict[str, Any] | None = None) -> None:
         """broadcastevent给所有订阅者。
 
-        v2 fix: 在锁内获取 handlers 快照, 防止 dict rehash 竞态。
-        旧实现直接读 _listeners dict 无锁, 在 on() 并发插入触发 rehash 时
-        可能读到不一致状态。现在用锁获取 tuple 快照后释放, handler 执行
-        仍在锁外 (防 handler 中 on/off 死锁)。
+        O1b: 使用预展开缓存 _resolved, 避免 emit 时 tuple 拼接。
 
         通配符 `*` 监听所有事件类型。
         异常安全: 单个 listener 抛异常不影响其他 listener (IPR-0)。
         """
-        # v2 fix: 锁内获取snapshot, 锁外execute handler
-        with self._lock:
-            handlers = self._listeners.get(kind, ())
-            if kind != "*":
-                wildcard = self._listeners.get("*", ())
-                if wildcard:
-                    handlers = handlers + wildcard
-            # tuple 是不可变的, snapshot后释放锁是security的
+        # O1b: 从预展开缓存读取 handlers (无锁, 只读 tuple)
+        handlers = self._resolved.get(kind) if self._resolved else None
+        if handlers is None:
+            # 缓存未命中 → 锁内构建
+            with self._lock:
+                handlers = self._listeners.get(kind, ())
+                if kind != "*":
+                    wildcard = self._listeners.get("*", ())
+                    if wildcard:
+                        handlers = handlers + wildcard
+                self._resolved[kind] = handlers
 
         if not handlers:
             return
@@ -103,7 +133,6 @@ class EventBus:
             try:
                 handler(kind, payload)
             except Exception:
-                # IPR-0: 呈现层故障不得影响语义
                 pass
 
     @property

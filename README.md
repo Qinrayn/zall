@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.2.0-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
-    <img alt="zall" src="https://img.shields.io/badge/zall-v0.2.0-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.2.1-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+    <img alt="zall" src="https://img.shields.io/badge/zall-v0.2.1-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
   </picture>
 </p>
 
@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-≥3.10-blue" alt="Python ≥3.10"></a>
-  <a href="#"><img src="https://img.shields.io/badge/tests-840_passing-brightgreen" alt="840 tests passing"></a>
+  <a href="https://github.com/qinrayn/zall/actions/workflows/test.yml"><img src="https://github.com/qinrayn/zall/actions/workflows/test.yml/badge.svg" alt="CI"></a>
   <a href="#"><img src="https://img.shields.io/badge/status-alpha-yellow" alt="Alpha status"></a>
   <br>
   <a href="#architecture">Architecture</a> •

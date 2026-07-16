@@ -24,10 +24,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from zall.core.accountability import Judge, JudgeVerdict
+from zall.core.accountability import JudgeVerdict
 from zall.core.context import Context
 from zall.core.goal import (
-    AcceptanceContract, GoalStatement, GoalTriple, GoalType, TerminationCriterion, TerminationState,
+    AcceptanceContract, GoalStatement, GoalTriple, GoalType, TerminationState,
 )
 from zall.core.loop import AgentLoop, RunEgress
 from zall.core.model import (
@@ -35,7 +35,7 @@ from zall.core.model import (
 )
 from zall.core.safety import RuleSet, SafeLevel
 from zall.core.tool import Tool, ToolRegistry, ToolResult
-from zall.core.gate import UserResponder, UserResponse, UserResponseType
+from zall.core.gate import UserResponse, UserResponseType
 from zall.core.action import Action
 
 

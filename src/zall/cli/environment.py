@@ -23,6 +23,7 @@ from typing import Any
 from zall.core.context import Context
 from zall.mcp.tool import MCPTool
 
+import os as _os
 
 # ──────────────────────────────────────────────────────────────────────────
 # CwdMeta
@@ -40,24 +41,40 @@ class CwdMeta:
 
     @staticmethod
     def _get_git_meta() -> tuple[str | None, str | None]:
-        """P4: merge两个 git 子process为单次调用, 减少 ~100-400ms 启动时间。"""
-        try:
-            r = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=3,
-            )
-            branch = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            branch = None
+        """P4: 并行执行两个 git 子process, 减少 ~100-400ms 启动时间。
 
-        try:
-            r = subprocess.run(
-                ["git", "config", "--get", "remote.origin.url"],
-                capture_output=True, text=True, timeout=3,
-            )
-            remote = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            remote = None
+        O9: 使用 ThreadPoolExecutor 并行执行 git rev-parse 和 git config,
+        替代原来的顺序执行 (总耗时=两命令之和)。
+        """
+        branch: str | None = None
+        remote: str | None = None
+
+        def _get_branch() -> str | None:
+            try:
+                r = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                return None
+
+        def _get_remote() -> str | None:
+            try:
+                r = subprocess.run(
+                    ["git", "config", "--get", "remote.origin.url"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                return None
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut_branch = executor.submit(_get_branch)
+            fut_remote = executor.submit(_get_remote)
+            branch = fut_branch.result()
+            remote = fut_remote.result()
 
         return branch, remote
 
@@ -140,8 +157,9 @@ def _detect_runtime_tools() -> list[str]:
                 all_tasks.append((label, cmd))
 
     valid_cmds: set[str] = set()
-    if len(all_tasks) > 1:
-        with ThreadPoolExecutor(max_workers=len(all_tasks)) as executor:
+    # O9: 任务数 ≤ 3 时同步执行, 避免 ThreadPoolExecutor 的 ~30ms 启动开销
+    if len(all_tasks) > 3:
+        with ThreadPoolExecutor(max_workers=min(len(all_tasks), 8)) as executor:
             fut_map = {executor.submit(_validate_runtime_cmd, cmd): (label, cmd)
                        for label, cmd in all_tasks}
             for fut in as_completed(fut_map):
@@ -285,7 +303,6 @@ def build_repo_map(cwd: str, max_depth: int = 3) -> str:
 
     Limits: max 50 files, 5000 characters, cached by mtime.
     """
-    from fnmatch import fnmatch
     _SKIP_DIRS = frozenset({
         ".git", ".zall", ".zcode", "venv", ".venv", "node_modules",
         "__pycache__", ".tox", "dist", "build", ".egg-info",
@@ -326,7 +343,6 @@ def build_repo_map(cwd: str, max_depth: int = 3) -> str:
                 file_count += 1
                 if file_count > 50:
                     break
-                rel_file = f"{rel_dir}/{fn}" if rel_dir else fn
                 symbols = _extract_symbols(Path(root) / fn, ext)
                 if symbols:
                     syms_joined = ", ".join(symbols[:5])
@@ -429,14 +445,160 @@ def _extract_symbols(filepath: Path, ext: str) -> list[str]:
     return symbols[:10]
 
 
-import os as _os
 os_walk = _os.walk
 os_sep = _os.sep
+
+
+class PromptBuilder:
+    """Prompt 构建器 — 每个 section 一个 method, 支持链式调用。
+
+    Usage:
+        body = (PromptBuilder(context)
+                .add_env()
+                .add_plan_mode(plan_mode)
+                .add_project_memory()
+                .add_repo_map(enable=True)
+                .add_mcp_tools(mcp_tools)
+                .add_skills(skills)
+                .add_session_memory()
+                .build())
+    """
+
+    def __init__(self, context: Context) -> None:
+        self._context = context
+        self._parts: list[str] = []
+
+    def add_env(self) -> PromptBuilder:
+        """Environment info section."""
+        cwd = self._context.cwd_meta
+        env_lines = ["", "ENVIRONMENT (you are running here):"]
+        env_lines.append("  agent: zall - model-agnostic coding agent")
+        env_lines.append(f"  cwd: {cwd.cwd_path}")
+        if cwd.git_branch:
+            env_lines.append(f"  git branch: {cwd.git_branch}")
+        if cwd.git_remote:
+            env_lines.append(f"  git remote: {cwd.git_remote}")
+        env_lines.append(f"  platform: {sys.platform}")
+        env_lines.extend(_detect_runtime_tools())
+        if sys.platform == "win32":
+            env_lines.append(
+                "  NOTE: You are on Windows. The bash tool executes via PowerShell, so you can "
+                "use bash-compatible syntax: `mkdir -p a/b/c`, single-quoted strings, `&&`, `|`, "
+                "`echo`, `cat`, `ls` (as aliases). PowerShell cmdlets also work. "
+                "Use the python/python-path shown above to run scripts."
+            )
+        env_lines.append(
+            "  You share context across turns in this REPL. Use tools to inspect "
+            "the environment; do not guess paths."
+        )
+        self._parts.append(_SYSTEM_PROMPT_BASE + "\n".join(env_lines))
+        return self
+
+    def add_plan_mode(self, enabled: bool) -> PromptBuilder:
+        """Plan mode section (analysis-first, read-only)."""
+        if enabled:
+            self._parts.append(
+                "\n\nPLAN MODE (analysis-first, read-only):\n"
+                "  You are in PLAN mode. Your goal is to ANALYZE and DESIGN, not to execute.\n"
+                "  Follow this structured thinking process:\n"
+                "    1. UNDERSTAND: Explore the codebase to understand the current state.\n"
+                "    2. ANALYZE: Identify what needs to change and why.\n"
+                "    3. DESIGN: Propose a concrete plan with specific file changes.\n"
+                "  RULES for PLAN mode:\n"
+                "    - Use read-only tools (read_file, list_dir, grep, glob) freely.\n"
+                "    - Do NOT create, modify, or delete files - that's for execution mode.\n"
+                "    - Do NOT run destructive bash commands (no write operations).\n"
+                "    - Output your analysis clearly: structure it as Understanding -> "
+                "Analysis -> Proposed Changes.\n"
+                "    - Be specific: mention exact file paths, line numbers, and code "
+                "patterns you would change.\n"
+                "  The user will review your plan before authorizing execution."
+            )
+        return self
+
+    def add_project_memory(self) -> PromptBuilder:
+        """Project memory from .zall/AGENTS.md."""
+        agents_md = read_agents_md(self._context.cwd_meta.cwd_path)
+        if agents_md:
+            self._parts.append(
+                "\n\nPROJECT MEMORY (from .zall/AGENTS.md - project conventions, read-only):\n"
+                + agents_md
+            )
+        return self
+
+    def add_repo_map(self, enable: bool = True) -> PromptBuilder:
+        """Auto-generated repo map."""
+        if enable:
+            repo_map = build_repo_map(self._context.cwd_meta.cwd_path)
+            if repo_map:
+                self._parts.append("\n\n" + repo_map)
+        return self
+
+    def add_mcp_tools(self, mcp_tools: tuple[MCPTool, ...] = ()) -> PromptBuilder:
+        """MCP tools listing."""
+        if mcp_tools:
+            by_server: dict[str, list[str]] = {}
+            for t in mcp_tools:
+                by_server.setdefault(t.server_name, []).append(t.tool_id)
+            mcp_lines = [
+                "",
+                "MCP tools (registered from connected MCP servers; require confirmation "
+                "by default - they are NOT auto-approved):",
+            ]
+            for srv, ids in by_server.items():
+                mcp_lines.append(f"  - {srv}: {', '.join(ids)}")
+            self._parts.append("\n" + "\n".join(mcp_lines))
+        return self
+
+    def add_skills(self, skills: list[Any] | None = None) -> PromptBuilder:
+        """Skills listing (progressive disclosure)."""
+        if skills:
+            skill_lines = ["", "Available skills (use /skill <name> to run one):"]
+            for s in skills:
+                desc = getattr(s, "description", "") or ""
+                skill_lines.append(f"  - {s.name}: {desc}")
+            self._parts.append("\n" + "\n".join(skill_lines))
+        return self
+
+    def add_session_memory(self) -> PromptBuilder:
+        """Cross-session memory injection."""
+        try:
+            from zall.core.memory import get_session_memory
+            memory_ctx = get_session_memory().build_context()
+            if memory_ctx:
+                self._parts.append("\n" + memory_ctx)
+        except Exception:
+            pass  # Memory loading failure does not block
+        return self
+
+    def build(self) -> str:
+        return "".join(self._parts)
+
+
+# O9: build_system_prompt 缓存 — 参数不变时复用上次结果
+_SYSTEM_PROMPT_CACHE: dict[str, tuple[str, str]] = {}
+"""key=(cwd, plan_mode, enable_repo_map, mcp_tool_ids, skill_names) → (built_prompt, _)"""
+
+
+def _prompt_cache_key(
+    context: Context, mcp_tools: tuple[MCPTool, ...], plan_mode: bool,
+    enable_repo_map: bool, skills: list[Any] | None,
+) -> str:
+    """构造缓存 key。"""
+    parts = [
+        context.cwd_meta.cwd_path if hasattr(context, 'cwd_meta') else '',
+        str(plan_mode),
+        str(enable_repo_map),
+        str(mcp_tools),
+        str([s.name for s in skills]) if skills else '',
+    ]
+    return "|".join(parts)
 
 
 def build_system_prompt(
     context: Context, mcp_tools: tuple[MCPTool, ...] = (),
     *, enable_repo_map: bool = True, plan_mode: bool = False,
+    skills: list[Any] | None = None,
 ) -> str:
     """Build the system prompt: base rules + runtime env + project memory + repo map.
 
@@ -447,84 +609,34 @@ def build_system_prompt(
     mcp_tools: registered MCP tools, appended to the tool list.
     enable_repo_map: whether to inject repo map (default True).
     plan_mode: whether to inject analysis-first plan mode prompt.
+    skills: available skills for progressive disclosure (name + description only).
+
+    O9: 缓存结果 (参数不变时复用), 避免 REPL 每轮都重建 system prompt。
     """
-    env_lines = ["", "ENVIRONMENT (you are running here):"]
-    env_lines.append(f"  agent: zall - model-agnostic coding agent")
-    env_lines.append(f"  cwd: {context.cwd_meta.cwd_path}")
-    if context.cwd_meta.git_branch:
-        env_lines.append(f"  git branch: {context.cwd_meta.git_branch}")
-    if context.cwd_meta.git_remote:
-        env_lines.append(f"  git remote: {context.cwd_meta.git_remote}")
-    env_lines.append(f"  platform: {sys.platform}")
-    env_lines.extend(_detect_runtime_tools())
-    if sys.platform == "win32":
-        env_lines.append(
-            "  NOTE: You are on Windows. The bash tool executes via PowerShell, so you can "
-            "use bash-compatible syntax: `mkdir -p a/b/c`, single-quoted strings, `&&`, `|`, "
-            "`echo`, `cat`, `ls` (as aliases). PowerShell cmdlets also work. "
-            "Use the python/python-path shown above to run scripts."
-        )
-    env_lines.append(
-        "  You share context across turns in this REPL. Use tools to inspect "
-        "the environment; do not guess paths."
-    )
-    body = _SYSTEM_PROMPT_BASE + "\n".join(env_lines)
+    global _SYSTEM_PROMPT_CACHE
+    cache_key = _prompt_cache_key(context, mcp_tools, plan_mode, enable_repo_map, skills)
+    cached = _SYSTEM_PROMPT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached[0]
 
-    # Plan mode: analysis-first, read-only
-    if plan_mode:
-        body += (
-            "\n\nPLAN MODE (analysis-first, read-only):\n"
-            "  You are in PLAN mode. Your goal is to ANALYZE and DESIGN, not to execute.\n"
-            "  Follow this structured thinking process:\n"
-            "    1. UNDERSTAND: Explore the codebase to understand the current state.\n"
-            "    2. ANALYZE: Identify what needs to change and why.\n"
-            "    3. DESIGN: Propose a concrete plan with specific file changes.\n"
-            "  RULES for PLAN mode:\n"
-            "    - Use read-only tools (read_file, list_dir, grep, glob) freely.\n"
-            "    - Do NOT create, modify, or delete files - that's for execution mode.\n"
-            "    - Do NOT run destructive bash commands (no write operations).\n"
-            "    - Output your analysis clearly: structure it as Understanding -> "
-            "Analysis -> Proposed Changes.\n"
-            "    - Be specific: mention exact file paths, line numbers, and code "
-            "patterns you would change.\n"
-            "  The user will review your plan before authorizing execution."
-        )
+    result = (PromptBuilder(context)
+              .add_env()
+              .add_plan_mode(plan_mode)
+              .add_project_memory()
+              .add_repo_map(enable=enable_repo_map)
+              .add_mcp_tools(mcp_tools)
+              .add_skills(skills)
+              .add_session_memory()
+              .build())
 
-    # Project memory: read-only injection into system prompt (silent on failure)
-    agents_md = read_agents_md(context.cwd_meta.cwd_path)
-    if agents_md:
-        body += (
-            "\n\nPROJECT MEMORY (from .zall/AGENTS.md - project conventions, read-only):\n"
-            + agents_md
-        )
+    # O9: 缓存, 上限 8 条防内存泄漏
+    _SYSTEM_PROMPT_CACHE[cache_key] = (result, "")
+    if len(_SYSTEM_PROMPT_CACHE) > 8:
+        _SYSTEM_PROMPT_CACHE.clear()
+    return result
 
-    # Repo map (auto-generated, default enabled)
-    if enable_repo_map:
-        repo_map = build_repo_map(context.cwd_meta.cwd_path)
-        if repo_map:
-            body += "\n\n" + repo_map
 
-    # MCP tool list
-    if mcp_tools:
-        by_server: dict[str, list[str]] = {}
-        for t in mcp_tools:
-            by_server.setdefault(t.server_name, []).append(t.tool_id)
-        mcp_lines = [
-            "",
-            "MCP tools (registered from connected MCP servers; require confirmation "
-            "by default - they are NOT auto-approved):",
-        ]
-        for srv, ids in by_server.items():
-            mcp_lines.append(f"  - {srv}: {', '.join(ids)}")
-        body += "\n" + "\n".join(mcp_lines)
-
-    # Session memory injection (cross-session, user-authorized)
-    try:
-        from zall.core.memory import get_session_memory
-        memory_ctx = get_session_memory().build_context()
-        if memory_ctx:
-            body += "\n" + memory_ctx
-    except Exception:
-        pass  # Memory loading failure does not block
-
-    return body
+def clear_system_prompt_cache() -> None:
+    """清除系统 prompt 缓存 (供测试隔离)。"""
+    global _SYSTEM_PROMPT_CACHE
+    _SYSTEM_PROMPT_CACHE.clear()

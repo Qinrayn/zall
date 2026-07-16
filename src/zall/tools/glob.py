@@ -16,11 +16,10 @@ IPR constraints:
 from __future__ import annotations
 
 import itertools
-from pathlib import Path
 from typing import Any
 
-from zall.core.tool import Tool, ToolResult
-from zall._util import NOISE_DIRS, is_noise
+from zall.core.tool import ToolResult
+from zall._util import is_noise
 from zall._util.path import resolve_path
 
 MAX_RESULTS = 500  # 最大结果数 (prevents context pollution)

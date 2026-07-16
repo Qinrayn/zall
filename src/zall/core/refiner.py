@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
 
 from zall.core.accountability import base_judge
 from zall.core.goal import (
@@ -39,7 +38,6 @@ from zall.core.goal import (
     GoalTriple,
     GoalType,
     RefinedGoal,
-    TerminationCriterion,
     TerminationState,
 )
 

@@ -22,13 +22,15 @@ IPR constraints:
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import hashlib
 import json
 import logging
-import os
 import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +40,6 @@ def _log_once(msg: str) -> None:
     if msg not in _log_spoken:
         _log_spoken.add(msg)
         logger.warning("checkpoint: %s", msg)
-from pathlib import Path
-from typing import Any
 
 
 # .zall 下 checkpoint 存储directory名

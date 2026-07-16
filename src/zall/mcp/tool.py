@@ -22,7 +22,7 @@ import hashlib
 import re
 from typing import Any
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 from zall.mcp.client import MCPClient
 
 _NAME_RE = re.compile(r"[^A-Za-z0-9_-]")

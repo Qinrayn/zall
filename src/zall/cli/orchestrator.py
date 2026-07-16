@@ -28,7 +28,7 @@ from zall.cli import config as _cli_config
 from zall.cli.judge import SystemJudge, UndecidableJudge
 from zall.cli.render import CliRenderer, render_goal_card, clear_console_cache
 from zall.cli.responder import CliUserResponder
-from zall.cli.environment import build_system_prompt, CwdMeta, get_cached_cwd_meta
+from zall.cli.environment import build_system_prompt, CwdMeta
 from zall.core.context import Context
 from zall.core.goal import (
     AcceptanceContract,
@@ -38,10 +38,8 @@ from zall.core.goal import (
     RefinedGoal,
     TerminationState,
 )
-from zall.core.loop import AgentLoop, RunEgress, LoopEvent
+from zall.core.loop import AgentLoop, RunEgress
 from zall.core.refiner import GoalRefiner
-from zall.core.model import Message
-from zall.core.safety import RuleSet
 from zall.core.tool import ToolRegistry, ToolResult
 from zall.core.compactor import ModelCompactor
 from zall.core.checkpoint import CheckpointManager
@@ -62,7 +60,6 @@ from zall.tools.read_image import ReadImageTool
 from zall.tools.search import SearchTool
 from zall.mcp.config import load_mcp_config, MCPServerSpec
 from zall.mcp.tool import MCPTool
-from zall.skills import Skill, find_skill, load_skills
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -71,8 +68,14 @@ from zall.skills import Skill, find_skill, load_skills
 
 
 def build_adapter(provider: str, model: str | None = None) -> Any:
-    """construct adapter (委托给 cli.config._build_adapter, 统一patch点)。"""
-    return _cli_config._build_adapter(provider, model=model)
+    """construct adapter (委托给 cli.config._build_adapter, 统一patch点)。
+
+    O9: 从配置加载 timeout 并传递给 adapter。
+    """
+    from zall.safety.config import load_config as _load_cfg
+    cfg = _load_cfg()
+    timeout = cfg.get("timeout", 120.0)
+    return _cli_config._build_adapter(provider, model=model, timeout=timeout)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -141,6 +144,16 @@ def confirm_goal(
 # Item A: 惰性construct — tool在首次 build_tools() 调用时instance化,
 # 不在模块导入时创建 (SpawnSubagentTool.__init__ 会启动 5 thread池)。
 _NATIVE_TOOLS_CACHE: tuple[Any, ...] | None = None
+
+
+def clear_native_tools_cache() -> None:
+    """清除 native tools 缓存 (供测试隔离用)。
+
+    O9: 同时清除 _LIST_SUBAGENTS_TOOL, 避免测试间实例泄漏。
+    """
+    global _NATIVE_TOOLS_CACHE, _LIST_SUBAGENTS_TOOL
+    _NATIVE_TOOLS_CACHE = None
+    _LIST_SUBAGENTS_TOOL = None
 
 
 def _get_native_tools() -> tuple[Any, ...]:
@@ -362,7 +375,9 @@ def run(
     # 6. responder
     is_interactive = out is None and sys.stdin.isatty()
     _resp_stream = out_stream
-    _print_fn = lambda s: (_resp_stream.write(s + "\n"), _resp_stream.flush())[-1] or None
+    def _print_fn(s: str) -> None:
+        _resp_stream.write(s + "\n")
+        _resp_stream.flush()
     responder = CliUserResponder(
         yes=yes, is_tty=is_interactive,
         print_fn=_print_fn,

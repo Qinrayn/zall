@@ -34,22 +34,23 @@ IPR constraints:
 from __future__ import annotations
 
 import copy
-import json
+import fnmatch
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict
 
 from typing import Protocol, runtime_checkable
 
 from zall.core.action import Action
-from zall.core.accountability import AccountabilityResult, Judge, JudgeVerdict
+from zall.core.accountability import AccountabilityResult, Judge
 from zall.core.context import Context
 from zall.core.events import EventBus
+from zall.core.extension import ExtensionRegistry
 from zall.core.gate import (
     ConfirmGate,
     GateResult,
@@ -58,7 +59,7 @@ from zall.core.gate import (
     UserResponse,
     UserResponseType,
 )
-from zall.core.goal import GoalDowngrade, GoalTriple, GoalType, TerminationState
+from zall.core.goal import GoalTriple, TerminationState
 from zall.core.model import (
     Message,
     ModelAdapter,
@@ -247,23 +248,65 @@ class ContextLimitExceeded(Exception):
 
 @dataclass
 class AgentConfig:
-    """Optional AgentLoop configuration (all optional params beyond 6 required params).
+    """AgentLoop 配置 (所有可选参数)。
 
     Usage:
         config = AgentConfig(stream=True, max_steps=100, compactor=ModelCompactor())
         loop = AgentLoop(model, tools, rules, goal, context, responder, config=config)
+
+    O9: AgentConfig 是 AgentLoop 可选参数的唯一配置入口。
+    旧式离散参数仍保留于 __init__ 签名供向后兼容, 但内部统一转为 AgentConfig。
     """
     judge: Judge | None = None
     observer: Callable[[LoopEvent], None] | None = None
     event_bus: EventBus | None = None
     max_steps: int | None = None
-    stream: bool = False
+    stream: bool | None = None
     git_protect: _GitProtectProtocol | None = None
     checkpoint_mgr: CheckpointManager | None = None
-    allow_downgrade: bool = True
-    plan_mode: bool = False
+    allow_downgrade: bool | None = None
+    plan_mode: bool | None = None
     compactor: Compactor | None = None
     anchor: TrustAnchor | None = None
+    ext_registry: ExtensionRegistry | None = None
+
+    # ── 从离散参数构造 AgentConfig (O9: 统一化入口) ──
+
+    @classmethod
+    def from_kwargs(
+        cls,
+        judge: Judge | None = None,
+        observer: Callable[[LoopEvent], None] | None = None,
+        event_bus: EventBus | None = None,
+        max_steps: int | None = None,
+        stream: bool | None = None,
+        git_protect: _GitProtectProtocol | None = None,
+        checkpoint_mgr: CheckpointManager | None = None,
+        allow_downgrade: bool | None = None,
+        plan_mode: bool | None = None,
+        compactor: Compactor | None = None,
+        anchor: TrustAnchor | None = None,
+        ext_registry: ExtensionRegistry | None = None,
+    ) -> AgentConfig:
+        """从离散参数构造 AgentConfig (O9: 统一化入口)。
+
+        stream/allow_downgrade/plan_mode 的 bool 默认值在 AgentLoop 中定义,
+        AgentConfig 用 None 表示"未设置"。
+        """
+        return cls(
+            judge=judge,
+            observer=observer,
+            event_bus=event_bus,
+            max_steps=max_steps,
+            stream=stream,
+            git_protect=git_protect,
+            checkpoint_mgr=checkpoint_mgr,
+            allow_downgrade=allow_downgrade,
+            plan_mode=plan_mode,
+            compactor=compactor,
+            anchor=anchor,
+            ext_registry=ext_registry,
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -285,9 +328,13 @@ class AgentLoop:
             goal=goal_triple,
             context=context,
             user_responder=responder,
-            judge=judge,
+            config=AgentConfig(judge=judge),
         )
         egress = loop.run()
+
+    O9: 可选参数统一通过 `config: AgentConfig` 传入。
+    旧式离散参数 (judge, observer, stream, ...) 保留签名供向后兼容,
+    但建议新代码使用 AgentConfig。
 
     Stopping conditions:
       stop_reason=STOP -> check Goal termination -> return RunEgress
@@ -304,64 +351,68 @@ class AgentLoop:
         goal: GoalTriple,
         context: Context,
         user_responder: UserResponder,
+        # ── 可选参数: 建议用 config: AgentConfig ──
+        config: AgentConfig | None = None,
+        # ── 旧式离散参数 (向后兼容, 内部归一化为 AgentConfig) ──
         judge: Judge | None = None,
         observer: Callable[[LoopEvent], None] | None = None,
         event_bus: EventBus | None = None,
         max_steps: int | None = None,
-        stream: bool = False,
+        stream: bool | None = None,
         git_protect: _GitProtectProtocol | None = None,
         checkpoint_mgr: CheckpointManager | None = None,
-        allow_downgrade: bool = True,
-        plan_mode: bool = False,
+        allow_downgrade: bool | None = None,
+        plan_mode: bool | None = None,
         compactor: Compactor | None = None,
         anchor: TrustAnchor | None = None,
-        config: AgentConfig | None = None,  # R7: 可选配置对象, 优先于离散参数
+        ext_registry: ExtensionRegistry | None = None,
     ) -> None:
-        # R7: if config object is provided, use config values to override discrete parameters (None values preserve original)
-        if config is not None:
-            judge = config.judge if config.judge is not None else judge
-            observer = config.observer if config.observer is not None else observer
-            event_bus = config.event_bus if config.event_bus is not None else event_bus
-            max_steps = config.max_steps if config.max_steps is not None else max_steps
-            stream = config.stream if config.stream is not False else stream
-            git_protect = config.git_protect if config.git_protect is not None else git_protect
-            checkpoint_mgr = config.checkpoint_mgr if config.checkpoint_mgr is not None else checkpoint_mgr
-            allow_downgrade = config.allow_downgrade if config.allow_downgrade is not False else allow_downgrade
-            plan_mode = config.plan_mode if config.plan_mode is not False else plan_mode
-            compactor = config.compactor if config.compactor is not None else compactor
-            anchor = config.anchor if config.anchor is not None else anchor
+        # O9: 统一归一化为 AgentConfig
+        if config is None:
+            config = AgentConfig.from_kwargs(
+                judge=judge, observer=observer, event_bus=event_bus,
+                max_steps=max_steps, stream=stream,
+                git_protect=git_protect, checkpoint_mgr=checkpoint_mgr,
+                allow_downgrade=allow_downgrade, plan_mode=plan_mode,
+                compactor=compactor, anchor=anchor, ext_registry=ext_registry,
+            )
+        # stream/allow_downgrade/plan_mode 的最终默认值
+        _stream = config.stream if config.stream is not None else False
+        _allow_downgrade = config.allow_downgrade if config.allow_downgrade is not None else True
+        _plan_mode = config.plan_mode if config.plan_mode is not None else False
+
         self._model = model
         self._tools = tools
         self._rules = rules
         self._goal = goal
         self._context = context
         self._user_responder = user_responder
-        self._judge = judge
+        self._judge = config.judge
         # EventBus takes priority over observer (v0.1.2)
-        self._event_bus = event_bus or EventBus()
-        self._observer = observer
-        if observer is not None:
+        self._event_bus = config.event_bus or EventBus()
+        self._observer = config.observer
+        if config.observer is not None:
+            _observer = config.observer
             # Legacy observer adapter via EventBus (avoids circular import in events.py)
             def _legacy_adapter(kind: str, payload: dict[str, Any]) -> None:
-                observer(LoopEvent(kind=kind, step=payload.get("step", 0), payload=payload))
+                _observer(LoopEvent(kind=kind, step=payload.get("step", 0), payload=payload))
             self._event_bus.on("*", _legacy_adapter)
-        self._max_steps = max_steps if max_steps is not None and max_steps >= 0 else MAX_STEPS
+        self._max_steps = config.max_steps if config.max_steps is not None and config.max_steps >= 0 else MAX_STEPS
         # stream: True and adapter supports complete_stream -> use streaming (same semantics, broadcasts tokens)
-        self._stream = stream and hasattr(model, "complete_stream")
+        self._stream = _stream and hasattr(model, "complete_stream")
         # GitProtect safety net: injected by CLI layer, core does not import tools/
-        self._git_protect = git_protect
+        self._git_protect = config.git_protect
         # CheckpointManager: filesystem snapshot safety net
-        self._checkpoint_mgr = checkpoint_mgr
+        self._checkpoint_mgr = config.checkpoint_mgr
         # plan_mode (§9.2.5 read-only posture) — write tools force greylist requiring confirmation.
-        # Default False; if not passed, behavior is unchanged (fully compatible with all tests)
-        self._plan_mode = plan_mode
+        self._plan_mode = _plan_mode
         # §9.2.9 reactive auto-compact strategy (optional injection).
-        # Default None -> LENGTH behavior is identical to the original (direct termination),
-        # all existing tests unaffected.
-        # After injection, LENGTH triggers compaction retry for long session support.
-        self._compactor = compactor
+        self._compactor = config.compactor
         self._compaction_count = 0
-        self._anchor = anchor
+        self._anchor = config.anchor
+
+        # Extension registry (Pi-style lifecycle hooks)
+        self._ext_registry: ExtensionRegistry | None = config.ext_registry
 
         self._run_id = uuid4().hex
         self._recorder = RunRecorder(self._run_id)
@@ -370,6 +421,8 @@ class AgentLoop:
         self._tool_call_count = 0
         self._model_call_count = 0
         self._gate_decision_count = 0
+        # B9: SUSPENDED 计数器 — 首次给用户第二次机会, 二次才终止
+        self._suspended_count: int = 0
         # O3: cached tool schemas from ToolRegistry cache (avoids per-instance deepcopy).
         # Fallback to per-loop deepcopy when tools is a plain iterable (test fixtures).
         if hasattr(self._tools, "schemas"):
@@ -386,7 +439,7 @@ class AgentLoop:
         self._cached_tracked_files: set[str] | None = None
 
         # §3.4 GoalDowngrade tracking
-        self._allow_downgrade = allow_downgrade
+        self._allow_downgrade = _allow_downgrade
         self._original_goal: GoalTriple | None = None
         """Original overly-broad Goal — retained after downgrade, never deleted (R4)"""
         self._candidate_goals: tuple[GoalTriple, ...] = ()
@@ -401,6 +454,11 @@ class AgentLoop:
         self._project_root: str = context.cwd_meta.cwd_path if hasattr(context, 'cwd_meta') else "."
         # O4: watermark check step gating (check every 3 steps, reducing high-frequency useless calls)
         self._watermark_check_counter: int = 0
+        # O4: 缓存 watermark_monitor 引用, 避免每步 getattr
+        self._wm: Any | None = (
+            getattr(self._compactor, "watermark_monitor", None)
+            if self._compactor is not None else None
+        )
 
     def _emit(self, event: LoopEvent) -> None:
         """Broadcast event to observer and EventBus (§6.1 presentation projection).
@@ -563,6 +621,15 @@ class AgentLoop:
             self._messages.append(Message(role="system", content=system_prompt))
         self._messages.append(Message.user(self._context.user_raw))
 
+        # Extension: on_agent_start
+        if self._ext_registry is not None:
+            self._ext_registry.fire(
+                "on_agent_start",
+                goal=self._goal,
+                model=self._model,
+                messages=list(self._messages),
+            )
+
         while True:
             result = self.step()
             if result.is_terminal:
@@ -571,11 +638,17 @@ class AgentLoop:
                 # M2: anchor run tail before returning
                 if self._anchor is not None:
                     self._recorder.anchor_to(self._anchor, int(time.time() * 1000))
+                # Extension: on_session_end
+                if self._ext_registry is not None:
+                    self._ext_registry.fire("on_session_end", egress=result.egress)
                 return result.egress
             if result.kind == "awaiting_input":
-                # taskpattern: model STOP → check Goal termination → return RunEgress
-                # (对话pattern不调 run(), 它调 step() 并在 awaiting_input 时等用户input)
-                return self._check_termination()
+                # task mode: model STOP → check Goal termination → return RunEgress
+                # (dialog mode does not call run(), it calls step() and waits on awaiting_input)
+                egress = self._check_termination()
+                if self._ext_registry is not None:
+                    self._ext_registry.fire("on_session_end", egress=egress)
+                return egress
             # tool_used → 继续循环
 
     def step(self) -> StepResult:
@@ -612,23 +685,23 @@ class AgentLoop:
             self._watermark_check_counter += 1
             _should_check = (
                 self._compactor is not None
+                and self._wm is not None
                 and len(self._messages) >= 20
                 and (self._watermark_check_counter <= 1
                      or self._watermark_check_counter % 3 == 0)
             )
             if _should_check:
-                wm = getattr(self._compactor, "watermark_monitor", None)
-                if wm is not None:
-                    wm_step = self._step_count
-                    watermark_action = wm.check_watermark(
-                        self._messages, self._model.model_name, wm_step
-                    )
-                    if watermark_action == "force":
-                        self._auto_compact(reason="watermark_force")
-                        wm.record_compaction(wm_step)
-                    elif watermark_action == "suggest":
-                        self._auto_compact(reason="watermark_suggest")
-                        wm.record_compaction(wm_step)
+                wm_step = self._step_count
+                assert self._wm is not None  # guarded by _should_check above
+                watermark_action = self._wm.check_watermark(
+                    self._messages, self._model.model_name, wm_step
+                )
+                if watermark_action == "force":
+                    if self._auto_compact(reason="watermark_force"):
+                        self._wm.record_compaction(wm_step)
+                elif watermark_action == "suggest":
+                    if self._auto_compact(reason="watermark_suggest"):
+                        self._wm.record_compaction(wm_step)
 
             # ── 1. 调model (首次: 暂不broadcast model_call 渲染, 防 nudge 双重显示)
             resp = self._call_model(emit_model_call=False)
@@ -763,20 +836,28 @@ class AgentLoop:
             )
 
     def finalize(self) -> RunEgress:
-        """对话pattern结束时调用: construct undecidable RunEgress (不存 session, 不走 judge)。
+        """Dialog mode end: construct undecidable RunEgress (no session save, no judge).
 
-        对话模式不判定 met/not_met (对话没有"完成"概念) → 诚实退让 undecidable。
+        Dialog mode does not judge met/not_met (dialog has no "completion" concept).
         """
-        return self._make_egress(TerminationState.UNDECIDABLE)
+        egress = self._make_egress(TerminationState.UNDECIDABLE)
+        # Extension: on_session_end
+        if self._ext_registry is not None:
+            self._ext_registry.fire("on_session_end", egress=egress)
+        return egress
 
     def add_user_message(self, content: str) -> None:
-        """对话pattern: 用户input作为新 user message 加入 messages。
+        """Dialog mode: user input appended as new user message.
 
-        这是用户显式回灌 (§4.3: 用户可显式回灌, 被审计)。
-        O1: 标记 token 估算缓存为脏。
+        Section 4.3: user explicitly re-injects context, audited.
+        O1: marks token estimation cache dirty.
         """
         self._messages.append(Message.user(content))
         self._mark_watermark_dirty()
+
+        # Extension: on_user_input
+        if self._ext_registry is not None:
+            self._ext_registry.fire("on_user_input", content=content)
 
     # O1: 标记 watermark token 估算cache为脏
     def _mark_watermark_dirty(self) -> None:
@@ -866,20 +947,6 @@ class AgentLoop:
             return  # 当前 GoalType 不适用降级
 
         # ── gate: ask用户是否acceptdowngrade
-        candidates_desc = json.dumps(
-            [
-                {"index": i, "goal_type": c.statement.goal_type.value,
-                 "description": c.statement.rewriting}
-                for i, c in enumerate(downgrade.candidates)
-            ],
-            ensure_ascii=False,
-            indent=2,
-        )
-
-        original_desc = (
-            f"原始意图 [{downgrade.original.statement.goal_type.value}]: "
-            f"{downgrade.original.statement.intent}"
-        )
 
         # construct一个假 action 用于gate交互 (downgrade是 Goal 层面，非tool层面)
         placeholder_action = Action(
@@ -1010,6 +1077,14 @@ class AgentLoop:
         """
         # O2: use cached tool schemas (avoid rebuilding every model call)
         tool_schemas: list[dict[str, Any]] = self._tool_schemas
+
+        # Extension: on_before_model
+        if self._ext_registry is not None:
+            self._ext_registry.fire(
+                "on_before_model",
+                messages=list(self._messages),
+                step=self._step_count,
+            )
 
         # §6.1 呈现层投影: 调model前broadcast model_call_start (让呈现层显示 spinner)
         # 纯 observer event, 不进 RunRecorder (start 不是auditevent, 完成才记)
@@ -1145,10 +1220,15 @@ class AgentLoop:
 
         提取自 _execute_tool_calls, 减少方法长度和嵌套深度。
 
+        B9 fix: _suspended_count 在入口重置, 确保计数器只针对
+        当前 tool_call 的连续 SUSPENDED, 不跨工具调用累积。
+
         Returns:
             GateResult — gate 批准执行, 调用方继续执行工具
             None       — SUSPENDED 超时, 已注入拒绝消息
         """
+        # B9 fix: 每次入口重置 SUSPENDED 计数器, 避免跨工具累积
+        self._suspended_count = 0
         while True:
             # 1. 记录 context_judge 结果
             self._gate_decision_count += 1
@@ -1182,30 +1262,32 @@ class AgentLoop:
                                         GateState.EQUIVALENCE_PROPOSED):
                 gate_result = self._ask_user_and_process(action, judgement, tool_id, gate)
 
-            # SUSPENDED → resume
+            # SUSPENDED → resume (给用户第二次机会)
             if gate_result.state == GateState.SUSPENDED:
+                self._suspended_count += 1
+                # B9 fix: 每次 _process_gate 入口已重置 _suspended_count,
+                # 所以此计数器只针对当前 tool_call 的连续 SUSPENDED。
+                # 首次 SUSPENDED 给用户第二次机会, 二次才终止。
+                if self._suspended_count >= 2:
+                    reason = "user did not respond to greylist action"
+                    self._emit(LoopEvent(
+                        kind="suspended",
+                        step=self._step_count,
+                        payload={"reason": reason, "tool_id": tool_id},
+                    ))
+                    self._messages.append(
+                        Message.tool_result(
+                            tool_call_id=tool_call_id,
+                            tool_id=tool_id,
+                            content=f"[REJECTED by user timeout: {reason}]",
+                        )
+                    )
+                    return None  # 调用方跳过执行
                 gate_result = gate.process(
                     UserResponse(response_type=UserResponseType.RESUME)
                 )
                 if gate_result.state == GateState.AWAITING_USER:
                     gate_result = self._ask_user_and_process(action, judgement, tool_id, gate)
-
-            # 第二次 SUSPENDED → timeoutterminate
-            if gate_result.state == GateState.SUSPENDED:
-                reason = "user did not respond to greylist action"
-                self._emit(LoopEvent(
-                    kind="suspended",
-                    step=self._step_count,
-                    payload={"reason": reason, "tool_id": tool_id},
-                ))
-                self._messages.append(
-                    Message.tool_result(
-                        tool_call_id=tool_call_id,
-                        tool_id=tool_id,
-                        content=f"[REJECTED by user timeout: {reason}]",
-                    )
-                )
-                return None  # 调用方跳过执行
 
             # REJUDGE → 重跑 context_judge
             if gate_result.state == GateState.REJUDGE:
@@ -1249,8 +1331,6 @@ class AgentLoop:
         self, action: Action, judgement: Judgement, tool_id: str, gate: Any
     ) -> GateResult:
         """ask用户 + 记录response + handle gate 结果 (R4: 提取自 _process_gate 的重复代码)。"""
-        from zall.core.gate import UserResponseType
-
         user_resp = self._user_responder.ask(action, judgement)
         self._recorder.append(
             event_id=f"user_response_{self._step_count}_{self._gate_decision_count}",
@@ -1390,6 +1470,15 @@ class AgentLoop:
             # O1: tool 结果改变context, 标记 watermark cache为脏
             self._mark_watermark_dirty()
 
+            # Extension: on_after_tool
+            if self._ext_registry is not None:
+                self._ext_registry.fire(
+                    "on_after_tool",
+                    tool_id=execute_action.tool_id,
+                    result=result,
+                    step=self._step_count,
+                )
+
     # ── GitProtect security网 (v0.0.10) + CheckpointManager (v0.1.0) ──
     _WRITE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "batch_edit", "bash"})
     WRITE_TOOLS: frozenset[str] = _WRITE_TOOLS
@@ -1492,6 +1581,10 @@ class AgentLoop:
           - 后续调用: 从工具参数提取文件路径, 仅追踪本次修改的文件
           - bash 等无法获知具体文件的工具: 使用缓存的全量列表
 
+        O3 增量 cache 策略:
+          - write_file/edit_file/batch_edit (已知路径): 直接加入 cache, 避免全量扫描
+          - bash (未知路径): 使 cache 失效, 下次全量扫描
+
         静默失败: 安全网故障不得改变 RunEgress (IPR-0 反例).
         """
         if self._checkpoint_mgr is None:
@@ -1507,8 +1600,13 @@ class AgentLoop:
                 tool_id=tool_id,
                 run_id=self._recorder.run_id,
             )
-            # O3: 写operation后cache失效, 确保下次全量扫描包含新file
-            self._invalidate_tracked_cache()
+            # O3: 增量 cache 策略 — 已知路径直接加入, 未知路径才全量扫描
+            if tool_id in ("write_file", "edit_file", "batch_edit") and self._cached_tracked_files is not None:
+                # 已知路径: 增量加入 cache, 避免全量 os.walk
+                self._cached_tracked_files.update(tracked)
+            else:
+                # bash 等未知路径: 使 cache 失效, 下次重新扫描
+                self._cached_tracked_files = None
         except Exception:
             pass  # 安全网故障不得改变 RunEgress
 
@@ -1558,7 +1656,11 @@ class AgentLoop:
                     ext = os.path.splitext(fn)[1].lower()
                     if ext in self.__class__._TRACKED_EXTS:
                         rel = os.path.join(rel_base, fn) if rel_base != "." else fn
-                        candidates.append(rel.replace("\\", "/"))
+                        rel_norm = rel.replace("\\", "/")
+                        # S1: 排除敏感文件模式 (fnmatch 同时匹配 .env 和 key.pem)
+                        if any(fnmatch.fnmatch(rel_norm, pat) for pat in self.__class__._EXCLUDE_PATTERNS):
+                            continue
+                        candidates.append(rel_norm)
 
         # deterministic性sort后return完整集合 (不再硬限 100 个file, fix B9)
         candidates.sort()

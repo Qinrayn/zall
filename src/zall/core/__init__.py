@@ -16,3 +16,5 @@ constraints (来自 IMPL.md):
 
 # placeholder聚合, 本轮不立interface (守 IPR-2: 单 step only 1 primitive + invariant test)
 # 下一轮起逐个推 primitive。
+
+from zall.core.extension import Extension, ExtensionRegistry  # noqa: F401

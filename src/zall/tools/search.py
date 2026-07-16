@@ -23,7 +23,7 @@ from urllib.parse import unquote
 
 import httpx
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 
 # default最大结果数
 DEFAULT_MAX_RESULTS = 5
@@ -347,7 +347,7 @@ class SearchTool:
         except ImportError:
             raise ImportError("beautifulsoup4 is required for search fallback")
 
-        url = f"https://html.duckduckgo.com/html/"
+        url = "https://html.duckduckgo.com/html/"
         try:
             client = _get_search_http_client()
             resp = client.post(url, data={"q": query})

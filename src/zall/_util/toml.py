@@ -33,7 +33,7 @@ def load_toml_simple(path: Path) -> dict[str, Any]:
 
     # Try tomli backport (optional dependency for Python 3.10)
     try:
-        import tomli
+        import tomli  # type: ignore[import-not-found]
         with open(path, "rb") as f:
             return dict(tomli.load(f))
     except ImportError:
@@ -47,18 +47,31 @@ def _load_toml_fallback(path: Path) -> dict[str, Any]:
     """Minimal TOML parser (fallback when tomllib/tomli unavailable).
 
     Uses shared strip_inline_comment / unquote_value from this module.
-    Supports [section] headers and key = value pairs.
+    Supports [section] headers, key = value pairs, and [[array-of-tables]].
     """
     config: dict[str, Any] = {}
     current: dict[str, Any] = config
+    current_array: list[dict[str, Any]] | None = None
     with open(path, encoding="utf-8") as f:
         for line in f:
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
-            if s.startswith("[") and s.endswith("]"):
+            if s.startswith("[[") and s.endswith("]]"):
+                # Array of tables: [[providers]]
+                section = s[2:-2].strip()
+                entry: dict[str, Any] = {}
+                if section not in config:
+                    config[section] = []
+                current_array = config[section]
+                if isinstance(current_array, list):
+                    current_array.append(entry)
+                current = entry
+            elif s.startswith("[") and s.endswith("]"):
+                # Regular section: [model]
                 section = s[1:-1].strip()
                 current = config.setdefault(section, {})
+                current_array = None
             elif "=" in s:
                 key, _, val = s.partition("=")
                 key = key.strip()
@@ -198,7 +211,6 @@ def extract_section_name(line: str) -> tuple[str, str] | None:
     if bracket_end == -1:
         return None
 
-    expected_end = 2 if is_array else 1
     # [[array]] 需要两个 ]]
     if is_array and (bracket_end + 1 >= len(text) or text[bracket_end + 1] != ']'):
         return None

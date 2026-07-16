@@ -7,10 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
-import sys
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,7 +14,6 @@ from typing import Any
 from rich.table import Table
 
 from zall.cli.render import _shared_console
-from zall.core.goal import TerminationState
 
 
 def _home_dir() -> Path:
@@ -439,8 +434,7 @@ def _prune_sessions(days: int, out: Any) -> None:
     Sessions older than _MAX_ABSOLUTE_AGE_DAYS are deleted even if <5 total.
     Only deletes complete session directories (with meta.json).
     """
-    import time
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
     _MAX_ABSOLUTE_AGE_DAYS = 365
 
@@ -643,8 +637,8 @@ def _run_resume(out: Any, session_id: str, state: dict[str, Any] | None) -> str 
                            f"[Current AGENTS.md: {first_line}]"
                        ))
         msgs.append(note)
-        out.write(f"  ! AGENTS.md has changed since session was saved\n")
-        out.write(f"  injected current project memory\n")
+        out.write("  ! AGENTS.md has changed since session was saved\n")
+        out.write("  injected current project memory\n")
     else:
         note = Message(role="system",
                        content=f"[resumed from session {target.name[:8]}, user explicit]")

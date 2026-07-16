@@ -19,14 +19,25 @@ IPR constraints:
 
 from __future__ import annotations
 
+import locale
 import os
 import itertools
-from pathlib import Path
 from typing import Any
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 from zall._util import is_binary
 from zall._util.path import resolve_path
+
+
+def _preferred_encoding() -> str:
+    """Get the system's preferred encoding (Windows Chinese is GBK/CP936, do not hardcode UTF-8)."""
+    try:
+        enc = locale.getpreferredencoding(False)
+        if enc:
+            return enc
+    except (ValueError, LookupError):
+        pass
+    return "utf-8"  # fallback
 
 # 单次最大行数 (超过此数truncate, prevents context pollution)
 MAX_LINES = 2000
@@ -164,7 +175,8 @@ class ReadFileTool:
             total_lines = 0
             exact_total = True
             lines = []
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            file_enc = _preferred_encoding()
+            with open(path, "r", encoding=file_enc, errors="replace") as f:
                 lines = list(itertools.islice(f, start, end))
                 actual_end = start + len(lines)
                 end = max(actual_end, start)
@@ -175,7 +187,7 @@ class ReadFileTool:
                     # 从sample估算average行宽 → 推算总行数 (避免全量扫描)
                     # B5 fix: sample<3行时估算不可靠, 用保守上界
                     if len(lines) >= 3:
-                        sample_bytes = sum(len(line.encode("utf-8")) for line in lines)
+                        sample_bytes = sum(len(line.encode(file_enc)) for line in lines)
                         avg_bytes_per_line = sample_bytes / len(lines)
                         total_lines = int(file_size / max(avg_bytes_per_line, 1))
                     else:

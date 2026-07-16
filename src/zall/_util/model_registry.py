@@ -11,7 +11,6 @@ C1: 消除模型元数据分散在两处的问题:
 
 from __future__ import annotations
 
-from typing import Any
 
 # ──────────────────────────────────────────────────────────────────────────
 # modelwindow大小 (token)

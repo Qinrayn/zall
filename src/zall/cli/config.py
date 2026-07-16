@@ -12,7 +12,6 @@ from typing import Any
 
 from zall._util.model_registry import (
     _ADAPTER_TYPE_MAP,
-    _MODEL_PRESETS,
     _PROVIDER_REGISTRY,
     _provider_api_bases,
     _provider_display,
@@ -185,10 +184,11 @@ def _detect_provider(model_name: str | None = None) -> str:
     return "openai"
 
 
-def _build_adapter(provider: str, model: str | None = None) -> Any:
+def _build_adapter(provider: str, model: str | None = None, timeout: float | None = None, **extra_kwargs: Any) -> Any:
     """根据 provider typeconstructcorresponds to adapter (Item D: importlib dynamicload, 零 if/elif)。
 
     provider 未知时 fallback 到 OpenAICompatAdapter。
+    timeout: API 请求超时秒数, None 表示使用 adapter 默认值 (120s)。
     """
     import importlib
     registry = _get_provider_registry()
@@ -202,7 +202,12 @@ def _build_adapter(provider: str, model: str | None = None) -> Any:
         # 未知 provider → fallback 到 OpenAI compatible
         from zall.adapters import OpenAICompatAdapter
         cls = OpenAICompatAdapter
-    return cls(model=model)
+    kwargs: dict[str, Any] = {"model": model}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    # Merge any extra kwargs passed by caller (e.g., temperature, max_tokens)
+    kwargs.update(extra_kwargs)
+    return cls(**kwargs)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -320,8 +325,6 @@ def _persist_model_to_config(model_name: str) -> None:
             def _update_key_in_lines(lines: list[str], key: str, value: str) -> list[str]:
                 """在 section 行list中更新指定 key 的值, preserve注释和sequential。"""
                 updated = []
-                key_prefix = key + " = "
-                key_prefix_alt = key + "="
                 found = False
                 for line in lines:
                     stripped = line.strip()
@@ -337,7 +340,6 @@ def _persist_model_to_config(model_name: str) -> None:
                             # preserve行内注释
                             comment = ""
                             # 找到值结束后的 # 注释
-                            val_end = eq_pos + 1
                             # handle引号
                             in_quote = False
                             for ci in range(eq_pos + 1, len(stripped)):
@@ -362,23 +364,23 @@ def _persist_model_to_config(model_name: str) -> None:
                 # B4: 只匹配顶级段名 (auth/model), 不匹配 nested.table
                 _top = name.split(".")[0].strip() if "." in name else name.strip()
                 if _top == "auth":
-                    new_lines.append(f"[auth]\n")
+                    new_lines.append("[auth]\n")
                     new_lines.extend(_update_key_in_lines(lines, "api_key", api_key))
                     has_auth = True
                 elif _top == "model":
                     model_cfg = data.get("model", {})
                     api_base = model_cfg.get("api_base", default_api_base)
-                    new_lines.append(f"[model]\n")
+                    new_lines.append("[model]\n")
                     new_lines.extend(_update_key_in_lines(lines, "name", model_name))
                     new_lines.extend(_update_key_in_lines(lines, "api_base", api_base))
                     has_model = True
                 else:
                     new_lines.extend(lines)
             if not has_auth:
-                new_lines.append(f"[auth]\n")
+                new_lines.append("[auth]\n")
                 new_lines.append(f'api_key = "{api_key}"\n')
             if not has_model:
-                new_lines.append(f"[model]\n")
+                new_lines.append("[model]\n")
                 new_lines.append(f'name = "{model_name}"\n')
                 new_lines.append(f'api_base = "{default_api_base}"\n')
             config_path.write_text("".join(new_lines), encoding="utf-8")

@@ -16,10 +16,9 @@ IPR constraints:
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 
 
 # Known commands (injected by app.py to avoid circular import)

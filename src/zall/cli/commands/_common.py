@@ -454,10 +454,10 @@ def _setup_completion(skills: list[Any]) -> None:
         import readline
     except ImportError:
         try:
-            import pyreadline3 as readline  # type: ignore[no-redef]
+            import pyreadline3 as readline  # type: ignore[import-not-found,no-redef]
         except ImportError:
             try:
-                import pyreadline as readline  # type: ignore[no-redef]
+                import pyreadline as readline  # type: ignore[import-not-found,no-redef]
             except ImportError:
                 return
     candidates: list[str] = list(get_known_commands())
@@ -506,7 +506,6 @@ def _cmd_init_simple(out: Any) -> None:
     # O5: TrustAnchor init化 (生成 ed25519 key + anchor指纹)
     try:
         from zall.core.verifiability import FileTrustAnchor
-        old_cwd = Path.cwd()
         try:
             anchor = FileTrustAnchor()
             if anchor.anchor_id:
@@ -641,7 +640,7 @@ def _check_git_health() -> tuple[str, str]:
                                   capture_output=True, text=True, timeout=5)
         branch = branch_r.stdout.strip() if branch_r.returncode == 0 else "?"
         if dirty:
-            changes = len([l for l in r.stdout.split("\n") if l.strip()])
+            changes = len([line for line in r.stdout.split("\n") if line.strip()])
             return ("warn", f"{git_version} — branch {branch}, {changes} uncommitted change(s)")
         return ("ok", f"{git_version} — branch {branch}, clean")
     except (subprocess.TimeoutExpired, OSError):
@@ -707,6 +706,28 @@ def _check_path_tools() -> tuple[str, str]:
     return ("ok", f"all: {', '.join(found)}")
 
 
+def _check_anchor_dir(label: str, key: Path, log: Path, init: Path) -> str:
+    """Check a single trust anchor directory (user or project level).
+
+    Returns a formatted status string like "user: key=32B, log=5 entries" or "user: no key".
+    """
+    ok = key.exists()
+    if not ok:
+        return f"{label}: no key"
+    key_size = key.stat().st_size
+    log_entries = 0
+    if log.exists():
+        try:
+            log_entries = len([line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()])
+        except Exception:
+            pass
+    init_ok = init.exists()
+    result = f"{label}: key={key_size}B, log={log_entries} entries"
+    if not init_ok:
+        result += f" ({label} init: MISSING)"
+    return result
+
+
 def _check_trust_anchor(project_dir: str | None = None) -> tuple[str, str]:
     """TrustAnchor statecheck。
 
@@ -714,7 +735,6 @@ def _check_trust_anchor(project_dir: str | None = None) -> tuple[str, str]:
     返回 (状态, 详情)。
     """
     from pathlib import Path
-    import os
 
     # 用户级 (~/.zall/)
     home_dir = Path.home()
@@ -731,39 +751,15 @@ def _check_trust_anchor(project_dir: str | None = None) -> tuple[str, str]:
     parts: list[str] = []
 
     # check用户级
-    user_ok = home_key.exists()
-    if user_ok:
-        key_size = home_key.stat().st_size
-        log_entries = 0
-        if home_log.exists():
-            try:
-                log_entries = len([l for l in home_log.read_text(encoding="utf-8").splitlines() if l.strip()])
-            except Exception:
-                pass
-        init_ok = home_init.exists()
-        parts.append(f"user: key={key_size}B, log={log_entries} entries")
-        if not init_ok:
-            parts.append("user init: MISSING")
-    else:
-        parts.append("user: no key")
+    user_status = _check_anchor_dir("user", home_key, home_log, home_init)
+    parts.append(user_status)
 
     # check项目级
-    proj_ok = proj_key.exists()
-    if proj_ok:
-        key_size = proj_key.stat().st_size
-        log_entries = 0
-        if proj_log.exists():
-            try:
-                log_entries = len([l for l in proj_log.read_text(encoding="utf-8").splitlines() if l.strip()])
-            except Exception:
-                pass
-        init_ok = proj_init.exists()
-        parts.append(f"project: key={key_size}B, log={log_entries} entries")
-        if not init_ok:
-            parts.append("project init: MISSING")
-    else:
-        parts.append("project: no key")
+    proj_status = _check_anchor_dir("project", proj_key, proj_log, proj_init)
+    parts.append(proj_status)
 
+    user_ok = home_key.exists()
+    proj_ok = proj_key.exists()
     if not user_ok and not proj_ok:
         return ("warn", "no trust anchor (optional — run 'zall init' to create); " + "; ".join(parts))
     return ("ok", "; ".join(parts))
@@ -921,7 +917,6 @@ def _generate_agents_md(cwd: str) -> str:
     检测项目类型 (pyproject.toml, package.json 等), 提取项目名称、
     技术栈、测试命令和构建命令, 填充到 AGENTS.md 模板中。
     """
-    import os
     from pathlib import Path
 
     root = Path(cwd)

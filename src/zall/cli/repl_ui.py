@@ -26,16 +26,13 @@ from zall.cli.config import _onboarding, _detect_provider
 from zall.cli.orchestrator import make_usage_observer as _make_usage_observer
 from zall.cli.orchestrator import build_mcp_tools
 from zall.cli.prompt import make_prompt_fn
-from zall.cli.render import CliRenderer, _shared_console, clear_console_cache
+from zall.cli.render import CliRenderer, _shared_console, _C, _G, clear_console_cache
 from zall.cli.responder import CliUserResponder
 from zall.core.checkpoint import CheckpointManager
 from zall.core.compactor import ModelCompactor
 from zall.core.context import Context
-from zall.core.goal import GoalTriple, GoalType, RefinedGoal
 from zall.core.loop import AgentLoop
 from zall.core.model import Message
-from zall.core.refiner import GoalRefiner
-from zall.core.tool import ToolRegistry
 from zall.mcp.tool import MCPTool
 from zall.safety.rules_file import load_rules
 from zall.skills import Skill, load_skills
@@ -87,19 +84,20 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
         display_model = _config_status().get("model") or "unset"
     # Architectural header
     width = min(50, max(30, len(display_model) + 20))
-    console.print(f"  [bold gold1]\u256d{'\u2500' * width}\u256e[/]")
-    console.print(f"  [bold gold1]\u2502[/]  [bold]zall[/]  "
-                  f"[dim gold1]\u00b7[/]  [dim]{display_model}[/]")
+    _dash_line = "\u2500" * width
+    console.print(f"  [bold {_C.ACCENT}]\u256d{_dash_line}\u256e[/]")
+    console.print(f"  [bold {_C.ACCENT}]\u2502[/]  [bold]zall[/]  "
+                  f"[dim {_C.ACCENT}]\u00b7[/]  [dim]{display_model}[/]")
     meta_parts = []
     if branch:
         meta_parts.append(f"[dim]{branch}[/]")
     if plan:
-        meta_parts.append("[turquoise4]plan[/]")
+        meta_parts.append(f"[{_C.THINKING}]plan[/]")
     if verbose:
         meta_parts.append("[dim]verbose[/]")
     if meta_parts:
-        console.print(f"  [bold gold1]\u2502[/]  [dim]{'  '.join(meta_parts)}[/]")
-    console.print(f"  [bold gold1]\u2570{'\u2500' * width}\u256f[/]")
+        console.print(f"  [bold {_C.ACCENT}]\u2502[/]  [dim]{'  '.join(meta_parts)}[/]")
+    console.print(f"  [bold {_C.ACCENT}]\u2570{_dash_line}\u256f[/]")
 
 
 def build_repl_loop(
@@ -115,10 +113,11 @@ def build_repl_loop(
     seed_messages: list[Message] | None = None,
     plan_mode: bool = False,
     mcp_tools: tuple[MCPTool, ...] = (),
+    ext_registry: Any = None,
 ) -> AgentLoop | None:
-    """construct REPL 对话态的 AgentLoop (委托给 orchestrator)。"""
+    """Construct a REPL AgentLoop (delegates to orchestrator)."""
     from zall.cli import config as _cli_config
-    from zall.cli.orchestrator import build_tools, merge_tools, inject_subagent_context, refine_goal, confirm_goal, build_mcp_tools
+    from zall.cli.orchestrator import build_tools, merge_tools, inject_subagent_context, refine_goal
     from zall.cli.environment import build_system_prompt, CwdMeta
 
     try:
@@ -136,7 +135,10 @@ def build_repl_loop(
                 except Exception:
                     pass
             provider = _detect_provider(model_name)
-            adapter = _cli_config._build_adapter(provider, model=model_name)
+            from zall.safety.config import load_config as _load_cfg
+            _cfg = _load_cfg()
+            _timeout = _cfg.get("timeout", 120.0)
+            adapter = _cli_config._build_adapter(provider, model=model_name, timeout=_timeout)
             state["_adapter"] = adapter
     except ValueError as e:
         out.write(f"  \u2717 config error: {e}\n")
@@ -153,7 +155,9 @@ def build_repl_loop(
     observer = _make_usage_observer(renderer, state)
     is_interactive = sys.stdin.isatty()
     _out_stream = out or sys.stderr
-    _print_fn = lambda s: (_out_stream.write(s + "\n"), _out_stream.flush())[-1] or None
+    def _print_fn(s: str) -> None:
+        _out_stream.write(s + "\n")
+        _out_stream.flush()
     responder = CliUserResponder(
         yes=yes, is_tty=is_interactive, plan_mode=plan_mode,
         print_fn=_print_fn,
@@ -170,13 +174,15 @@ def build_repl_loop(
         max_steps=max_steps if max_steps and max_steps > 0 else REPL_MAX_STEPS,
         stream=stream, git_protect=git_protect, checkpoint_mgr=checkpoint_mgr,
         plan_mode=plan_mode, compactor=ModelCompactor(),
+        ext_registry=ext_registry,
     )
     if seed_messages:
         loop.set_messages(list(seed_messages))
     else:
         loop.set_messages([
             Message(role="system", content=build_system_prompt(
-                context, mcp_tools=mcp_tools, plan_mode=plan_mode)),
+                context, mcp_tools=mcp_tools, plan_mode=plan_mode,
+                skills=state.get("_skills"))),
             Message.user(first_input),
         ])
     return loop
@@ -194,7 +200,7 @@ def repl(
     out: Any = None,
 ) -> int:
     """REPL: 单一对话态 (持续 AgentLoop + step() + 共享context)。"""
-    from zall.cli.environment import CwdMeta, get_cached_cwd_meta
+    from zall.cli.environment import get_cached_cwd_meta
     from zall.cli.orchestrator import confirm_goal
 
     out = out or sys.stderr
@@ -202,6 +208,17 @@ def repl(
     # §9.2.11: REPL session内 MCP server 只连接一次
     mcp_tools: list[MCPTool] = build_mcp_tools(out)
     skills: list[Skill] = load_skills()
+
+    # Extension registry (Pi-style self-evolving agent)
+    from zall.core.extension import ExtensionRegistry
+    ext_registry = ExtensionRegistry()
+    try:
+        from zall.extensions.auto_learn import create_auto_learn
+        from zall.extensions.usage_tracker import create_usage_tracker
+        ext_registry.register(create_auto_learn())
+        ext_registry.register(create_usage_tracker())
+    except Exception:
+        pass  # Built-in extensions are optional
 
     if input_fn is None:
         input_fn = make_prompt_fn(
@@ -219,6 +236,7 @@ def repl(
         "_input_fn": input_fn,
         "_mcp_tools": mcp_tools,    # Item E: 供 /reload 访问
         "_skills": skills,           # Item E: 供 /reload 访问
+        "_ext_registry": ext_registry,
     }
 
     from zall.cli.session import _check_repl_autosave, _save_repl_state, _clear_repl_autosave
@@ -302,6 +320,7 @@ def repl(
                     seed_messages=state.pop("resume_messages", None),
                     plan_mode=state.get("plan_mode", False),
                     mcp_tools=tuple(mcp_tools),
+                    ext_registry=ext_registry,
                 )
                 if loop is None:
                     continue

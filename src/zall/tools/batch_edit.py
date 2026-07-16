@@ -25,8 +25,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 from zall._util.path import resolve_path
+from zall._util.file import _preferred_encoding
 from zall.tools._diff import unified_diff as _unified_diff
 
 
@@ -214,8 +215,9 @@ class BatchEditTool:
                 new_content = content.replace(old, new, 1)
                 # v2 fix: 使用 uuid 唯一临时file名, 避免concurrentwrite竞态
                 import uuid as _uuid
+                enc = _preferred_encoding()
                 tmp = path.parent / f".zall_tmp_{_uuid.uuid4().hex[:8]}"
-                tmp.write_text(new_content, encoding="utf-8")
+                tmp.write_text(new_content, encoding=enc)
                 tmp_files.append((tmp, path))
 
                 old_lines = old.count("\n") + 1
@@ -232,8 +234,9 @@ class BatchEditTool:
             # 全部write成功 → 原子replace
             replaced: list[tuple[Path, Path, str | None]] = []  # (tmp, target, original_content)
             for tmp, target in tmp_files:
+                enc = _preferred_encoding()
                 # 备份原filecontent (用于resume)
-                orig_content = target.read_text(encoding="utf-8") if target.exists() else None
+                orig_content = target.read_text(encoding=enc) if target.exists() else None
                 try:
                     os.replace(str(tmp), str(target))
                     replaced.append((tmp, target, orig_content))

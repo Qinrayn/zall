@@ -25,7 +25,7 @@ import time
 import base64
 from typing import Any
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 
 MAX_OUTPUT_BYTES = 50_000  # Maximum output (50KB, prevents context pollution)
 
@@ -333,6 +333,7 @@ def _check_self_protection(command: str) -> str | None:
     # Iterate substring-matching patterns (compound commands, not first-token dependent)
     # These are multi-word/feature patterns that won't be triggered by first-token detection
     _DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
+        ("shutdown /", "system shutdown/restart"),      # "shutdown /s" with space variant
         ("shutdown/", "system shutdown/restart"),       # "shutdown/s" no-space variant
         ("del /f /s", "recursive force delete"),
         ("del /f/s", "recursive force delete"),         # no-space variant
@@ -354,12 +355,13 @@ def _check_self_protection(command: str) -> str | None:
 
 
 def _truncate_at_bytes(text: str, max_bytes: int) -> str:
-    """Truncate text by byte count (UTF-8), prefers breaking at newlines (v0.1.2).
+    """Truncate text by byte count (system preferred encoding), prefers breaking at newlines (v0.1.2).
 
     If text encodes to <= max_bytes, returns as-is.
     Otherwise truncates to within max_bytes, preferring the nearest newline break.
     """
-    return _truncate_at_bytes_enc(text, max_bytes, "utf-8")
+    enc = _preferred_encoding()
+    return _truncate_at_bytes_enc(text, max_bytes, enc)
 
 
 def _truncate_at_bytes_enc(text: str, max_bytes: int, encoding: str = "utf-8") -> str:
@@ -472,7 +474,7 @@ class BashTool:
         # 分析command是只读/write/network/危险, 用于securityaudit和 UI 展示
         _semantics = None
         try:
-            from zall.tools._bash_semantics import analyze_command, get_semantics_label
+            from zall.tools._bash_semantics import analyze_command
             _semantics = analyze_command(command)
         except Exception:
             pass
@@ -563,7 +565,7 @@ class BashTool:
         stderr_bytes = len(stderr.encode(std_enc, errors="replace"))
         if stderr_bytes > MAX_OUTPUT_BYTES:
             stderr = _truncate_at_bytes_enc(stderr, MAX_OUTPUT_BYTES, std_enc) + (
-                f"\n... [stderr too large]"
+                "\n... [stderr too large]"
             )
 
         # buildoutput

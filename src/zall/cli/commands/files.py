@@ -10,7 +10,6 @@ IPR constraints:
 from __future__ import annotations
 
 import glob as glob_module
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -18,7 +17,6 @@ from typing import Any
 
 from rich.panel import Panel
 from rich.syntax import Syntax
-from rich.table import Table
 
 from zall.cli.commands._common import _CATEGORY_CONTEXT, _CATEGORY_TOOLS, slash_command
 from zall.cli.render import _shared_console
@@ -53,7 +51,7 @@ def cmd_add(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] |
             file_paths.extend(expanded)
         else:
             file_paths.append(rp)
-    file_paths = list(dict.fromkeys(file_paths))
+    file_paths = sorted(set(file_paths))  # B15: 确定性去重
 
     if not file_paths:
         out.write(f"  no files matched: {arg}\n")
@@ -88,7 +86,7 @@ def cmd_add(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] |
             out.write(f"  \u2717 {fp} too large ({len(content)} bytes, max {MAX_FILE_SIZE})\n")
             continue
 
-        abs_path = str(p.absolute())
+        abs_path = str(p.resolve())
         injected = (
             f"[user added file: {abs_path}]\n"
             f"```\n{content}\n```"
@@ -143,7 +141,7 @@ def cmd_drop(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] 
     targets = arg.split()
     removed_count = 0
     for target in targets:
-        target_abs = str(Path(target).absolute())
+        target_abs = str(Path(target).resolve())
         if target in artifact_files:
             artifact_files.remove(target)
             removed_count += 1

@@ -8,13 +8,11 @@ Uses prompt_toolkit for interactive prompts (falls back to plain input).
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
 try:
-    from prompt_toolkit import prompt as ptk_prompt
-    from prompt_toolkit.shortcuts import yes_no_dialog, radiolist_dialog, input_dialog
+    from prompt_toolkit.shortcuts import prompt as ptk_prompt
     _HAS_PTK = True
 except ImportError:
     _HAS_PTK = False

@@ -29,13 +29,12 @@ from __future__ import annotations
 
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from zall.core.action import Action
 from zall.core.context import Context
 from zall.core.gate import (
-    UserResponder,
     UserResponse,
     UserResponseType,
 )
@@ -47,14 +46,8 @@ from zall.core.goal import (
     TerminationState,
 )
 from zall.core.loop import AgentLoop
-from zall.core.model import (
-    Message,
-    ModelResponse,
-    StopReason,
-    ToolChoice,
-)
-from zall.core.safety import Judgement, Rule, RuleSet, SafeLevel, context_judge
-from zall.core.tool import Tool, ToolRegistry, ToolResult
+from zall.core.safety import Judgement, Rule, RuleSet, SafeLevel
+from zall.core.tool import ToolRegistry, ToolResult
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -408,14 +401,17 @@ class SpawnSubagentTool:
             try:
                 result = f.result()
                 with self._subagents_lock:
-                    self._subagents[sub_id]["status"] = "completed"
-                    self._subagents[sub_id]["result"] = result
+                    # Guard against race with close() which clears _subagents
+                    if sub_id in self._subagents:
+                        self._subagents[sub_id]["status"] = "completed"
+                        self._subagents[sub_id]["result"] = result
             except Exception as e:
                 with self._subagents_lock:
-                    self._subagents[sub_id]["status"] = "failed"
-                    self._subagents[sub_id]["result"] = ToolResult(
-                        success=False, output="", error=str(e),
-                    )
+                    if sub_id in self._subagents:
+                        self._subagents[sub_id]["status"] = "failed"
+                        self._subagents[sub_id]["result"] = ToolResult(
+                            success=False, output="", error=str(e),
+                        )
 
         future.add_done_callback(_on_done)
 
@@ -451,7 +447,7 @@ class SpawnSubagentTool:
             )
 
             result_lines = [
-                f"[Subagent completed]",
+                "[Subagent completed]",
                 f"  Prompt: {prompt.strip()[:200]}",
                 f"  Steps: {egress.step_count}",
                 f"  Tool calls: {egress.total_tool_calls}",
@@ -576,17 +572,19 @@ class SpawnSubagentTool:
             )
 
     def close(self) -> None:
-        """cleanupthread池 (CLI 层在 shutdown 时调用).
+        """cleanup thread pool (CLI 层在 shutdown 时调用).
 
-        v2 fix: 防重复关闭, 添加 __del__ 作为 GC 安全网。
+        M2: 在锁内 shutdown, 避免与 _on_done 回调竞态; 清理 _subagents 防泄漏。
         """
         if self._closed:
             return
         self._closed = True
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        with self._subagents_lock:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._subagents.clear()
 
     def __del__(self) -> None:
-        """v2 fix: GC 时securitycleanupthread池, 防leak."""
+        """GC 时安全清理 thread pool, 防泄漏."""
         try:
             self.close()
         except Exception:

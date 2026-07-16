@@ -16,46 +16,16 @@ import argparse
 import sys
 from typing import Any
 
-from zall.cli import config as _cli_config
-from zall.cli.config import _PLACEHOLDER_API_KEY, _PROVIDER_DISPLAY, _config_status, _detect_provider, _onboarding, _persist_model_to_config, _resolve_model_alias
 from zall.cli.environment import CwdMeta as _CwdMeta, build_system_prompt as _build_system_prompt_context, get_cached_cwd_meta as _get_cached_cwd_meta, read_agents_md as _read_agents_md  # noqa: F401 — re-export for test compat
-from zall.cli.judge import SystemJudge, UndecidableJudge
-from zall.cli.orchestrator import (
-    build_mcp_tools as _build_mcp_tools,
-    build_tools as _build_tools,
-    confirm_goal as _confirm_goal,
-    get_modified_files,
-    inject_subagent_context as _inject_subagent_context,
-    merge_tools as _merge_tools,
-    refine_goal as _refine_goal,
-)
-from zall.cli.orchestrator import _make_goal  # orchestrator internal function
-from zall.cli.render import CliRenderer, render_egress_summary, render_goal_card, _shared_console
-from zall.cli.responder import CliUserResponder
-from zall.cli.session import (
-    _check_repl_autosave, _clear_repl_autosave, _get_cached_sessions,
-    _list_sessions, _load_session_messages, _prune_sessions, _run_eval,
-    _run_replay, _run_resume, _save_repl_state, _save_session,
-    _search_sessions, _tag_session, _get_sessions_dir,
-)
+from zall.cli.config import _config_status, _onboarding, _resolve_model_alias  # noqa: F401 — re-export for test compat
+from zall.cli.commands._common import _setup_completion  # noqa: F401 — re-export for test compat
+from zall.skills import load_skills  # noqa: F401 — re-export for test compat
 from zall.core.context import Context
 from zall.core.goal import TerminationState
-from zall.core.loop import AgentLoop, RunEgress
-from zall.core.model import Message
+from zall.core.loop import RunEgress
 from zall.core.refiner import GoalRefiner  # noqa: F401 — re-export for test compat
-from zall.core.safety import SafeLevel
-from zall.core.tool import ToolRegistry
-from zall.safety.rules_file import load_rules
-from zall.core.checkpoint import CheckpointManager
-from zall.mcp.config import MCPServerSpec
 from zall.mcp.tool import MCPTool
-from zall.core.compactor import ModelCompactor
-from zall.skills import Skill, find_skill, load_skills
-from zall._util.model_registry import get_price as _get_model_price
 from zall._util.win32 import ensure_utf8_stdio as _ensure_utf8_stdio, set_console_title as _set_console_title
-
-
-REPL_MAX_STEPS = 100_000
 
 
 # ── System prompt (delegated to environment.py) ──
@@ -163,16 +133,14 @@ def main(argv: list[str] | None = None) -> int:
 
 # ── Backward compatibility: function signatures used by old tests and external code ──
 
-from zall.cli.commands import (  # noqa: E402
-    cmd_undo, cmd_checkpoint, cmd_revert, cmd_cost, cmd_git, cmd_commit,
-    cmd_web, cmd_add, cmd_drop, cmd_fix, cmd_review, cmd_retry, cmd_search,
-    cmd_diff, cmd_doctor, cmd_compact, cmd_init, cmd_model, cmd_plan,
-    cmd_help, cmd_about, cmd_clear, cmd_max_steps, cmd_verbose, cmd_update,
-    handle_slash, get_known_commands, get_command_meta,
-    _suggest_command, _guess_common_command, _setup_completion,
+from zall.cli.commands._common import _suggest_command  # noqa: E402, F401
+
+from zall.cli.commands import (  # noqa: E402, F401
+    handle_slash, get_known_commands,
+    _guess_common_command,
     _route_skill, _print_skills, _cmd_init_simple,
-    _INIT_RULES_TOML, _INIT_AGENTS_MD, _INIT_MCP_TOML, _INIT_SKILLS_TOML,
     _recalc_usage_from_timeline, _check_network_basic, _auto_step_loop,
+    _INIT_RULES_TOML, _INIT_AGENTS_MD, _INIT_MCP_TOML, _INIT_SKILLS_TOML,
 )
 
 # Legacy API aliases (preserving app_mod compatibility)
@@ -186,7 +154,25 @@ from zall.cli.repl_ui import (  # noqa: E402, F401
     _print_banner,
     _prompt,
     _make_usage_observer,
-    REPL_MAX_STEPS,
+)
+from zall.cli.orchestrator import (  # noqa: E402, F401 — re-export for test compat
+    build_mcp_tools as _build_mcp_tools,
+    build_tools as _build_tools,
+    confirm_goal as _confirm_goal,
+    get_modified_files,
+    inject_subagent_context as _inject_subagent_context,
+    merge_tools as _merge_tools,
+    refine_goal as _refine_goal,
+)
+from zall.cli.orchestrator import _make_goal  # noqa: E402, F401
+from zall.cli.render import render_egress_summary, render_goal_card, _shared_console  # noqa: E402, F401
+from zall.cli.responder import CliUserResponder  # noqa: E402, F401
+from zall.cli.session import (  # noqa: E402, F401
+    _list_sessions, _run_eval, _run_replay, _run_resume,
+    _get_sessions_dir, _load_session_messages, _save_session,
+    _check_repl_autosave, _clear_repl_autosave, _prune_sessions,
+    _get_cached_sessions, _search_sessions, _tag_session,
+    _save_repl_state,
 )
 
 if __name__ == "__main__":

@@ -14,13 +14,11 @@ IPR constraints:
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
 from zall._util.path import resolve_path
 
-from zall.core.tool import Tool, ToolResult
+from zall.core.tool import ToolResult
 
 
 class WriteFileTool:
