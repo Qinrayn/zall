@@ -38,13 +38,14 @@ class ReadFileTool:
     ACI design decisions:
         - 返回line-numbered → 模型能说"第 47 行有 bug", 而不是"大概在中间部分"
         - 支持 offset/limit → 模型能先读文件头了解结构, 再读特定段
+        - 默认 limit=500 (v0.2.2: 从 100 提升至 500, 避免7次连续读取700行文件)
         - 超过 2000 行截断 → 不让模型一次吞下整个大文件 (prevents context pollution)
         - 二进制检测 → 模型不会尝试"读一张图片"然后困惑
 
     schema 设计:
         path:   必填, 文件路径 (相对或绝对)
         offset: 可选, 起始行号 (从 1 开始, 默认 1)
-        limit:  可选, 最大行数 (默认 100, 最大 2000)
+        limit:  可选, 最大行数 (默认 500, 最大 2000)
     """
 
     __test__ = False
@@ -62,9 +63,11 @@ class ReadFileTool:
                 "description": (
                     "Read a file from the local filesystem. "
                     "Returns line-numbered content. "
-                    "Supports offset/limit for pagination (default: first 100 lines). "
+                    "Supports offset/limit for pagination (default: first 500 lines). "
+                    "Small files (<2000 lines) can be read in one call with limit=2000. "
                     "If the file has more than 2000 lines, only the first 2000 are shown "
-                    "with a truncation notice."
+                    "with a truncation notice and a hint to continue reading. "
+                    "Use grep tool first to find relevant line numbers, then read specific regions."
                 ),
                 "parameters": {
                     "type": "object",
@@ -80,8 +83,8 @@ class ReadFileTool:
                         },
                         "limit": {
                             "type": "integer",
-                            "description": f"Maximum lines to read (default: 100, max: {MAX_LINES})",
-                            "default": 100,
+                            "description": f"Maximum lines to read (default: 500, max: {MAX_LINES})",
+                            "default": 500,
                         },
                     },
                     "required": ["path"],
@@ -100,11 +103,11 @@ class ReadFileTool:
 
         # parse offset / limit
         offset = args.get("offset", 1)
-        limit = args.get("limit", 100)
+        limit = args.get("limit", 500)
         if not isinstance(offset, int) or offset < 1:
             offset = 1
         if not isinstance(limit, int) or limit < 1:
-            limit = 100
+            limit = 500
         limit = min(limit, MAX_LINES)  # 防模型传 limit=999999
         lines: list[str] = []
 

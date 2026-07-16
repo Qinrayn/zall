@@ -103,6 +103,8 @@ class OpenAICompatAdapter(BaseAdapter):
         body: dict[str, Any] = {
             "model": self._model,
             "messages": [self._msg_to_openai(m) for m in messages],
+            # max_tokens=4096 防止模型生成过长无用的 thinking 输出浪费 token
+            "max_tokens": 4096,
         }
         if tools:
             body["tools"] = tools

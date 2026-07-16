@@ -221,8 +221,11 @@ def _print_help(out: Any, cmd_name: str = "") -> None:
             "    Restore files from a checkpoint by index."
         ),
         "/expand": (
-            "  /expand\n"
-            "    Expand the last folded tool output."
+            "  /expand [N|all]\n"
+            "    Expand folded tool output in the display.\n"
+            "    N = tool index (shown as → /expand N in the output).\n"
+            "    'all' = expand all folded outputs.\n"
+            "    Note: the AI already sees the full output; this is for human review."
         ),
         "/fold": (
             "  /fold\n"
