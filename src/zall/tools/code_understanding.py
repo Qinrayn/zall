@@ -223,32 +223,27 @@ class CodeUnderstandingTool:
         self, file_path: str, parts: list[str], full: bool,
     ) -> None:
         """读取文件内容。"""
-        import os as _os
         try:
-            content = _os.read_file(file_path) if hasattr(_os, 'read_file') else None
-            if content is None:
-                # Fallback to direct read
-                with open(file_path, encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
-                if not lines:
-                    return
-                if full:
-                    content = "".join(lines)
+            with open(file_path, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            if not lines:
+                return
+
+            if full:
+                content = "".join(lines)
+            else:
+                # Show first 50 lines + last 10 lines
+                head = "".join(lines[:50])
+                tail = "".join(lines[-10:]) if len(lines) > 60 else ""
+                if tail:
+                    content = f"{head}\n... ({len(lines) - 60} lines omitted) ...\n{tail}"
                 else:
-                    # Show first 50 lines + last 10 lines
-                    head = "".join(lines[:50])
-                    tail = "".join(lines[-10:]) if len(lines) > 60 else ""
-                    if tail:
-                        content = f"{head}\n... ({len(lines) - 60} lines omitted) ...\n{tail}"
-                    else:
-                        content = "".join(lines)
+                    content = "".join(lines)
 
             parts.append(f"\n  📝 Content:")
-            parts.append(f"  ```")
             for line in content.split("\n")[:60]:
                 parts.append(f"  {line}")
             if len(content.split("\n")) > 60:
                 parts.append(f"  ... (truncated)")
-            parts.append(f"  ```")
         except (OSError, IOError) as e:
             parts.append(f"\n  ⚠ Could not read file: {e}")
