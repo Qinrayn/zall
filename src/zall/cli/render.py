@@ -797,6 +797,10 @@ class CliRenderer:
         if self._is_tty:
             styled: list[Text] = []
             for line in diff.split("\n"):
+                # Strip trailing \r (Windows CRLF → terminal \r acts as carriage return)
+                line = line.rstrip("\r")
+                if not line:
+                    continue
                 if line.startswith("+") and not line.startswith("+++"):
                     styled.append(Text(line, style="green"))
                 elif line.startswith("-") and not line.startswith("---"):

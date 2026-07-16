@@ -373,6 +373,12 @@ def repl(
                     break
                 if result.kind == "awaiting_input":
                     _save_repl_state(loop, state)
+                    # 在 prompt 前显示折叠工具提示 (便于用户发现 /expand)
+                    renderer = state.get("_renderer")
+                    if renderer is not None and hasattr(renderer, "folded_count"):
+                        fc = renderer.folded_count
+                        if fc > 0:
+                            out.write(f"  [{fc} tool(s) folded · type /expand <N> to show, /expand all to show all]\n")
                     out.write("\n")
                     break
             out.flush()
