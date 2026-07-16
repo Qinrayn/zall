@@ -6,12 +6,15 @@ Corresponds to:
 IPR-0: each test includes a counterexample.
 """
 
+import sys
+
 import pytest
 
 
 class TestPtyExecutor:
     """PTY executor tests (with fallback to PopenExecutor on platforms without PTY)."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     def test_pty_executor_echo(self) -> None:
         """PTY executor should execute simple commands."""
         from zall.tools.pty_executor import PtyExecutor

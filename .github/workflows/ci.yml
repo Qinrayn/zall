@@ -47,7 +47,7 @@ jobs:
 
       - name: Test with pytest
         run: |
-          python -m pytest tests/ -q --tb=line -x --ignore=tests/test_read_file_invariants.py
+          python -m pytest tests/ -q --tb=line --ignore=tests/test_read_file_invariants.py
 
       - name: Test with coverage
         run: |

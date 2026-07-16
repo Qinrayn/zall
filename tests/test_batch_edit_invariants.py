@@ -161,8 +161,13 @@ def test_diff_in_artifacts() -> None:
         })
         assert result.success
         diffs = result.artifacts.get("diffs", {})
-        assert str(p) in diffs
-        assert "hello" in diffs[str(p)] or "hi" in diffs[str(p)]
+        # Normalize paths: macOS /var -> /private/var symlink
+        p_resolved = str(Path(p).resolve())
+        assert any(
+            str(Path(k).resolve()) == p_resolved for k in diffs
+        ), f"Path {p} not found in diffs keys: {list(diffs.keys())}"
+        matched_key = next(k for k in diffs if str(Path(k).resolve()) == p_resolved)
+        assert "hello" in diffs[matched_key] or "hi" in diffs[matched_key]
 
 
 def test_integration_preserves_unchanged_files() -> None:
