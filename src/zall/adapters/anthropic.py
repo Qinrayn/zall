@@ -18,8 +18,6 @@ import json
 import os
 from typing import Any, Iterator
 
-import anthropic
-
 from zall.core.model import (
     Message,
     ModelResponse,
@@ -206,6 +204,7 @@ class AnthropicAdapter:
         body = self._build_body(messages, tools, tool_choice, stream=False)
 
         try:
+            import anthropic
             resp = self._client.messages.create(**body)
         except anthropic.APIStatusError as e:
             return self._make_error_response(e.status_code, str(e))
@@ -237,6 +236,7 @@ class AnthropicAdapter:
         stream_usage: dict[str, int] = {"prompt": 0, "completion": 0}
 
         try:
+            import anthropic
             with self._client.messages.stream(**body) as stream:
                 for event in stream:
                     if event.type == "content_block_start":
