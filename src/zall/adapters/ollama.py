@@ -20,8 +20,6 @@ import json
 import os
 from typing import Any, Iterator
 
-import ollama
-
 from zall.core.model import (
     Message,
     ModelResponse,
@@ -79,6 +77,7 @@ class OllamaAdapter:
         body = self._build_body(messages, tools, tool_choice)
 
         try:
+            import ollama
             resp = self._client.chat(**body)
         except ollama.ResponseError as e:
             return self._make_error_response(e.status_code, str(e))
@@ -107,6 +106,7 @@ class OllamaAdapter:
         tool_calls_acc: list[dict[str, Any]] = []
 
         try:
+            import ollama
             stream = self._client.chat(**body, stream=True)
             for chunk in stream:
                 msg = chunk.get("message", {})
