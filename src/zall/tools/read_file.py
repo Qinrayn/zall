@@ -19,25 +19,14 @@ IPR constraints:
 
 from __future__ import annotations
 
-import locale
 import os
 import itertools
 from typing import Any
 
 from zall.core.tool import ToolResult
 from zall._util import is_binary
+from zall._util.file import detect_text_encoding as _detect_encoding
 from zall._util.path import resolve_path
-
-
-def _preferred_encoding() -> str:
-    """Get the system's preferred encoding (Windows Chinese is GBK/CP936, do not hardcode UTF-8)."""
-    try:
-        enc = locale.getpreferredencoding(False)
-        if enc:
-            return enc
-    except (ValueError, LookupError):
-        pass
-    return "utf-8"  # fallback
 
 # 单次最大行数 (超过此数truncate, prevents context pollution)
 MAX_LINES = 2000
@@ -175,8 +164,8 @@ class ReadFileTool:
             total_lines = 0
             exact_total = True
             lines = []
-            file_enc = _preferred_encoding()
-            with open(path, "r", encoding=file_enc, errors="replace") as f:
+            file_enc = _detect_encoding(path)
+            with open(path, "r", encoding=file_enc) as f:
                 lines = list(itertools.islice(f, start, end))
                 actual_end = start + len(lines)
                 end = max(actual_end, start)
@@ -195,6 +184,16 @@ class ReadFileTool:
                         total_lines = max(actual_end, int(file_size / 256))
                 else:
                     total_lines = actual_end  # 精确总行数
+        except UnicodeDecodeError as e:
+            return ToolResult(
+                success=False,
+                output=(
+                    f"[ERROR: cannot decode {path} with detected encoding '{file_enc}': {e}. "
+                    f"The file may be in a different encoding. Try using a different tool "
+                    f"to read this file.]"
+                ),
+                error=str(e),
+            )
         except OSError as e:
             return ToolResult(
                 success=False,

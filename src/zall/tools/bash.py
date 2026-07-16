@@ -355,13 +355,13 @@ def _check_self_protection(command: str) -> str | None:
 
 
 def _truncate_at_bytes(text: str, max_bytes: int) -> str:
-    """Truncate text by byte count (system preferred encoding), prefers breaking at newlines (v0.1.2).
+    """Truncate text by byte count (UTF-8), prefers breaking at newlines (v0.1.2).
 
-    If text encodes to <= max_bytes, returns as-is.
-    Otherwise truncates to within max_bytes, preferring the nearest newline break.
+    Uses UTF-8 for byte count since the output is sent to the API pipeline
+    (which uses UTF-8). Subprocess output encoding is handled separately
+    via _preferred_encoding() in _truncate_at_bytes_enc.
     """
-    enc = _preferred_encoding()
-    return _truncate_at_bytes_enc(text, max_bytes, enc)
+    return _truncate_at_bytes_enc(text, max_bytes, "utf-8")
 
 
 def _truncate_at_bytes_enc(text: str, max_bytes: int, encoding: str = "utf-8") -> str:
