@@ -74,8 +74,13 @@ class AnthropicAdapter:
                 "or add api_key to ~/.zall/config.toml"
             )
 
-        import anthropic
-        self._client = anthropic.Anthropic(api_key=self._api_key, timeout=self._timeout)
+        self._client = None
+        if self._api_key:
+            try:
+                import anthropic
+                self._client = anthropic.Anthropic(api_key=self._api_key, timeout=self._timeout)
+            except ImportError:
+                pass  # anthropic SDK not available; will fail on _call with clear message
 
     def close(self) -> None:
         """Close the persistent Anthropic client."""

@@ -54,8 +54,12 @@ class OllamaAdapter:
         )
         self._timeout = timeout
 
-        import ollama
-        self._client = ollama.Client(host=self._host)
+        self._client = None
+        try:
+            import ollama
+            self._client = ollama.Client(host=self._host)
+        except ImportError:
+            pass  # ollama SDK not available; will fail on _call with clear message
 
     def close(self) -> None:
         """Close the persistent Ollama client (if it has a close method)."""
