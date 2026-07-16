@@ -39,7 +39,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, Callable
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
@@ -48,16 +48,12 @@ from typing import Protocol, runtime_checkable
 
 from zall.core.action import Action
 from zall.core.accountability import AccountabilityResult, Judge
-from zall.core.chat_state import ChatState, ChatStateHandle
+from zall.core.chat_state import ChatState
 from zall.core.context import Context
 from zall.core.events import EventBus
 from zall.core.extension import ExtensionRegistry
 from zall.core.gate import (
-    ConfirmGate,
-    GateResult,
-    GateState,
     UserResponder,
-    UserResponse,
     UserResponseType,
 )
 from zall.core.goal import GoalTriple, TerminationState
@@ -70,8 +66,8 @@ from zall.core.model import (
     ToolChoice,
 )
 from zall.core.refiner import GoalRefiner
-from zall.core.safety import Judgement, RuleSet, SafeLevel, context_judge
-from zall.core.tool import ToolRegistry, ToolResult
+from zall.core.safety import Judgement, RuleSet, SafeLevel
+from zall.core.tool import ToolRegistry
 from zall.core.verifiability import EventType, RunRecorder, TrustAnchor
 from zall.core.compactor import Compactor
 from zall.core.checkpoint import CheckpointManager

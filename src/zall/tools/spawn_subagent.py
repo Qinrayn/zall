@@ -407,7 +407,6 @@ class SpawnSubagentTool:
         使用 AgentDefinition 根据 subagent_type 选择工具集和系统提示。
         """
         from zall.core.agent import (
-            AgentDefinition,
             SubagentCapabilityMode,
             get_named_agent,
         )

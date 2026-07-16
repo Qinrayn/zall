@@ -37,11 +37,11 @@ from zall.tools.bash import (
 _HAS_PTY = False
 if sys.platform != "win32":
     try:
-        import pty
-        import select
-        import termios
-        import struct
-        import fcntl
+        import pty  # noqa: F401
+        import select  # noqa: F401
+        import termios  # noqa: F401
+        import struct  # noqa: F401
+        import fcntl  # noqa: F401
         _HAS_PTY = True
     except ImportError:
         pass
@@ -98,11 +98,9 @@ class PtyExecutor:
         cwd: str | None = None,
     ) -> ToolResult:
         """Execute via PTY with real-time output collection."""
-        import pty as pty_module
-        import select as select_module
-        import termios as termios_module
-        import struct as struct_module
-        import fcntl as fcntl_module
+        import pty as pty_module  # noqa: F401
+        import select as select_module  # noqa: F401
+        import fcntl as fcntl_module  # noqa: F401
 
         start = time.monotonic()
         env = _sanitize_env()

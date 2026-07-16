@@ -375,12 +375,12 @@ def _persist_model_to_config(model_name: str) -> None:
                     else:
                         # 保留原 [auth] 段内容不变（不更新 api_key）
                         new_lines.append("[auth]\n")
-                        for l in lines:
-                            if l.strip() and not l.strip().startswith("#") and "=" in l.strip():
-                                k = l.strip().split("=", 1)[0].strip()
+                        for _line in lines:
+                            if _line.strip() and not _line.strip().startswith("#") and "=" in _line.strip():
+                                k = _line.strip().split("=", 1)[0].strip()
                                 if k == "api_key":
                                     continue  # 跳过空 api_key 行
-                            new_lines.append(l)
+                            new_lines.append(_line)
                         has_auth = True
                 elif _top == "model":
                     model_cfg = data.get("model", {})

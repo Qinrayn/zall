@@ -26,7 +26,7 @@ from zall.cli.config import _onboarding, _detect_provider
 from zall.cli.orchestrator import make_usage_observer as _make_usage_observer
 from zall.cli.orchestrator import build_mcp_tools
 from zall.cli.prompt import make_prompt_fn
-from zall.cli.render import CliRenderer, _shared_console, _C, _G, clear_console_cache
+from zall.cli.render import CliRenderer, _shared_console, _C, clear_console_cache
 from zall.cli.responder import CliUserResponder
 from zall.core.checkpoint import CheckpointManager
 from zall.core.compactor import ModelCompactor

@@ -10,6 +10,7 @@ IPR constraints:
 from __future__ import annotations
 
 import difflib
+from pathlib import Path
 from typing import Any, Callable
 
 from zall.cli.render import _shared_console

@@ -170,7 +170,7 @@ class CodeUnderstandingTool:
             if fo:
                 other_syms = [e for e in fo if e["name"] != target]
                 if other_syms:
-                    parts.append(f"     Other symbols in this file:")
+                    parts.append("     Other symbols in this file:")
                     for e in other_syms[:5]:
                         parts.append(f"       {e['kind']} {e['name']} @ {e['line']}")
 
@@ -240,10 +240,10 @@ class CodeUnderstandingTool:
                 else:
                     content = "".join(lines)
 
-            parts.append(f"\n  📝 Content:")
+            parts.append("\n  📝 Content:")
             for line in content.split("\n")[:60]:
                 parts.append(f"  {line}")
             if len(content.split("\n")) > 60:
-                parts.append(f"  ... (truncated)")
+                parts.append("  ... (truncated)")
         except (OSError, IOError) as e:
             parts.append(f"\n  ⚠ Could not read file: {e}")

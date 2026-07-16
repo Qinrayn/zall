@@ -163,7 +163,6 @@ def cmd_sandbox(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
     """
     from zall.sandbox import Sandbox, SandboxMode
 
-    loop = state.get("loop")
     sandbox = state.get("sandbox")
 
     args = args.strip().lower()
@@ -238,7 +237,6 @@ def cmd_codegraph(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
         /codegraph search <q> — 搜索符号
         /codegraph outline <f> — 显示文件大纲
     """
-    loop = state.get("loop")
     cg = state.get("codegraph")
 
     if cg is None:

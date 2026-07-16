@@ -47,7 +47,7 @@ import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Protocol
+from typing import Any
 
 
 # ═══════════════════════════════════════════════════════════════════

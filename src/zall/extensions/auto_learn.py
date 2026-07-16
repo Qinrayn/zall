@@ -256,7 +256,7 @@ class AutoLearnExtension:
                     confidence=_SUGGESTION_CONFIDENCE,
                     evidence=(
                         f"Tools {', '.join(sorted(frequent))} used frequently "
-                        f"({cnt} time(s)). Consider registering an automation "
+                        f"({count} time(s)). Consider registering an automation "
                         f"GoalType to optimise their K and Judge defaults."
                     ),
                 ))

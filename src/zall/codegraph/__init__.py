@@ -424,12 +424,6 @@ _LANGUAGE_PATTERNS: dict[str, dict[str, Any]] = {
 }
 
 
-# 添加 Rust 缺少的 struct/trait 枚举值
-class SymbolKindExt:  # noqa: E302
-    STRUCT = "struct"
-    TRAIT = "trait"
-    PROTOCOL = "protocol"
-
 
 # 将缺失的枚举值添加到 SymbolKind
 for _name in ("STRUCT", "TRAIT", "PROTOCOL"):
@@ -471,7 +465,6 @@ class CodeIndexer:
         index = CodeIndex()
         index.indexed_at = time.time()
 
-        start = time.time()
         for root, dirs, files in os.walk(str(project_dir), topdown=True):
             # 过滤跳过目录
             dirs[:] = [d for d in dirs if d not in self._skip_dirs
@@ -555,7 +548,6 @@ class CodeIndexer:
 
         # 找 class 范围 (用于确定方法属于哪个类)
         current_class: str | None = None
-        class_line: int = 0
         class_indent: int = 0
 
         for line_idx, line in enumerate(lines, 1):
@@ -582,7 +574,6 @@ class CodeIndexer:
                     if kind in (SymbolKind.CLASS, SymbolKind.STRUCT,
                                 SymbolKind.INTERFACE, SymbolKind.TRAIT):
                         current_class = name
-                        class_line = line_idx
                         class_indent = indent
 
                     symbol = Symbol(

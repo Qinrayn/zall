@@ -163,13 +163,13 @@ class ProjectAnalysisTool:
 
         # Summary
         parts.append(f"[Project Analysis: {root.name}]")
-        parts.append(f"\n  📊 Overview:")
+        parts.append("\n  📊 Overview:")
         parts.append(f"    Total files: {total_files}")
         parts.append(f"    Total lines:  ~{total_lines:,}")
 
         # Language breakdown
-        parts.append(f"\n  🔤 Languages:")
-        for lang in sorted(lang_counts.keys(), key=lambda l: -lang_counts[l]):
+        parts.append("\n  🔤 Languages:")
+        for lang in sorted(lang_counts.keys(), key=lambda x: -lang_counts[x]):
             files = lang_counts[lang]
             lines = lang_lines.get(lang, 0)
             pct = f"({files * 100 // total_files}%)" if total_files else ""
@@ -177,7 +177,7 @@ class ProjectAnalysisTool:
 
         # Directory tree
         if dir_structure:
-            parts.append(f"\n  📁 Structure:")
+            parts.append("\n  📁 Structure:")
             parts.extend(dir_structure[:40])  # Limit output
             if len(dir_structure) > 40:
                 parts.append(f"    ... ({len(dir_structure) - 40} more entries)")
@@ -187,11 +187,11 @@ class ProjectAnalysisTool:
             try:
                 stats = self._cg.get_stats()
                 if stats.get("status") == "indexed":
-                    parts.append(f"\n  🔍 CodeGraph:")
+                    parts.append("\n  🔍 CodeGraph:")
                     parts.append(f"    Symbols: {stats.get('symbol_count', 0)}")
                     parts.append(f"    Files:   {stats.get('file_count', 0)}")
                     parts.append(f"    Errors:  {stats.get('error_count', 0)}")
-                    parts.append(f"    Use /codegraph search <q> to find symbols")
+                    parts.append("    Use /codegraph search <q> to find symbols")
             except Exception:
                 pass
 

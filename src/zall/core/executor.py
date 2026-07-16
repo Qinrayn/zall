@@ -39,7 +39,7 @@ from zall.core.safety import Judgement, SafeLevel, context_judge
 from zall.core.verifiability import EventType
 
 if TYPE_CHECKING:
-    from zall.core.loop import AgentLoop, LoopEvent, ToolNotFound
+    from zall.core.loop import AgentLoop
 
 
 def _loop_event(*args: Any, **kwargs: Any) -> Any:
