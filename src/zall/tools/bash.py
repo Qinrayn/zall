@@ -23,11 +23,45 @@ import sys
 import threading
 import time
 import base64
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from zall.core.tool import ToolResult
 
 MAX_OUTPUT_BYTES = 50_000  # Maximum output (50KB, prevents context pollution)
+
+
+# ── BashExecutor Protocol (v0.3.0: extractable strategy) ──
+
+
+@runtime_checkable
+class BashExecutor(Protocol):
+    """Strategy protocol for bash command execution.
+
+    Implementations:
+      - PopenExecutor: default subprocess-based (current behavior)
+      - PtyExecutor: PTY-based for interactive commands (optional)
+
+    The BashTool uses the default executor but allows injection
+    of PtyExecutor for enhanced capabilities.
+    """
+
+    def execute(
+        self,
+        command: str,
+        timeout: int,
+        cwd: str | None = None,
+    ) -> ToolResult:
+        """Execute a shell command and return the result.
+
+        Args:
+            command: The command to execute
+            timeout: Timeout in seconds
+            cwd: Working directory (None = current)
+
+        Returns:
+            ToolResult with stdout/stderr/exit_code
+        """
+        ...
 
 
 def _preferred_encoding() -> str:
@@ -385,6 +419,9 @@ def _truncate_at_bytes_enc(text: str, max_bytes: int, encoding: str = "utf-8") -
 class BashTool:
     """Execute shell command tool (ACI design).
 
+    Uses a pluggable executor strategy (PopenExecutor by default,
+    PtyExecutor for interactive commands).
+
     IPR-0 invariants:
         - always uses timeout (default 120s)
         - output exceeding MAX_OUTPUT_BYTES is truncated with notice
@@ -397,6 +434,14 @@ class BashTool:
     """
 
     __test__ = False
+
+    def __init__(self, executor: BashExecutor | None = None) -> None:
+        """Initialize with optional executor strategy.
+
+        Args:
+            executor: Executor to use. Defaults to PopenExecutor.
+        """
+        self._executor = executor or PopenExecutor()
 
     @property
     def tool_id(self) -> str:
@@ -458,10 +503,7 @@ class BashTool:
                 error="command required",
             )
 
-        # v0.0.23: 自保护防线 (defense-in-depth)
-        # 在 context_judge 之后、subprocess 之前再check一次。
-        # 即使 context_judge rule被bypass (如用户自定义 rules.toml 把 bash 全whitelist),
-        # 本check也reject自terminate / 系统破坏command。
+        # Self-protection check (defense-in-depth)
         blocked = _check_self_protection(command)
         if blocked:
             return ToolResult(
@@ -470,38 +512,43 @@ class BashTool:
                 error=blocked,
             )
 
-        # Command semantics analysis for exit code interpretation
-        # 分析command是只读/write/network/危险, 用于securityaudit和 UI 展示
-        _semantics = None
-        try:
-            from zall.tools._bash_semantics import analyze_command
-            _semantics = analyze_command(command)
-        except Exception:
-            pass
-
         timeout = args.get("timeout", 120)
         if not isinstance(timeout, (int, float)) or timeout < 1:
             timeout = 120
-        timeout = min(timeout, 600)  # 最大 600s
+        timeout = min(timeout, 600)
 
         cwd = args.get("cwd") or None
 
-        # v0.0.22: Windows 上所有command统一通过 PowerShell EncodedCommand execute。
-        # 旧design只在 _is_powershell_command 时包装, 其余command交给 shell=True 的 cmd.exe,
-        # 但 cmd.exe 不支持 bash compatible语法 (mkdir -p, 单引号字符串, && 复合command),
-        # 导致弱model按 bash 习惯写的command在 Windows 上频繁失败。
-        # PowerShell 原生支持这些语法 (mkdir -p 是 New-Item -Force 别名, 单引号是字面串),
-        # 是 Windows 上 bash tool的更优execute后端。
-        # 注意: PS 5.1 (Windows default) 不支持 && / ||, 需 _translate_chain_for_ps5 translate。
-        # EncodedCommand (Base64 UTF-16LE) 同时避免引号转义 / 中文encoding / inject问题。
-        # $ProgressPreference='SilentlyContinue' 禁用进度记录, 避免 CLIXML 噪声pollution stderr。
+        return self._executor.execute(command, timeout, cwd=cwd)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PopenExecutor — Default subprocess-based executor
+# ═══════════════════════════════════════════════════════════════════
+
+
+class PopenExecutor:
+    """Subprocess-based bash executor (default strategy).
+
+    Uses subprocess.Popen with shell=True. Supports process group
+    termination on timeout. This is the original BashTool behavior
+    extracted into the executor strategy pattern.
+    """
+
+    def execute(
+        self,
+        command: str,
+        timeout: int,
+        cwd: str | None = None,
+    ) -> ToolResult:
+        """Execute a command via subprocess, return ToolResult."""
+        # Windows: translate bash chains for PowerShell 5.1
         if sys.platform == "win32":
             command = _translate_chain_for_ps5(command)
             ps_script = f"$ProgressPreference='SilentlyContinue'\n{command}"
             encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
             command = f"powershell -NoProfile -EncodedCommand {encoded}"
 
-        # executecommand (v0.2.0 fix: Popen 而非 subprocess.run, 确保timeout后可杀process组)
         start = time.monotonic()
         enc = _preferred_encoding()
         proc = None
@@ -518,12 +565,11 @@ class BashTool:
                 encoding=enc,
                 errors="replace",
                 env=_sanitize_env(),
-                start_new_session=True,  # 为超时后杀进程组创建新 session
+                start_new_session=True,
             )
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             duration = time.monotonic() - start
-            # 杀死整个process组 (包括子process)
             if proc is not None:
                 try:
                     if sys.platform == "win32":
@@ -552,8 +598,6 @@ class BashTool:
         duration = time.monotonic() - start
         exit_code = proc.returncode
 
-        # B3 fix: 使用实际decode的encoding计算字节数, 非硬encoding utf-8
-        # stdout 用系统encodingdecode的, truncatemust用同一种encoding
         std_enc = _preferred_encoding()
         truncated = False
         stdout_bytes = len(stdout.encode(std_enc, errors="replace"))
@@ -568,7 +612,6 @@ class BashTool:
                 "\n... [stderr too large]"
             )
 
-        # buildoutput
         output_parts = [f"exit_code: {exit_code}"]
         if stdout:
             output_parts.append(f"stdout:\n{stdout}")

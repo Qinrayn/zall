@@ -492,10 +492,11 @@ class TestCommandMeta:
             assert cmd in get_known_commands(), f"{cmd} missing"
 
     def test_all_new_commands_in_prompt_meta(self) -> None:
-        """Happy path: 所有新command在 prompt.py 的 _COMMAND_META 中."""
-        from zall.cli.prompt import _COMMAND_META
+        """Happy path: 所有新command在 get_command_meta() 中."""
+        from zall.cli.commands._common import get_command_meta
+        meta = get_command_meta()
         for cmd in ("/add", "/drop", "/fix", "/review", "/retry", "/search"):
-            assert cmd in _COMMAND_META, f"{cmd} missing from _COMMAND_META"
+            assert cmd in meta, f"{cmd} missing from get_command_meta()"
 
     def test_bare_slash_includes_new_commands(self) -> None:
         """Happy path: 孤立的 / 显示新command."""

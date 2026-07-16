@@ -15,7 +15,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from zall.cli import app as app_mod
+from zall.cli.orchestrator import confirm_goal as _confirm_goal
 from zall.cli.render import render_goal_card
 from zall.cli.responder import CliUserResponder
 from zall.core.action import Action
@@ -132,7 +132,7 @@ class TestGoalConfirm:
         """Happy path: --yes pattern自动confirm Goal (不blocking)."""
         buf = io.StringIO()
         goal = _refined_goal("fix the bug")
-        ok = app_mod._confirm_goal(buf, goal, judge_mode="none", yes=True)
+        ok = _confirm_goal(buf, goal, judge_mode="none", yes=True)
         assert ok is True
         assert "Goal" in buf.getvalue()
 
@@ -141,7 +141,7 @@ class TestGoalConfirm:
         buf = io.StringIO()
         monkeypatch.setattr("sys.stdin", _FakeStdin())
         goal = _refined_goal("fix the bug")
-        ok = app_mod._confirm_goal(buf, goal, judge_mode="none", yes=False)
+        ok = _confirm_goal(buf, goal, judge_mode="none", yes=False)
         assert ok is True
         assert "Goal" in buf.getvalue()
 
@@ -151,7 +151,7 @@ class TestGoalConfirm:
         monkeypatch.setattr("sys.stdin", _FakeStdinTTY())
         seq = iter(["y"])
         goal = _refined_goal("fix the bug")
-        ok = app_mod._confirm_goal(
+        ok = _confirm_goal(
             buf, goal, judge_mode="none", yes=False,
             input_fn=lambda _: next(seq),
         )
@@ -163,7 +163,7 @@ class TestGoalConfirm:
         monkeypatch.setattr("sys.stdin", _FakeStdinTTY())
         seq = iter([""])
         goal = _refined_goal("fix the bug")
-        ok = app_mod._confirm_goal(
+        ok = _confirm_goal(
             buf, goal, judge_mode="none", yes=False,
             input_fn=lambda _: next(seq),
         )

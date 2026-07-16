@@ -207,14 +207,14 @@ def get_model_provider(model_name: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 
 _MODEL_PRESETS: list[tuple[str, str, str, str]] = [
-    ("agnes-2.0-flash", "agnes-2.0-flash", "fast / cheap (default + latest)", "openai"),
-    ("agnes-2.5-flash", "agnes-2.5-flash", "fast / cheap (newer)", "openai"),
-    ("agnes-1.5-flash", "agnes-1.5-flash", "fast / cheap (legacy)", "openai"),
+    ("agnes-2.0-flash", "agnes-2.0-flash", "fast / cheap (default + latest)", "agnes"),
+    ("agnes-2.5-flash", "agnes-2.5-flash", "fast / cheap (newer)", "agnes"),
+    ("agnes-1.5-flash", "agnes-1.5-flash", "fast / cheap (legacy)", "agnes"),
     ("gpt-4o-mini",     "gpt-4o-mini",     "OpenAI, cheap", "openai"),
     ("gpt-4o",          "gpt-4o",          "OpenAI, capable", "openai"),
     ("claude-3-5-sonnet", "claude-3-5-sonnet", "Anthropic", "anthropic"),
     ("claude-sonnet-4", "claude-sonnet-4-20250514", "Anthropic Claude Sonnet 4", "anthropic"),
-    ("deepseek-chat",   "deepseek-chat",   "DeepSeek", "openai"),
+    ("deepseek-chat",   "deepseek-chat",   "DeepSeek", "deepseek"),
     ("glm-4-flash",     "glm-4-flash",     "Zhipu GLM", "openai"),
     ("qwen-plus",       "qwen-plus",       "Alibaba Qwen", "openai"),
     ("gemini-2.5-pro",  "gemini-2.5-pro-exp-03-25", "Google Gemini 2.5 Pro", "gemini"),

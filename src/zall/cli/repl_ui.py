@@ -31,12 +31,16 @@ from zall.cli.responder import CliUserResponder
 from zall.core.checkpoint import CheckpointManager
 from zall.core.compactor import ModelCompactor
 from zall.core.context import Context
+from zall._util.logging import get_zall_logger as _get_zall_logger
+from zall.core.builder import AgentBuilder
 from zall.core.loop import AgentLoop
 from zall.core.model import Message
 from zall.mcp.tool import MCPTool
 from zall.safety.rules_file import load_rules
 from zall.skills import Skill, load_skills
 from zall.tools.git_protect import GitProtect
+
+_log = _get_zall_logger(__name__)
 
 __all__ = [
     "repl",
@@ -168,13 +172,23 @@ def build_repl_loop(
         checkpoint_mgr = CheckpointManager()
     except (OSError, PermissionError, ValueError):
         checkpoint_mgr = None
-    loop = AgentLoop(
-        model=adapter, tools=tools, rules=rules, goal=goal, context=context,
-        user_responder=responder, judge=None, observer=observer,
-        max_steps=max_steps if max_steps and max_steps > 0 else REPL_MAX_STEPS,
-        stream=stream, git_protect=git_protect, checkpoint_mgr=checkpoint_mgr,
-        plan_mode=plan_mode, compactor=ModelCompactor(),
-        ext_registry=ext_registry,
+    loop = (
+        AgentBuilder()
+        .with_model(adapter)
+        .with_tools(tools)
+        .with_rules(rules)
+        .with_goal(goal)
+        .with_context(context)
+        .with_responder(responder)
+        .with_observer(observer)
+        .with_max_steps(max_steps if max_steps and max_steps > 0 else REPL_MAX_STEPS)
+        .with_stream(stream)
+        .with_git_protect(git_protect)
+        .with_checkpoint(checkpoint_mgr)
+        .with_plan_mode(plan_mode)
+        .with_compactor(ModelCompactor())
+        .with_extensions(ext_registry)
+        .build()
     )
     if seed_messages:
         loop.set_messages(list(seed_messages))
@@ -217,8 +231,8 @@ def repl(
         from zall.extensions.usage_tracker import create_usage_tracker
         ext_registry.register(create_auto_learn())
         ext_registry.register(create_usage_tracker())
-    except Exception:
-        pass  # Built-in extensions are optional
+    except Exception as _ext_err:
+        _log.warning("built-in extensions skipped: %s", _ext_err)  # Built-in extensions are optional
 
     if input_fn is None:
         input_fn = make_prompt_fn(
@@ -263,8 +277,8 @@ def repl(
                 out.flush()
         _t = _th.Thread(target=_show_update_hint, daemon=True)
         _t.start()
-    except Exception:
-        pass  # 更新检查失败不阻断
+    except Exception as _update_err:
+        _log.warning("background update check failed: %s", _update_err)  # 更新检查失败不阻断
 
     loop: AgentLoop | None = None
 
@@ -357,7 +371,36 @@ def repl(
                         err_lower = err.lower()
                         if any(kw in err_lower for kw in transient_keywords):
                             out.write(f"  \u26a0 {err[:100]}\n")
-                            out.write("  \u00b7 transient error, context preserved \u2014 try again\n")
+                            # auto-retry up to 3 times with backoff
+                            import time as _time
+                            retried = False
+                            for attempt in range(1, 4):
+                                delay = attempt * 2  # 2s, 4s, 6s
+                                out.write(f"  \u00b7 retry {attempt}/3 in {delay}s...\n")
+                                out.flush()
+                                _time.sleep(delay)
+                                try:
+                                    # stop spinner before retry
+                                    renderer = state.get("_renderer")
+                                    if renderer is not None and hasattr(renderer, "_stop_spinner"):
+                                        renderer._stop_spinner()
+                                    result = loop.step()
+                                except KeyboardInterrupt:
+                                    out.write("  \u00b7 interrupted\n")
+                                    out.flush()
+                                    break
+                                if result.is_terminal and result.egress and result.egress.error:
+                                    err2 = result.egress.error.lower()
+                                    if not any(kw in err2 for kw in transient_keywords):
+                                        break  # non-transient → fall through to error handler
+                                    # still transient, continue retry loop
+                                else:
+                                    retried = True
+                                    break  # step succeeded
+                            if retried:
+                                continue  # go back to step loop
+                            # all retries exhausted
+                            out.write("  \u00b7 API still unavailable after 3 retries. Try /model to switch models.\n")
                             out.flush()
                             break
                         if "max_steps" in err or "MAX_STEPS" in err:
@@ -389,8 +432,8 @@ def repl(
         if _adapter is not None and hasattr(_adapter, "close"):
             try:
                 _adapter.close()
-            except Exception:
-                pass
+            except Exception as _close_err:
+                _log.warning("REPL adapter close failed (non-fatal): %s", _close_err)
         state.pop("_adapter", None)
         clear_console_cache()  # v0.3.0 (A2): 释放累积的 Console 缓存
         _clear_repl_autosave()

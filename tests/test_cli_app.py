@@ -23,9 +23,21 @@ import pytest
 from zall.cli import app as app_mod
 from zall.cli import config as config_mod
 from zall.cli import session as session_mod
-from zall.cli.commands import cmd_compact, cmd_diff, cmd_doctor
+from zall.cli.commands import cmd_compact, cmd_diff, cmd_doctor, handle_slash as _handle_slash
+from zall.cli.repl_ui import repl as _repl
+from zall.cli.orchestrator import make_usage_observer as _make_usage_observer
+from zall.cli.session import _list_sessions, _run_eval, _run_replay, _run_resume
 from zall.core.goal import TerminationState
 from zall.core.model import Message, ModelResponse, StopReason, ToolCall, ToolChoice
+
+# Test-local aliases (replaces removed app.py re-export block)
+app_mod.repl = _repl
+app_mod._handle_slash = _handle_slash
+app_mod._make_usage_observer = _make_usage_observer
+app_mod._list_sessions = _list_sessions
+app_mod._run_eval = _run_eval
+app_mod._run_replay = _run_replay
+app_mod._run_resume = _run_resume
 
 
 # ──────────────────────────────────────────────────────────────────────────

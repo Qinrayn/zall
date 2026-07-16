@@ -8,6 +8,10 @@ Features:
   - Keyboard shortcuts: Ctrl-L clear, Ctrl-W delete word, Ctrl-U delete line
   - Cross-session command history (~/.zall/history)
 
+Command descriptions are sourced from the dynamic @slash_command registry
+(zall.cli.commands.get_command_meta), NOT from a static dict. New commands
+registered via @slash_command automatically appear in completions.
+
 Auto-degrades to built-in input() when prompt_toolkit is unavailable.
 
 IPR constraints:
@@ -19,47 +23,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Callable
-
-
-# Known commands (injected by app.py to avoid circular import)
-_COMMAND_META: dict[str, str] = {
-    "/help": "show this help",
-    "/h": "show this help",
-    "/about": "project philosophy",
-    "/version": "show version",
-    "/v": "show version",
-    "/sessions": "list recent sessions",
-    "/resume": "resume a session",
-    "/eval": "valuate all sessions",
-    "/replay": "replay a session",
-    "/model": "show/switch model",
-    "/max-steps": "show/set step limit",
-    "/verbose": "toggle verbose output",
-    "/cost": "show token usage",
-    "/diff": "show git diff",
-    "/web": "fetch a web page",
-    "/search": "search the web",
-    "/compact": "compress context",
-    "/plan": "toggle plan mode",
-    "/skills": "list skills",
-    "/skill": "run a skill",
-    "/doctor": "diagnose config",
-    "/clear": "clear screen",
-    "/undo": "revert last tool action",
-    "/git": "git operations",
-    "/add": "add file(s) to context",
-    "/drop": "remove added files from context",
-    "/fix": "auto-diagnose and fix last error",
-    "/review": "review uncommitted code changes",
-    "/retry": "re-do last agent step",
-    "/init": "initialize project config",
-    "/commit": "smart git commit",
-    "/checkpoint": "manage file snapshots",
-    "/revert": "restore to a checkpoint",
-    "/exit": "exit",
-    "/quit": "exit",
-    "/q": "exit",
-}
 
 
 def _home_dir() -> Path:
@@ -81,8 +44,16 @@ _HISTORY_FILE = _home_dir() / ".zall" / "history.jsonl"
 _HISTORY_MAX = 500
 
 
-def _build_custom_completer(commands: list[str], skills: list[str] | None = None) -> Any:
-    """Build a custom Completer with command descriptions in the dropdown."""
+def _build_custom_completer(
+    commands: list[str],
+    skills: list[str] | None = None,
+    command_meta: dict[str, str] | None = None,
+) -> Any:
+    """Build a custom Completer with command descriptions in the dropdown.
+
+    command_meta: {command_name: description} dict sourced from the dynamic
+                  @slash_command registry. Falls back to get_command_meta().
+    """
     try:
         from prompt_toolkit.completion import Completer, Completion
         from prompt_toolkit.formatted_text import HTML
@@ -90,10 +61,12 @@ def _build_custom_completer(commands: list[str], skills: list[str] | None = None
         return None
 
     import html as _html
-    all_cmds = list(commands or _COMMAND_META.keys())
+    from zall.cli.commands import get_command_meta as _get_command_meta
+    meta = command_meta if command_meta is not None else _get_command_meta()
+    all_cmds = list(commands or meta.keys())
     entries: list[tuple[str, str, str]] = []
     for cmd in sorted(set(all_cmds)):
-        desc = _COMMAND_META.get(cmd, "")
+        desc = meta.get(cmd, "")
         if desc:
             entries.append((cmd, cmd, desc))
         else:
@@ -172,12 +145,14 @@ def make_prompt_fn(
         return lambda p: input(p)
 
     # Prefer custom Completer (with descriptions), fall back to NestedCompleter
+    from zall.cli.commands import get_command_meta as _get_command_meta
+    _meta = _get_command_meta()
     completer = _build_custom_completer(
-        commands or list(_COMMAND_META.keys()), skills
+        commands or list(_meta.keys()), skills, command_meta=_meta,
     )
     if completer is None:
         completer = _build_nested_completer(
-            commands or list(_COMMAND_META.keys()), skills
+            commands or list(_meta.keys()), skills
         )
 
     # Persistent history (FileHistory manages automatically)

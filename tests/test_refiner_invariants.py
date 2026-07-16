@@ -145,14 +145,15 @@ def test_refine_goal_fallback_on_refiner_broken(monkeypatch):
 
     IPR-0 Counterexample: construct层故障不得让 run/REPL 崩溃.
     """
-    from zall.cli import app as cli_app
+    from zall.core.refiner import GoalRefiner
+    from zall.cli.orchestrator import refine_goal as _refine_goal
 
     def _boom(*a, **k):
         raise RuntimeError("refiner exploded")
 
-    monkeypatch.setattr(cli_app.GoalRefiner, "refine", _boom)
+    monkeypatch.setattr(GoalRefiner, "refine", _boom)
     # 不应抛; 应fallback到minimal诚实construct
-    goal = cli_app._refine_goal("修复登录页 crash", judge_mode="none")
+    goal = _refine_goal("修复登录页 crash", judge_mode="none")
     assert goal.statement.goal_type in (GoalType.UNKNOWN, GoalType.BUGFIX)
 
 

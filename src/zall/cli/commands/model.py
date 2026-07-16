@@ -46,27 +46,44 @@ def _detect_configured_providers() -> dict[str, bool]:
     """Scan env vars and config to detect which providers have valid API keys.
 
     Returns a dict of provider → bool indicating if it's configured and ready.
+    Only marks a provider as configured when its specific key/env is available.
+    Fix: global api_key only marks the provider that matches the configured model,
+    not both "openai" and "agnes".
     """
+    from zall._util.model_registry import get_model_provider
+
     configured: dict[str, bool] = {}
     try:
         cfg = load_config()
         api_key = (cfg.get("api_key") or "").strip()
+        model_name = (cfg.get("model") or "").strip()
     except Exception:
         cfg = {}
         api_key = ""
+        model_name = ""
+
+    # Determine which provider the global api_key actually belongs to
+    global_key_provider: str | None = None
+    if api_key and api_key != "your-api-key-here":
+        # Infer from configured model name
+        if model_name:
+            global_key_provider = get_model_provider(model_name)
+        else:
+            # No model configured → default to agnes (the default)
+            global_key_provider = "agnes"
 
     for provider, (_display, env_var, _base, _url, _prefixes, _adapter) in _PROVIDER_REGISTRY.items():
-        # Check env var first
+        # Check env var first (exact per-provider match)
         if env_var and os.environ.get(env_var, "").strip():
             configured[provider] = True
             continue
-        # Check global config (ZALL_API_KEY used by openai/agnes)
-        if provider in ("openai", "agnes") and api_key and api_key != "your-api-key-here":
-            configured[provider] = True
-            continue
-        # Check provider-specific config (future: per-provider key in config.toml)
+        # Check provider-specific config key
         prov_key = cfg.get(f"{provider}_api_key", "") if isinstance(cfg, dict) else ""
         if prov_key and prov_key != "your-api-key-here":
+            configured[provider] = True
+            continue
+        # Check global api_key — only marks the inferred provider
+        if provider == global_key_provider:
             configured[provider] = True
             continue
         # Ollama (local) is always "configured" — no key needed

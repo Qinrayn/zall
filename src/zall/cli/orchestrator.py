@@ -24,6 +24,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from zall._util.logging import get_zall_logger as _get_zall_logger
 from zall.cli import config as _cli_config
 from zall.cli.judge import SystemJudge, UndecidableJudge
 from zall.cli.render import CliRenderer, render_goal_card, clear_console_cache
@@ -38,7 +39,7 @@ from zall.core.goal import (
     RefinedGoal,
     TerminationState,
 )
-from zall.core.loop import AgentLoop, RunEgress
+from zall.core.loop import RunEgress
 from zall.core.refiner import GoalRefiner
 from zall.core.tool import ToolRegistry, ToolResult
 from zall.core.compactor import ModelCompactor
@@ -60,6 +61,8 @@ from zall.tools.read_image import ReadImageTool
 from zall.tools.search import SearchTool
 from zall.mcp.config import load_mcp_config, MCPServerSpec
 from zall.mcp.tool import MCPTool
+
+_log = _get_zall_logger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -399,24 +402,28 @@ def run(
     git_protect = GitProtect()
     try:
         checkpoint_mgr = CheckpointManager()
-    except (OSError, PermissionError, ValueError):
+    except (OSError, PermissionError, ValueError) as _cp_err:
+        _log.warning("checkpoint manager unavailable: %s", _cp_err)
         checkpoint_mgr = None
 
-    # 10. AgentLoop
-    loop = AgentLoop(
-        model=adapter,
-        tools=tools,
-        rules=rules,
-        goal=goal,
-        context=context,
-        user_responder=responder,
-        judge=judge,
-        observer=observer,
-        max_steps=max_steps,
-        stream=stream,
-        git_protect=git_protect,
-        checkpoint_mgr=checkpoint_mgr,
-        compactor=ModelCompactor(),
+    # 10. AgentLoop (via AgentBuilder — O9: unified construction path)
+    from zall.core.builder import AgentBuilder
+    loop = (
+        AgentBuilder()
+        .with_model(adapter)
+        .with_tools(tools)
+        .with_rules(rules)
+        .with_goal(goal)
+        .with_context(context)
+        .with_responder(responder)
+        .with_judge(judge)
+        .with_observer(observer)
+        .with_max_steps(max_steps)
+        .with_stream(stream)
+        .with_git_protect(git_protect)
+        .with_checkpoint(checkpoint_mgr)
+        .with_compactor(ModelCompactor())
+        .build()
     )
 
     # 11. Execute
@@ -435,15 +442,16 @@ def run(
         if hasattr(adapter, "close"):
             try:
                 adapter.close()
-            except Exception:
-                pass
+            except Exception as _close_err:
+                _log.warning("adapter close failed (non-fatal): %s", _close_err)
         clear_console_cache()  # v0.3.0 (A2): 释放累积的 Console 缓存
 
     # 12. TrustAnchor + save
     try:
         from zall.core.verifiability import FileTrustAnchor
         trust_anchor = FileTrustAnchor()
-    except Exception:
+    except Exception as _ta_err:
+        _log.warning("trust anchor unavailable: %s", _ta_err)
         trust_anchor = None
 
     from zall.cli.session import _save_session

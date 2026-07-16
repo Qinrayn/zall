@@ -885,7 +885,8 @@ def cmd_expand(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
         else:
             out.write(f"  tool #{idx} not found or already expanded\n")
     else:
-        folded = state.get("_renderer").folded_count if state and hasattr(state.get("_renderer", None), "folded_count") else 0  # type: ignore[union-attr]
+        renderer = state.get("_renderer") if state else None
+        folded = renderer.folded_count if renderer and hasattr(renderer, "folded_count") else 0
         if folded > 0:
             out.write(f"  {folded} tool(s) folded. Use /expand <N> or /expand all\n")
         else:

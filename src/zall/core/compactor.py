@@ -186,26 +186,35 @@ class WatermarkMonitor:
         不考虑 tokenizer 差异, 只做水位预警参考。
 
         O1: cached with dirty flag — avoids O(n) re-scan when messages haven't changed.
+        O10: 只构建前 _SAMPLE_SIZE 字符的采样文本, 避免 O(n) 全量拼接
+        (_estimate_chars_per_token 只采样前 1000 字符)。
         """
         if not self._token_estimate_dirty:
             return self._cached_token_estimate
-        # O4: 用 list accumulator 替代字符串拼接 (O(n²) → O(n))
-        # B1 fix: total_chars mustinit化
-        text_parts: list[str] = []
+        # O10: 累积 total_chars 计数, 只构建采样用的短文本
         total_chars = 0
+        sample_parts: list[str] = []
+        sample_size = 0
         for m in messages:
             content = m.content or ""
             total_chars += len(content)
-            text_parts.append(content)
+            # 只收集足够 _estimate_chars_per_token 采样的文本
+            if sample_size < _SAMPLE_SIZE:
+                chunk = content[:_SAMPLE_SIZE - sample_size]
+                sample_parts.append(chunk)
+                sample_size += len(chunk)
             # tool调用名和parameter也占 token
             if m.tool_calls:
                 for tc in m.tool_calls:
                     tc_str = tc.tool_id + str(tc.args)
                     total_chars += len(tc_str)
-                    text_parts.append(tc_str)
-        combined_text = "".join(text_parts)
+                    if sample_size < _SAMPLE_SIZE:
+                        chunk = tc_str[:_SAMPLE_SIZE - sample_size]
+                        sample_parts.append(chunk)
+                        sample_size += len(chunk)
+        combined_sample = "".join(sample_parts)
         # 语言感知 + 模型感知的 chars/token 系数 (O9)
-        chars_per_token = _estimate_chars_per_token(combined_text, model_name=model_name)
+        chars_per_token = _estimate_chars_per_token(combined_sample, model_name=model_name)
         # 每条message的 role + overhead 约 10 token
         overhead = len(messages) * 10
         self._cached_token_estimate = int(total_chars / chars_per_token) + overhead

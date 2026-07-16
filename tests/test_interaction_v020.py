@@ -15,16 +15,16 @@ from typing import Any
 
 import pytest
 
-from zall.cli import app as app_mod
 from zall.cli import config as config_mod
-from zall.cli.app import (
+from zall.cli.config import (
     _config_status,
     _onboarding,
     _resolve_model_alias,
-    _setup_completion,
-    _suggest_command,
 )
+from zall.cli.commands._common import _setup_completion, _suggest_command
+from zall.cli.commands import handle_slash as _handle_slash
 from zall.cli.commands.model import cmd_model
+from zall.cli.repl_ui import repl
 
 
 class _FakeTTY(io.StringIO):
@@ -278,7 +278,7 @@ class _FakeLoop:
 class TestCompactPreservesConversation:
     def test_compact_no_clear_when_no_model(self) -> None:
         """Counterexample (Bug C): /compact 无 model 时不得 return "clear" 丢弃对话态."""
-        from zall.cli.app import _handle_slash
+        from zall.cli.commands import handle_slash as _handle_slash
 
         loop = _FakeLoop(n_msgs=5, model=None)
         out = io.StringIO()
@@ -289,7 +289,7 @@ class TestCompactPreservesConversation:
 
     def test_compact_no_clear_when_nothing_to_compact(self) -> None:
         """Counterexample (Bug C): /compact 无可压缩 (<=6 条) 时不得 "clear"."""
-        from zall.cli.app import _handle_slash
+        from zall.cli.commands import handle_slash as _handle_slash
 
         loop = _FakeLoop(n_msgs=5, model=_FakeModel())  # 5 <= 6 → 无需压缩
         out = io.StringIO()
@@ -301,7 +301,7 @@ class TestCompactPreservesConversation:
     def test_compact_success_keeps_loop_replaces_messages(self) -> None:
         """Happy path (Bug C): /compact 成功时原地replace _messages 且 return "handled"
         (不 "clear" 丢弃压缩后的上下文)."""
-        from zall.cli.app import _handle_slash
+        from zall.cli.commands import handle_slash as _handle_slash
 
         loop = _FakeLoop(n_msgs=8, model=_FakeModel())  # 8 > 6 → 真压缩
         out = io.StringIO()
@@ -342,10 +342,10 @@ class TestGoalConfirmUsesInputFn:
 
     def _setup(self, monkeypatch: pytest.MonkeyPatch):
         # isolatereal副作用: onboarding / mcp / skills / readline 补全
-        monkeypatch.setattr(app_mod, "_onboarding", lambda out, fn: None)
-        monkeypatch.setattr(app_mod, "_build_mcp_tools", lambda *a, **k: [])
-        monkeypatch.setattr(app_mod, "load_skills", lambda *a, **k: [])
-        monkeypatch.setattr(app_mod, "_setup_completion", lambda *a, **k: None)
+        monkeypatch.setattr("zall.cli.config._onboarding", lambda out, fn: None)
+        monkeypatch.setattr("zall.cli.orchestrator.build_mcp_tools", lambda *a, **k: [])
+        monkeypatch.setattr("zall.skills.load_skills", lambda *a, **k: [])
+        monkeypatch.setattr("zall.cli.commands._common._setup_completion", lambda *a, **k: None)
         # 强制 stdin TTY → 触发 _confirm_goal promptpath (否则non- TTY 自动confirm)
         monkeypatch.setattr("sys.stdin", _StdinFake())
         # fake adapter + 调用计数
@@ -380,8 +380,8 @@ class TestGoalConfirmUsesInputFn:
         """Counterexample (Bug D): confirm input n → reject, 不得调model."""
         calls = self._setup(monkeypatch)
         out = _FakeTTY()
-        app_mod.repl(input_fn=_make_input(["task", "n", "/exit"]),
-                     out=out, stream=False, yes=False)
+        repl(input_fn=_make_input(["task", "n", "/exit"]),
+             out=out, stream=False, yes=False)
         assert "goal not confirmed" in out.getvalue()
         assert calls["n"] == 0  # 拒绝 → 不调模型
 
@@ -389,8 +389,8 @@ class TestGoalConfirmUsesInputFn:
         """Happy path (Bug D): confirm input y → accept, 调model (用injection的 input_fn)."""
         calls = self._setup(monkeypatch)
         out = _FakeTTY()
-        app_mod.repl(input_fn=_make_input(["task", "y", "/exit"]),
-                     out=out, stream=False, yes=False)
+        repl(input_fn=_make_input(["task", "y", "/exit"]),
+             out=out, stream=False, yes=False)
         assert "REPLY" in out.getvalue()
         assert calls["n"] >= 1  # 接受 → 调模型
 

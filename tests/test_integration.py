@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 
 from zall.cli.commands import cmd_cost, cmd_init
-from zall.cli.commands._common import _handle_bare_slash, _print_about, _print_help, handle_slash
-from zall.cli.prompt import make_prompt_fn, _COMMAND_META
+from zall.cli.commands._common import _handle_bare_slash, _print_about, _print_help, handle_slash, get_command_meta
+from zall.cli.prompt import make_prompt_fn
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -168,9 +168,10 @@ def test_make_prompt_fn_not_crash() -> None:
 
 
 def test_command_meta_contains_undo_git() -> None:
-    """_COMMAND_META 含新command."""
-    assert "/undo" in _COMMAND_META
-    assert "/git" in _COMMAND_META
+    """get_command_meta() 含新command."""
+    meta = get_command_meta()
+    assert "/undo" in meta
+    assert "/git" in meta
 
 
 # ──────────────────────────────────────────────────────────────────────────

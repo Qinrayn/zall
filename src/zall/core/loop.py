@@ -76,6 +76,7 @@ from zall.core.compactor import Compactor
 from zall.core.checkpoint import CheckpointManager
 from zall._util import skip_noise_dirs
 from zall._util.path import NOISE_DIRS
+from zall.core.executor import ToolExecutor
 
 
 # Nudge injected when the model returns an empty response (no tool call, no answer).
@@ -414,6 +415,9 @@ class AgentLoop:
         # Extension registry (Pi-style lifecycle hooks)
         self._ext_registry: ExtensionRegistry | None = config.ext_registry
 
+        # ToolExecutor: extracted tool execution orchestrator (v0.3.0)
+        self._tool_executor = ToolExecutor(self)
+
         self._run_id = uuid4().hex
         self._recorder = RunRecorder(self._run_id)
         self._messages: list[Message] = []
@@ -479,9 +483,13 @@ class AgentLoop:
         except (KeyboardInterrupt, SystemExit):
             # B5: fatal signals must propagate, must not be swallowed
             raise
-        except Exception:
-            # Presentation layer failures must not affect semantics (IPR-0 counterexample positive enforcement)
-            pass
+        except Exception as _emit_err:
+            # IPR-0: Presentation layer failures must not affect RunEgress semantics,
+            # but they must be observable (silent pass → violates falsifiability).
+            import logging as _zall_logging
+            _zall_logging.getLogger("zall.core.loop").warning(
+                "observer _emit failed (IPR-0 safe): %s", _emit_err,
+            )
 
     @property
     def run_id(self) -> str:
@@ -491,6 +499,13 @@ class AgentLoop:
     def goal(self) -> GoalTriple:
         """当前lock的 Goal (§9.2.1/§9.2.5 UX 投影只读接缝, 不改控制stream)。"""
         return self._goal
+
+    def _get_goal_type_str(self) -> str:
+        """Extract goal type string for lifecycle hook inputs."""
+        try:
+            return self._goal.statement.goal_type.value
+        except Exception:
+            return "unknown"
 
     @property
     def recorder(self) -> RunRecorder:
@@ -621,10 +636,19 @@ class AgentLoop:
             self._messages.append(Message(role="system", content=system_prompt))
         self._messages.append(Message.user(self._context.user_raw))
 
-        # Extension: on_agent_start
+        # Extension: on_agent_start (legacy) + on_turn_start (typed)
         if self._ext_registry is not None:
-            self._ext_registry.fire(
-                "on_agent_start",
+            from zall.core.lifecycle import TurnStartInput
+            _ts_input = TurnStartInput(
+                goal=self._goal,
+                model_name=getattr(self._model, "model_name", ""),
+                messages=list(self._messages),
+                tools=self._tools.tools if self._tools else (),
+                step=0,
+            )
+            self._ext_registry.fire_all(
+                "on_agent_start", "on_turn_start",
+                typed_input=_ts_input,
                 goal=self._goal,
                 model=self._model,
                 messages=list(self._messages),
@@ -638,16 +662,40 @@ class AgentLoop:
                 # M2: anchor run tail before returning
                 if self._anchor is not None:
                     self._recorder.anchor_to(self._anchor, int(time.time() * 1000))
-                # Extension: on_session_end
+                # Extension: on_session_end (legacy) + on_turn_done (typed)
                 if self._ext_registry is not None:
-                    self._ext_registry.fire("on_session_end", egress=result.egress)
+                    from zall.core.lifecycle import TurnDoneInput
+                    _td_input = TurnDoneInput(
+                        egress=result.egress,
+                        step_count=self._step_count,
+                        tool_counts=dict(self._tool_usage_counts),
+                        tool_errors={},
+                        goal_type=self._get_goal_type_str(),
+                    )
+                    self._ext_registry.fire_all(
+                        "on_session_end", "on_turn_done",
+                        typed_input=_td_input,
+                        egress=result.egress,
+                    )
                 return result.egress
             if result.kind == "awaiting_input":
                 # task mode: model STOP → check Goal termination → return RunEgress
                 # (dialog mode does not call run(), it calls step() and waits on awaiting_input)
                 egress = self._check_termination()
                 if self._ext_registry is not None:
-                    self._ext_registry.fire("on_session_end", egress=egress)
+                    from zall.core.lifecycle import TurnDoneInput
+                    _td_input = TurnDoneInput(
+                        egress=egress,
+                        step_count=self._step_count,
+                        tool_counts=dict(self._tool_usage_counts),
+                        tool_errors={},
+                        goal_type=self._get_goal_type_str(),
+                    )
+                    self._ext_registry.fire_all(
+                        "on_session_end", "on_turn_done",
+                        typed_input=_td_input,
+                        egress=egress,
+                    )
                 return egress
             # tool_used → 继续循环
 
@@ -841,9 +889,21 @@ class AgentLoop:
         Dialog mode does not judge met/not_met (dialog has no "completion" concept).
         """
         egress = self._make_egress(TerminationState.UNDECIDABLE)
-        # Extension: on_session_end
+        # Extension: on_session_end (legacy) + on_turn_done (typed)
         if self._ext_registry is not None:
-            self._ext_registry.fire("on_session_end", egress=egress)
+            from zall.core.lifecycle import TurnDoneInput
+            _td_input = TurnDoneInput(
+                egress=egress,
+                step_count=self._step_count,
+                tool_counts=dict(self._tool_usage_counts),
+                tool_errors={},
+                goal_type=self._get_goal_type_str(),
+            )
+            self._ext_registry.fire_all(
+                "on_session_end", "on_turn_done",
+                typed_input=_td_input,
+                egress=egress,
+            )
         return egress
 
     def add_user_message(self, content: str) -> None:
@@ -855,9 +915,18 @@ class AgentLoop:
         self._messages.append(Message.user(content))
         self._mark_watermark_dirty()
 
-        # Extension: on_user_input
+        # Extension: on_user_input (legacy + typed)
         if self._ext_registry is not None:
-            self._ext_registry.fire("on_user_input", content=content)
+            from zall.core.lifecycle import UserInputReceived
+            _ui_input = UserInputReceived(
+                content=content,
+                step=self._step_count,
+            )
+            self._ext_registry.fire_all(
+                "on_user_input", "on_user_input",
+                typed_input=_ui_input,
+                content=content,
+            )
 
     # O1: 标记 watermark token 估算cache为脏
     def _mark_watermark_dirty(self) -> None:
@@ -1213,271 +1282,9 @@ class AgentLoop:
                 found.append(label)
         return tuple(found)
 
-    def _process_gate(
-        self, action: Action, judgement: Judgement, tool_id: str, tool_call_id: str
-    ) -> GateResult | None:
-        """A2: handle gate state machine (含重跑循环), return GateResult 或 None (SUSPENDED timeout)。
-
-        提取自 _execute_tool_calls, 减少方法长度和嵌套深度。
-
-        B9 fix: _suspended_count 在入口重置, 确保计数器只针对
-        当前 tool_call 的连续 SUSPENDED, 不跨工具调用累积。
-
-        Returns:
-            GateResult — gate 批准执行, 调用方继续执行工具
-            None       — SUSPENDED 超时, 已注入拒绝消息
-        """
-        # B9 fix: 每次入口重置 SUSPENDED 计数器, 避免跨工具累积
-        self._suspended_count = 0
-        while True:
-            # 1. 记录 context_judge 结果
-            self._gate_decision_count += 1
-            self._recorder.append(
-                event_id=f"gate_decision_{self._gate_decision_count}",
-                ts=int(time.time() * 1000),
-                event_type=EventType.GATE_DECISION,
-                payload={
-                    "tool_id": action.tool_id,
-                    "level": judgement.level.value,
-                    "matched_rules": list(judgement.matched_rule_ids),
-                },
-            )
-            self._emit(LoopEvent(
-                kind="gate_decision",
-                step=self._step_count,
-                payload={
-                    "tool_id": action.tool_id,
-                    "args": dict(action.args),
-                    "level": judgement.level.value,
-                    "matched_rules": list(judgement.matched_rule_ids),
-                },
-            ))
-
-            # 2. confirm_gate state machine
-            gate = ConfirmGate(action, judgement)
-            gate_result = gate.process(response=None)
-
-            # greylist / blacklist 需要等 user response
-            while gate_result.state in (GateState.AWAITING_USER,
-                                        GateState.EQUIVALENCE_PROPOSED):
-                gate_result = self._ask_user_and_process(action, judgement, tool_id, gate)
-
-            # SUSPENDED → resume (给用户第二次机会)
-            if gate_result.state == GateState.SUSPENDED:
-                self._suspended_count += 1
-                # B9 fix: 每次 _process_gate 入口已重置 _suspended_count,
-                # 所以此计数器只针对当前 tool_call 的连续 SUSPENDED。
-                # 首次 SUSPENDED 给用户第二次机会, 二次才终止。
-                if self._suspended_count >= 2:
-                    reason = "user did not respond to greylist action"
-                    self._emit(LoopEvent(
-                        kind="suspended",
-                        step=self._step_count,
-                        payload={"reason": reason, "tool_id": tool_id},
-                    ))
-                    self._messages.append(
-                        Message.tool_result(
-                            tool_call_id=tool_call_id,
-                            tool_id=tool_id,
-                            content=f"[REJECTED by user timeout: {reason}]",
-                        )
-                    )
-                    return None  # 调用方跳过执行
-                gate_result = gate.process(
-                    UserResponse(response_type=UserResponseType.RESUME)
-                )
-                if gate_result.state == GateState.AWAITING_USER:
-                    gate_result = self._ask_user_and_process(action, judgement, tool_id, gate)
-
-            # REJUDGE → 重跑 context_judge
-            if gate_result.state == GateState.REJUDGE:
-                action = gate.current_action
-                judgement = context_judge(action, self._context, self._rules)
-                continue
-
-            break  # gate 已完成
-
-        # handle REJECTED
-        if gate_result.state == GateState.REJECTED:
-            self._messages.append(
-                Message.tool_result(
-                    tool_call_id=tool_call_id,
-                    tool_id=tool_id,
-                    content=f"[REJECTED by user: {gate_result.rejection_reason}]",
-                )
-            )
-            self._emit(LoopEvent(
-                kind="tool_rejected",
-                step=self._step_count,
-                payload={"tool_id": tool_id, "reason": gate_result.rejection_reason},
-            ))
-            return None
-
-        # 记录 override event (EXECUTING_WITH_OVERRIDE)
-        if gate_result.state == GateState.EXECUTING_WITH_OVERRIDE:
-            if gate_result.override_event:
-                self._emit(LoopEvent(
-                    kind="override",
-                    step=self._step_count,
-                    payload={
-                        "tool_id": tool_id,
-                        "override_text": gate_result.override_event.override_text,
-                    },
-                ))
-
-        return gate_result
-
-    def _ask_user_and_process(
-        self, action: Action, judgement: Judgement, tool_id: str, gate: Any
-    ) -> GateResult:
-        """ask用户 + 记录response + handle gate 结果 (R4: 提取自 _process_gate 的重复代码)。"""
-        user_resp = self._user_responder.ask(action, judgement)
-        self._recorder.append(
-            event_id=f"user_response_{self._step_count}_{self._gate_decision_count}",
-            ts=int(time.time() * 1000),
-            event_type=EventType.USER_RESPONSE,
-            payload={"response_type": user_resp.response_type.value},
-        )
-        if user_resp.response_type == UserResponseType.OVERRIDE:
-            self._recorder.append(
-                event_id=f"override_{self._tool_call_count + 1}",
-                ts=int(time.time() * 1000),
-                event_type=EventType.OVERRIDE,
-                payload={
-                    "tool_id": tool_id,
-                    "override_text": user_resp.override_text or "",
-                },
-            )
-        return cast(GateResult, gate.process(user_resp))
-
     def _execute_tool_calls(self, tool_calls: tuple[ToolCall, ...]) -> None:
-        """execute一组 tool_calls, 每个经过 context_judge → confirm_gate → execute。
-
-        v0.0.10:
-          - MODIFY 路径修复: gate 返回 deferred 时重跑 context_judge+confirm_gate
-          - GitProtect 集成: write/edit/bash 写操作后自动 checkpoint
-        A2: 提取 _process_gate 状态机, 缩短本方法。
-        """
-        for tc in tool_calls:
-            action = Action(tool_id=tc.tool_id, args=tc.args)
-            judgement = context_judge(action, self._context, self._rules)
-
-            # v0.0.12: plan_mode (§9.2.5 只读姿态) —— 写tool强制 greylist 需confirm
-            if (
-                self._plan_mode
-                and action.tool_id in self._WRITE_TOOLS
-                and judgement.level != SafeLevel.BLACKLIST
-            ):
-                judgement = Judgement(
-                    level=SafeLevel.GREYLIST,
-                    matched_rule_ids=("plan_mode_read_only",),
-                )
-
-            # A2: 提取为独立method, handle gate state machine + 重跑循环
-            gate_result = self._process_gate(action, judgement, tc.tool_id, tc.id)
-
-            if gate_result is None:
-                # SUSPENDED timeout → 已injectrejectmessage, 继续下一个 tool_call
-                continue
-
-            # ── executetool (gate 已批准)
-            if gate_result.action_to_execute is None:
-                raise RuntimeError(
-                    f"gate in state {gate_result.state} but no action_to_execute"
-                )
-
-            self._tool_call_count += 1
-            execute_action = gate_result.action_to_execute
-            # O3: update running tool usage counter
-            tid = execute_action.tool_id
-            self._tool_usage_counts[tid] = self._tool_usage_counts.get(tid, 0) + 1
-            tool = self._tools.get(execute_action.tool_id)
-            if tool is None:
-                raise ToolNotFound(
-                    f"tool_id={execute_action.tool_id} not in ToolRegistry"
-                )
-
-            # 记录 tool_call_start
-            self._recorder.append(
-                event_id=f"tool_start_{self._tool_call_count}",
-                ts=int(time.time() * 1000),
-                event_type=EventType.TOOL_CALL_START,
-                payload={"tool_id": execute_action.tool_id,
-                         "args": execute_action.args},
-            )
-            self._emit(LoopEvent(
-                kind="tool_call_start",
-                step=self._step_count,
-                payload={
-                    "tool_id": execute_action.tool_id,
-                    "args": dict(execute_action.args),
-                },
-            ))
-
-            try:
-                result = tool.execute(execute_action.args)
-            except Exception as _tool_exc:
-                # v0.0.22 Bug fix: tool.execute() 抛exception后must补记 tool_call_end,
-                # 否则 timeline 出现孤立 tool_call_start, 违反 §6.1 时序完整性。
-                result = ToolResult(
-                    success=False,
-                    output="",
-                    error=f"tool raised: {_tool_exc}",
-                )
-
-            # L7: ToolResult failure with error=None → default to "unknown error"
-            tool_error = result.error
-            if not result.success and tool_error is None:
-                tool_error = "unknown error"
-
-            # 记录 tool_call_end
-            self._recorder.append(
-                event_id=f"tool_end_{self._tool_call_count}",
-                ts=int(time.time() * 1000),
-                event_type=EventType.TOOL_CALL_END,
-                payload={
-                    "tool_id": execute_action.tool_id,
-                    "success": result.success,
-                    "output_length": len(result.output),
-                    "output": result.output,
-                    "error": tool_error,
-                },
-            )
-            self._emit(LoopEvent(
-                kind="tool_call_end",
-                step=self._step_count,
-                payload={
-                    "tool_id": execute_action.tool_id,
-                    "success": result.success,
-                    "output": result.output,
-                    "error": tool_error,
-                    "artifacts": dict(result.artifacts),
-                },
-            ))
-
-            # v0.0.10: GitProtect security网 —— 写operation后自动 checkpoint
-            self._maybe_checkpoint(execute_action.tool_id, dict(execute_action.args))
-
-            # 回灌 tool 结果
-            self._messages.append(
-                Message.tool_result(
-                    tool_call_id=tc.id,
-                    tool_id=tc.tool_id,
-                    content=result.output if result.success
-                    else f"[ERROR: {result.error}]",
-                )
-            )
-            # O1: tool 结果改变context, 标记 watermark cache为脏
-            self._mark_watermark_dirty()
-
-            # Extension: on_after_tool
-            if self._ext_registry is not None:
-                self._ext_registry.fire(
-                    "on_after_tool",
-                    tool_id=execute_action.tool_id,
-                    result=result,
-                    step=self._step_count,
-                )
+        """Execute tool calls via ToolExecutor (delegated)."""
+        self._tool_executor.execute_all(tool_calls, self._step_count)
 
     # ── GitProtect security网 (v0.0.10) + CheckpointManager (v0.1.0) ──
     _WRITE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "batch_edit", "bash"})

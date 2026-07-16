@@ -219,22 +219,22 @@ class TestMCPGreylistDefault:
 
 class TestMCPBuildFailSafe:
     def test_bad_server_skipped_returns_empty(self) -> None:
-        from zall.cli import app as app_mod
+        from zall.cli.orchestrator import build_mcp_tools as _build_mcp_tools
 
         bad = MCPServerSpec(name="broken", command="no_such_command_xyz_123", args=())
         out = io.StringIO()
-        tools = app_mod._build_mcp_tools(out, servers=[bad])
+        tools = _build_mcp_tools(out, servers=[bad])
         assert tools == []  # 坏 server 被跳过
         assert "skip" in out.getvalue()  # 打警告
 
     def test_good_mock_server_returns_tools(self) -> None:
-        from zall.cli import app as app_mod
+        from zall.cli.orchestrator import build_mcp_tools as _build_mcp_tools
 
         spec = MCPServerSpec(
             name="mock", command=sys.executable, args=(str(_MOCK_SERVER),)
         )
         out = io.StringIO()
-        tools = app_mod._build_mcp_tools(out, servers=[spec])
+        tools = _build_mcp_tools(out, servers=[spec])
         try:
             assert len(tools) == 2
             ids = {t.tool_id for t in tools}

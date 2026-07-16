@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from zall.cli import app as app_mod
+from zall.cli.environment import CwdMeta as _CwdMeta, read_agents_md as _read_agents_md, build_system_prompt as _build_system_prompt
 from zall.core.context import Context
 
 
 def _ctx(cwd: str) -> Context:
-    return Context(user_raw="x", cwd_meta=app_mod._CwdMeta())
+    return Context(user_raw="x", cwd_meta=_CwdMeta())
 
 
 def test_read_agents_md_present(tmp_path: Path) -> None:
@@ -27,14 +27,14 @@ def test_read_agents_md_present(tmp_path: Path) -> None:
     (tmp_path / ".zall" / "AGENTS.md").write_text(
         "# 项目约定\n- 用 pytest", encoding="utf-8"
     )
-    got = app_mod._read_agents_md(str(tmp_path))
+    got = _read_agents_md(str(tmp_path))
     assert got is not None
     assert "pytest" in got
 
 
 def test_read_agents_md_absent_returns_none(tmp_path: Path) -> None:
     """§9.4: file缺失 → returns None (不强制 init, 不阻断)."""
-    got = app_mod._read_agents_md(str(tmp_path))
+    got = _read_agents_md(str(tmp_path))
     assert got is None
 
 
@@ -44,7 +44,7 @@ def test_read_agents_md_read_error_silent(tmp_path: Path, monkeypatch) -> None:
         raise OSError("permission denied")
 
     monkeypatch.setattr(Path, "read_text", _boom)
-    got = app_mod._read_agents_md(str(tmp_path))
+    got = _read_agents_md(str(tmp_path))
     assert got is None
 
 
@@ -58,17 +58,17 @@ def test_build_system_prompt_injects_memory(tmp_path: Path) -> None:
     (tmp_path / ".zall" / "AGENTS.md").write_text(
         "## 约定\n- 禁止directly push main", encoding="utf-8"
     )
-    ctx = Context(user_raw="x", cwd_meta=app_mod._CwdMeta())
+    ctx = Context(user_raw="x", cwd_meta=_CwdMeta())
     ctx.cwd_meta.cwd_path = str(tmp_path)  # 实例属性, directlycovers
-    prompt = app_mod._build_system_prompt(ctx)
+    prompt = _build_system_prompt(ctx)
     assert "PROJECT MEMORY" in prompt
     assert "禁止directly push main" in prompt
 
 
 def test_build_system_prompt_no_memory_when_absent(tmp_path: Path) -> None:
     """§9.4: 无 AGENTS.md → system prompt 不含 PROJECT MEMORY 段 (仍正常)."""
-    ctx = Context(user_raw="x", cwd_meta=app_mod._CwdMeta())
+    ctx = Context(user_raw="x", cwd_meta=_CwdMeta())
     ctx.cwd_meta.cwd_path = str(tmp_path)
-    prompt = app_mod._build_system_prompt(ctx)
+    prompt = _build_system_prompt(ctx)
     assert "PROJECT MEMORY" not in prompt
     assert "ENVIRONMENT" in prompt  # basic段仍在

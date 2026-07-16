@@ -53,10 +53,13 @@ _MODEL_ALIASES: dict[str, str] = {
 def _config_status() -> dict[str, Any]:
     """Return config readiness status (reused by onboarding / doctor, does not raise)."""
     from zall.safety.config import load_config
+    from zall._util.logging import get_zall_logger
 
+    _logger = get_zall_logger(__name__)
     try:
         cfg = load_config()
-    except Exception:
+    except Exception as _e:
+        _logger.warning("config load failed, returning defaults: %s", _e)
         cfg = {"api_key": "", "model": "", "api_base": ""}
     api_key = (cfg.get("api_key") or "").strip()
     ready = bool(api_key) and api_key != _PLACEHOLDER_API_KEY
@@ -364,9 +367,21 @@ def _persist_model_to_config(model_name: str) -> None:
                 # B4: 只匹配顶级段名 (auth/model), 不匹配 nested.table
                 _top = name.split(".")[0].strip() if "." in name else name.strip()
                 if _top == "auth":
-                    new_lines.append("[auth]\n")
-                    new_lines.extend(_update_key_in_lines(lines, "api_key", api_key))
-                    has_auth = True
+                    # Fix: 只在 api_key 非空时写入 [auth] 段，防止空 key 覆盖有效 key
+                    if api_key:
+                        new_lines.append("[auth]\n")
+                        new_lines.extend(_update_key_in_lines(lines, "api_key", api_key))
+                        has_auth = True
+                    else:
+                        # 保留原 [auth] 段内容不变（不更新 api_key）
+                        new_lines.append("[auth]\n")
+                        for l in lines:
+                            if l.strip() and not l.strip().startswith("#") and "=" in l.strip():
+                                k = l.strip().split("=", 1)[0].strip()
+                                if k == "api_key":
+                                    continue  # 跳过空 api_key 行
+                            new_lines.append(l)
+                        has_auth = True
                 elif _top == "model":
                     model_cfg = data.get("model", {})
                     api_base = model_cfg.get("api_base", default_api_base)
@@ -376,7 +391,7 @@ def _persist_model_to_config(model_name: str) -> None:
                     has_model = True
                 else:
                     new_lines.extend(lines)
-            if not has_auth:
+            if not has_auth and api_key:
                 new_lines.append("[auth]\n")
                 new_lines.append(f'api_key = "{api_key}"\n')
             if not has_model:
@@ -388,6 +403,7 @@ def _persist_model_to_config(model_name: str) -> None:
         # fall through: file存在但无法按段parse → 按新file写
 
     # file不存在或不可parse → 写新template
+    # 新文件也写入 api_key = "" 占位（用户需手动配置）
     config_path.write_text(
         "# zall config\n"
         "[auth]\n"

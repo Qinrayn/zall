@@ -19,7 +19,6 @@ import shutil
 import sys
 import threading
 import time
-from collections import OrderedDict
 from typing import Any, TextIO
 
 from rich.console import Console
@@ -83,7 +82,7 @@ class _G:
 
 
 # Shared Console (performance): avoid creating a new Console per render call.
-_CONSOLE_CACHE: "OrderedDict[int, Console]" = OrderedDict()
+_CONSOLE_CACHE: dict[int, "Console"] = {}
 _CONSOLE_CACHE_MAX = 8
 
 
@@ -91,13 +90,14 @@ def _shared_console(out: Any) -> "Console":
     key = id(out)
     c = _CONSOLE_CACHE.get(key)
     if c is not None and getattr(c, "file", None) is out:
-        _CONSOLE_CACHE.move_to_end(key)
         return c
     c = Console(file=out, color_system="auto", force_terminal=None,
                 legacy_windows=None)
+    # LRU eviction: remove oldest entry when full
+    if len(_CONSOLE_CACHE) >= _CONSOLE_CACHE_MAX:
+        # dict preserves insertion order in Python 3.7+ — pop first inserted key
+        _CONSOLE_CACHE.pop(next(iter(_CONSOLE_CACHE)))
     _CONSOLE_CACHE[key] = c
-    while len(_CONSOLE_CACHE) > _CONSOLE_CACHE_MAX:
-        _CONSOLE_CACHE.popitem(last=False)
     return c
 
 
@@ -443,7 +443,7 @@ class CliRenderer:
         if not self._is_tty:
             return
         self._thinking_active = True
-        self._thinking_display_buf = getattr(self, "_thinking_display_buf", "") + token
+        self._thinking_display_buf += token
         last_char = token[-1]
         need_flush = (
             last_char in " \t\n.,;:!?"
