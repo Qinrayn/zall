@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.4.8] — 2026-07-17
+
+### Fixed
+- **[严重] `handle_empty_stop` 绕过 ChatState 同步** — `ContextManager.handle_empty_stop()` 直接修改消息列表而不通过 `loop.append_message()`，当 ChatState 启用时 nudge 注入消息未被记录。现已使用统一消息路径，保证 ChatState 事件日志完整。
+- **[严重] 水位线自动压缩空操作** — `ContextManager._auto_compact()` 计算压缩结果后从未写回 `self._loop._messages`，压缩无效。现在正确替换 loop 消息列表并记录 timeline 事件。
+- **`_auto_compact` 参数引用不一致** — 方法同时接受 `messages` 参数和直接访问 `self._loop._messages`，存在隐式约定。现统一使用 `self._loop._messages`，消除脆弱的引用约定。
+- **`add_user_message`/`add_user_file_message` 不使用统一路径** — 直接调用 `push_user_message()` + `_messages.append()`，重复 `_append_message()` 封装的逻辑。现委托给 `_append_message()` 统一路径。
+- **`_empty_stop_nudge()` 重复调用** — `handle_empty_stop()` 中 nudge 函数被调用两次，现缓存为局部变量。
+- **`_auto_compact` 代码重复消除** — `loop.py._auto_compact()` 委派给 `ContextManager`，消除两处重复逻辑，统一压缩路径。
+- **ChatState 消息管理集成** — `add_user_message()`、`set_messages()`、`remove_messages_by_predicate()`、`add_user_file_message()` 在 ChatState 启用时委托同步；新增 `append_message()` 公共 API；executor 内部消息追加使用统一路径。
+- **HTTP 客户端资源泄漏** — `web_fetch.py` 和 `search.py` 的共享 `httpx.Client` 注册 `atexit` 处理器，进程退出时自动关闭连接池。
+- **`_suspended_count` 死变量** — 移除 `loop.py` 中从未更新的 `_suspended_count` 实例变量（executor 已用局部变量正确处理）。
+- **`AutoLearnExtension` 未使用参数** — 移除 `__init__` 中未使用的 `registry` 参数，简化工厂函数。
+- **`ContextManager.handle_length()` 死代码** — 移除从未被调用的方法。
+- **流式 Tool Call 渲染缺失** — `_process_stream_delta()` 对 tool_call delta 新增 yield，UI 实时显示工具构建进度。
+- **stream_options 非标准参数** — 改为 `self._stream_usage` opt-in 模式（默认关），避免 DeepSeek/Qwen 等兼容 API 报 HTTP 400。
+- **AutoLearn 跨会话计数错误** — `_load_persisted()` 用 `+=` 替换 `max()`，跨会话工具调用次数正确累加。
+- **REJUDGE 无限循环** — 添加 `_MAX_REJUDGE=5` 上限，防止 gate 死循环。
+- **Sandbox Windows 编码崩溃** — 两处 `subprocess.run` 用 `encoding='utf-8', errors='replace'` 替换 `text=True`，避免非 UTF-8 输出导致 `UnicodeDecodeError`。
+- **AutoLearn 同步写磁盘阻塞** — `_persist()` 改为后台 daemon 线程异步写；新增 `_serialize_value()` 安全序列化。
+- **web_search 超时 + 无备用** — 超时从 10s → 30s，新增 DuckDuckGo 重试(2次) + Bing HTML 备用搜索引擎，失败时返回友好提示。
+- **web_fetch 超时过短** — 默认超时从 15s → 30s。
+
+### Changed
+- **极简任务跳过目标降级 (交互优化)** — `_init_downgrade()` 新增 `_is_trivial_task()` 检测：问候/打招呼（hi/hello/你好）、简单打印（print/say/echo）不再弹出目标降级确认框。
+- **非 TTY 流式 tool call 渲染格式统一** — `_render_model_tool_call()` 非 TTY 模式输出 `step` 前缀对齐 `_render_model_token` 格式。
+- **系统提示词优化** — 新增规则5(禁止反复读同一文件)和规则6(搜索失败时降级到训练知识或直接 fetch URL)。
+- **Goal downgrade 尊重 `--yes` 标志** — `--yes` 模式下自动跳过 goal downgrade 提示。
+- **非TTY 模式输出** — 流式 token 输出带 `"step N -"` 前缀，不再无格式连续输出。
+- **流式 tool call 事件** — `loop.py` 新增 `model_tool_call` 事件，`render.py` 新增 `_render_model_tool_call()` 实时展示工具调用。
+- **CompactionPolicy 升级 (Grok Build 启发)** — `policies.py` 新增 `keep_recent`、`min_compaction_interval` 字段；`WatermarkMonitor` 和 `ModelCompactor` 接受 `CompactionPolicy` 替代硬编码阈值；新增 `conservative()`/`aggressive()` 预置策略。
+
+### Added
+- **窄查询 (Narrow Queries)** — `ChatState` 新增 `get_last_message()`、`has_dangling_tool_calls()`、`get_last_assistant_text()`，避免大对话时克隆整个消息列表。
+- **Turn Capture 偏移量** — `ChatState` 新增 `begin_turn_capture()`/`end_turn_capture()`，用偏移量 O(1) 记录 turn。
+- **`append_message()` 公共 API** — `AgentLoop` 新增统一消息追加方法，executor 和外部组件通过此路径保证 ChatState 同步。
+- **`WatermarkMonitor` 策略注入** — 支持传入 `CompactionPolicy` 配置水位阈值，默认 85% 兼容旧行为。
+
 ## [0.4.7] — 2026-07-17
 
 ### Fixed

@@ -88,7 +88,14 @@ class CliUserResponder(UserResponder):
 
         与 greylist/blacklist 不同: 降级是 Goal 层面操作, 需要专门的
         ACCEPT_DOWNGRADE 响应。支持多候选选择。
+
+        --yes 模式: auto-reject (保持 Goal 不降级, 与 greylist 行为一致)。
         """
+        # --yes pattern: auto-reject (保持原 Goal, 不阻塞 workflow)
+        if self._yes:
+            self._print("  ? goal downgrade — auto-reject (--yes)")
+            return UserResponse(response_type=UserResponseType.REJECT)
+
         # 非 TTY (pipeline/CI): default reject (与 greylist 行为一致, 最security)
         if not self._is_tty:
             self._print("  ? goal downgrade — auto-reject (non-interactive)")

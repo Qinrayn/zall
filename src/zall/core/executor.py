@@ -144,6 +144,8 @@ class ToolExecutor:
         gate_result: GateResult = gate.process(None)
 
         _suspended_count = 0
+        _rejudge_count = 0
+        _MAX_REJUDGE = 5
 
         while True:
             state = gate_result.state
@@ -175,7 +177,7 @@ class ToolExecutor:
             if state == GateState.SUSPENDED:
                 _suspended_count += 1
                 if _suspended_count >= 2:
-                    loop._messages.append(
+                    loop.append_message(
                         _make_suspended_rejection(tool_id, loop._tool_call_count + 1)
                     )
                     loop._emit(_loop_event(
@@ -188,6 +190,20 @@ class ToolExecutor:
                 continue
 
             if state == GateState.REJUDGE:
+                _rejudge_count += 1
+                if _rejudge_count >= _MAX_REJUDGE:
+                    # Max rejudge attempts reached — reject to prevent infinite loop
+                    loop.append_message(_make_rejection_message(
+                        tool_id,
+                        f"rejudge limit ({_MAX_REJUDGE}) exceeded",
+                        loop._tool_call_count + 1,
+                    ))
+                    loop._emit(_loop_event(
+                        kind="tool_rejected",
+                        step=step_count,
+                        payload={"tool_id": tool_id, "reason": f"rejudge limit ({_MAX_REJUDGE}) exceeded"},
+                    ))
+                    return None
                 new_action = gate_result.action_to_execute or action
                 judgement = context_judge(new_action, loop._context, loop._rules)
                 gate = ConfirmGate(new_action, judgement)
@@ -200,7 +216,7 @@ class ToolExecutor:
         # Post-processing
         if gate_result.state == GateState.REJECTED:
             reason = gate_result.rejection_reason or "rejected by gate"
-            loop._messages.append(_make_rejection_message(tool_id, reason, loop._tool_call_count + 1))
+            loop.append_message(_make_rejection_message(tool_id, reason, loop._tool_call_count + 1))
             loop._emit(_loop_event(
                 kind="tool_rejected",
                 step=step_count,
@@ -303,7 +319,7 @@ class ToolExecutor:
         from zall.core.model import Message, ToolCall
         _tc_id = call_id or f"call_{loop._tool_call_count}"
         _tool_call = ToolCall(id=_tc_id, tool_id=tid, args=dict(execute_action.args))
-        loop._messages.append(Message.tool_result(
+        loop.append_message(Message.tool_result(
             content=result.output,
             tool_call_id=_tool_call.id,
             tool_id=_tool_call.tool_id,

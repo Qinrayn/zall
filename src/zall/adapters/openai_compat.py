@@ -49,6 +49,7 @@ class OpenAICompatAdapter(BaseAdapter):
         api_base: str | None = None,
         model: str | None = None,
         timeout: float = 120.0,
+        stream_usage: bool = False,
     ) -> None:
         super().__init__(api_key, api_base, model, timeout)
         if not self._api_key:
@@ -57,6 +58,9 @@ class OpenAICompatAdapter(BaseAdapter):
             raise ValueError("Model required — set ZALL_MODEL or add to ~/.zall/config.toml")
         # Reuse persistent HTTP client (connection pool) across REPL turns.
         self._client = httpx.Client(timeout=self._timeout)
+        # stream_usage: request token usage in streaming responses.
+        # Some providers (DeepSeek, Qwen, etc.) may not support this parameter.
+        self._stream_usage = stream_usage
 
     def close(self) -> None:
         """Close the persistent HTTP client."""
@@ -109,7 +113,10 @@ class OpenAICompatAdapter(BaseAdapter):
             body["tool_choice"] = tool_choice.value
         if stream:
             body["stream"] = True
-            body["stream_options"] = {"include_usage": True}
+            # stream_usage (include_usage) is not supported by all providers.
+            # Only send when explicitly enabled to avoid HTTP 400 errors.
+            if self._stream_usage:
+                body["stream_options"] = {"include_usage": True}
         return body
 
     def _call(
@@ -351,6 +358,15 @@ class OpenAICompatAdapter(BaseAdapter):
                 state.tc_acc[idx]["tool_id"] = func["name"]
             if func.get("arguments"):
                 state.tc_acc[idx]["args_str"] += func["arguments"]
+
+        # 4. Yield intermediate tool call progress (for UI rendering).
+        if tc_deltas:
+            yield ("", ModelResponse(
+                content=state.content,
+                reasoning=state.reasoning,
+                tool_calls=self._build_tool_calls_from_acc(state.tc_acc),
+                stop_reason=StopReason.STOP,
+            ))
 
     def _make_stream_error(self, msg: str, error: Exception) -> ModelResponse:
         """Build a streaming error response.

@@ -332,6 +332,10 @@ class CliRenderer:
         elif kind == "model_thinking":
             self._stop_spinner()
             self._render_model_thinking(step, p)
+        elif kind == "model_tool_call":
+            self._stop_spinner()
+            self._clear_thinking_line()
+            self._render_model_tool_call(step, p)
         elif kind == "model_call":
             self._stop_spinner()
             self._render_model_call(step, p)
@@ -464,6 +468,38 @@ class CliRenderer:
             self._raw_stream.flush()
         self._thinking_display_buf = ""
 
+    def _render_model_tool_call(self, step: int, p: dict[str, Any]) -> None:
+        """Stream式 tool call 增量 — 展示模型正在构建的工具调用。
+
+        v0.4.10: 非 TTY 下也输出 step 前缀, 与 _render_model_token 格式一致。
+        """
+        tool_calls = p.get("tool_calls", [])
+        if not tool_calls:
+            return
+        tool_names = [tc.get("tool_id", "?") for tc in tool_calls]
+        args_preview = []
+        for tc in tool_calls:
+            tid = tc.get("tool_id", "?")
+            args = tc.get("args", {})
+            preview = _key_arg(args)
+            if preview:
+                args_preview.append(f"{tid}({preview})")
+            else:
+                args_preview.append(tid)
+        preview = ", ".join(args_preview[:3])
+        if len(args_preview) > 3:
+            preview += f" ... (+{len(args_preview) - 3})"
+
+        if self._is_tty:
+            self._console.print(f"  [{_C.ACCENT}]{_G.TOOL}[/] [{_C.DIM}]{rich_escape(preview)}[/]")
+        else:
+            # 非 TTY: 输出 step 前缀以保持格式一致性
+            if self._streamed_step != step:
+                self._streamed_step = step
+            with self._write_lock:
+                self._raw_stream.write(f"  tool calls: {preview}\n")
+                self._raw_stream.flush()
+
     def _render_thinking_block(self, reasoning: str) -> None:
         if not reasoning:
             return
@@ -510,6 +546,10 @@ class CliRenderer:
                 self._console.print(f"  step {step} - ", end="")
 
         if not self._is_tty:
+            if self._streamed_step != step:
+                self._streamed_step = step
+                with self._write_lock:
+                    self._raw_stream.write(f"  step {step} - ")
             with self._write_lock:
                 self._raw_stream.write(token)
                 self._raw_stream.flush()

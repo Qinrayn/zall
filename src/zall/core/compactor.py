@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict
 
 from zall.core.model import Message, ModelAdapter
 from zall._util.model_registry import get_window_size as _get_window_size
+from zall.core.policies import CompactionPolicy
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -161,9 +162,11 @@ class WatermarkMonitor:
     工作原理:
       1. 粗略估算当前消息列表的 token 数 (字符数 / 4)
       2. 根据模型名查窗口大小 (未知模型用 32K 保守值)
-      3. 水位 > 75% → 建议压缩 (SAFE)
-      4. 水位 > 90% → 强制压缩 (CRITICAL)
+      3. 水位 > threshold → 建议压缩 (SAFE)
+      4. 水位 > threshold + 15% → 强制压缩 (CRITICAL)
       5. 每次 step() 后检查, 非强制时不重复压缩 (watermark 缓降)
+
+    v0.4.8: 使用 CompactionPolicy 替代硬编码阈值。
 
     注意: 这是估算, 不精确。精确窗口由模型 API 返回的 LENGTH 信号决定。
     WatermarkMonitor 的作用是**减少** LENGTH 的发生, 不是替代。
@@ -171,12 +174,18 @@ class WatermarkMonitor:
 
     __test__ = False
 
-    def __init__(self) -> None:
+    def __init__(self, policy: CompactionPolicy | None = None) -> None:
+        self._policy = policy or CompactionPolicy()
         self._last_compaction_step: int = 0
-        self._min_compaction_interval: int = 5  # 至少隔 5 步才再次压缩
+        self._min_compaction_interval: int = self._policy.min_compaction_interval
         # O1: running token estimate cache with dirty flag — avoids O(n) re-scan on repeated calls
         self._cached_token_estimate: int = 0
         self._token_estimate_dirty: bool = True
+
+    @property
+    def policy(self) -> CompactionPolicy:
+        """当前压缩策略 (只读)。"""
+        return self._policy
 
     def estimate_tokens(self, messages: list[Message], model_name: str = "") -> int:
         """粗略估算messagelist的 token 数 (v0.1.2: 语言感知加权, O9: 模型感知)。
@@ -233,8 +242,10 @@ class WatermarkMonitor:
 
         Returns:
             None          — 水位正常, 不需要压缩
-            "suggest"     — 建议压缩 (水位 > 75%, 非强制)
-            "force"       — 强制压缩 (水位 > 90%)
+            "suggest"     — 建议压缩 (水位 > 阈值, 非强制)
+            "force"       — 强制压缩 (水位 > 阈值+15%)
+
+        v0.4.8: 使用 CompactionPolicy.auto_compact_threshold_percent。
 
         防抖: 每 _min_compaction_interval 步只触发一次建议压缩。
         """
@@ -246,9 +257,12 @@ class WatermarkMonitor:
         window = self.get_window_size(model_name)
         ratio = tokens / window if window > 0 else 0
 
-        if ratio >= _CRITICAL_WATERMARK:
+        safe_wm = self._policy.auto_compact_threshold_percent / 100.0
+        critical_wm = min(safe_wm + 0.15, 0.99)
+
+        if ratio >= critical_wm:
             return "force"
-        if ratio >= _SAFE_WATERMARK:
+        if ratio >= safe_wm:
             return "suggest"
         return None
 
@@ -265,13 +279,16 @@ class WatermarkMonitor:
         tokens = self.estimate_tokens(messages, model_name=model_name)
         window = self.get_window_size(model_name)
         ratio = tokens / window if window > 0 else 0
+        safe_wm = self._policy.auto_compact_threshold_percent / 100.0
+        critical_wm = min(safe_wm + 0.15, 0.99)
         return {
             "estimated_tokens": tokens,
             "window_size": window,
             "watermark": round(ratio, 3),
             "messages": len(messages),
-            "status": "critical" if ratio >= _CRITICAL_WATERMARK else (
-                "warning" if ratio >= _SAFE_WATERMARK else "normal"
+            "compaction_threshold": safe_wm,
+            "status": "critical" if ratio >= critical_wm else (
+                "warning" if ratio >= safe_wm else "normal"
             ),
         }
 
@@ -301,7 +318,7 @@ class ModelCompactor:
 
     压缩算法 (A4 fix):
       1. 提取 system prompt (首条 role=system)
-      2. 取中间的消息 (排除 system + 最近 _KEEP_RECENT 条)
+      2. 取中间的消息 (排除 system + 最近 keep_recent 条)
       3. 用规则折叠生成结构化摘要 (不调模型, 避免 LENGTH 时雪上加霜)
       4. 返回: [system] + [compaction_summary] + [recent_N_messages]
 
@@ -310,13 +327,19 @@ class ModelCompactor:
 
     v0.1.0: 集成 WatermarkMonitor 水位监控
     v0.1.4 (A4): 规则折叠替代模型摘要, 避免 LENGTH 时调模型雪上加霜
+    v0.4.8: 接受 CompactionPolicy 配置策略参数
     """
 
     __test__ = False
 
-    def __init__(self, keep_recent: int = _KEEP_RECENT) -> None:
-        self._keep_recent = keep_recent
-        self._watermark = WatermarkMonitor()
+    def __init__(self, keep_recent: int | None = None,
+                 policy: CompactionPolicy | None = None) -> None:
+        if policy is not None:
+            self._keep_recent = policy.keep_recent
+            self._watermark = WatermarkMonitor(policy)
+        else:
+            self._keep_recent = keep_recent if keep_recent is not None else _KEEP_RECENT
+            self._watermark = WatermarkMonitor()
 
     @property
     def watermark_monitor(self) -> WatermarkMonitor:

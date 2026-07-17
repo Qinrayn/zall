@@ -21,6 +21,7 @@ IPR constraints:
 
 from __future__ import annotations
 
+import atexit
 import ipaddress
 import socket
 from typing import Any
@@ -35,7 +36,7 @@ MAX_CHARS = 10000
 # 最大response大小 (bytes)
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2MB
 # defaulttimeout
-DEFAULT_TIMEOUT = 15.0
+DEFAULT_TIMEOUT = 30.0
 
 # O5: shared httpx.Client for connection pooling across _fetch calls
 _HTTP_CLIENT: httpx.Client | None = None
@@ -67,6 +68,9 @@ def close_http_client() -> None:
         except Exception:
             pass
         _HTTP_CLIENT = None
+
+# v0.4.8: 注册 atexit 处理器, 确保进程退出时关闭共享 HTTP 连接池
+atexit.register(close_http_client)
 
 
 # SSRF 阻止list: 私有 IP range + 元数据端点 + 内部主机名

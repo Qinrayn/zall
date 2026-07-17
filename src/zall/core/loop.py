@@ -9,7 +9,7 @@ Corresponds to:
 
 This module imports its building blocks from sibling modules:
   loop_config  → AgentConfig, _GitProtectProtocol
-  loop_events  → MAX_STEPS, _EMPTY_STOP_NUDGE, LoopEvent, RunEgress, StepResult
+  loop_events  → MAX_STEPS, LoopEvent, RunEgress, StepResult
   loop_errors  → AgentRunaway
 
 IPR constraints:
@@ -59,10 +59,34 @@ from zall.core.checkpoint import CheckpointManager
 from zall._util import skip_noise_dirs
 from zall._util.path import NOISE_DIRS
 from zall.core.executor import ToolExecutor
+from zall.core.context_manager import ContextManager
 
 # ── Import from sibling modules (Phase 1 refactoring) ──
 from zall.core.loop_config import AgentConfig, _GitProtectProtocol
-from zall.core.loop_events import MAX_STEPS, _EMPTY_STOP_NUDGE, LoopEvent, RunEgress, StepResult
+from zall.core.loop_events import MAX_STEPS, LoopEvent, RunEgress, StepResult
+
+
+# ── Helper: trivial task detection ──
+
+
+def _is_trivial_task(user_raw: str) -> bool:
+    """判断用户输入是否为极简任务 (问候/打招呼/简单查询)。
+
+    v0.4.10: 用于跳过不必要的目标降级交互, 减少对 hello world 类任务的打扰。
+    只匹配明确的问候/打招呼/极简打印, 不误伤 "implement feature X" 等3词任务。
+    """
+    if not user_raw or len(user_raw) > 60:
+        return False
+    cleaned = user_raw.strip().lower()
+    # 问候/打招呼
+    greetings = {"hi", "hello", "hey", "你好", "嗨", "哈喽", "test", "help"}
+    if cleaned in greetings:
+        return True
+    # "print <word>" / "say <word>" / "echo <word>" 模式
+    for prefix in ("print ", "say ", "echo "):
+        if cleaned.startswith(prefix) and len(cleaned) < 30:
+            return True
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -155,9 +179,9 @@ class AgentLoop:
         self._checkpoint_mgr = _config.checkpoint_mgr
         # plan_mode (§9.2.5 read-only posture) — write tools force greylist requiring confirmation.
         self._plan_mode = _plan_mode
-        # §9.2.9 reactive auto-compact strategy (optional injection).
+        # §9.2.9 reactive auto-compact strategy (optional injection) via ContextManager.
         self._compactor = _config.compactor
-        self._compaction_count = 0
+        self._context_mgr = ContextManager(self, self._compactor)
         self._anchor = _config.anchor
 
         # Extension registry (Pi-style lifecycle hooks)
@@ -178,8 +202,8 @@ class AgentLoop:
         self._tool_call_count = 0
         self._model_call_count = 0
         self._gate_decision_count = 0
-        # B9: SUSPENDED 计数器 — 首次给用户第二次机会, 二次才终止
-        self._suspended_count: int = 0
+        # B9: SUSPENDED 计数器已在 executor.py 中以局部变量正确实现,
+        # loop 层不再维护此状态。
         # O3: cached tool schemas from ToolRegistry cache (avoids per-instance deepcopy).
         # Fallback to per-loop deepcopy when tools is a plain iterable (test fixtures).
         if hasattr(self._tools, "schemas"):
@@ -209,13 +233,10 @@ class AgentLoop:
         self._run_start_sha: str | None = None
         # B3: get project root path from context, used for git commands
         self._project_root: str = context.cwd_meta.cwd_path if hasattr(context, 'cwd_meta') else "."
-        # O4: watermark check step gating (check every 3 steps, reducing high-frequency useless calls)
-        self._watermark_check_counter: int = 0
-        # O4: 缓存 watermark_monitor 引用, 避免每步 getattr
-        self._wm: Any | None = (
-            getattr(self._compactor, "watermark_monitor", None)
-            if self._compactor is not None else None
-        )
+        # O4: watermark check step gating delegated to ContextManager
+        self._watermark_check_counter: int = 0  # kept for backward compat during refactor
+        # v0.4.8: use ContextManager for watermark + compaction logic
+        self._wm: Any | None = None  # removed — now managed by _context_mgr
 
     def _emit(self, event: LoopEvent) -> None:
         """Broadcast event to observer and EventBus (§6.1 presentation projection).
@@ -336,8 +357,14 @@ class AgentLoop:
         IPR-0: 替换后 timeline 保留 (不删除已有事件), 但调用方应确保
         在 timeline 上追加 CONTEXT_COMPACTION 事件以维持可复现性。
         O1: 标记 token 估算缓存为脏。
+
+        v0.4.8: 当 ChatState 启用时, 委托给 ChatState.replace_messages()。
+        v0.4.9: 修复外部引用别名 — 创建副本而非直接引用输入列表。
         """
-        self._messages = messages
+        if self._chat_state is not None:
+            self._chat_state.replace_messages(messages)
+        # 创建副本避免外部列表修改意外影响内部状态
+        self._messages = list(messages)
         self._mark_watermark_dirty()
 
     # v0.1.3: 公开 API 供 CLI 层使用 (替代直接访问私有property)
@@ -346,8 +373,12 @@ class AgentLoop:
 
         与 add_user_message 的区别: 文件注入是辅助上下文, 非用户新意图。
         O1: 标记 token 估算缓存为脏。
+
+        v0.4.8: 当 ChatState 启用时, 委托给 ChatState.push_user_message()。
+        v0.4.9: 修复 ChatState 启用时 _messages 不同步的 Bug。
+        v0.4.10: 使用统一路径 _append_message, 消除重复逻辑。
         """
-        self._messages.append(Message(role="user", content=content))
+        self._append_message(Message(role="user", content=content))
         self._mark_watermark_dirty()
 
     def remove_messages_by_predicate(self, predicate: Callable[[Message], bool]) -> int:
@@ -356,7 +387,16 @@ class AgentLoop:
         timeline 保留 (不删除已有事件), 但调用方应确保已在 timeline 上
         追加适当事件 (如 CONTEXT_COMPACTION) 以维持可复现性。
         O1: 标记 token 估算缓存为脏。
+
+        v0.4.8: 当 ChatState 启用时, 委托给 ChatState.remove_by_predicate()。
+        v0.4.9: 修复 ChatState 启用时 _messages 不同步的 Bug。
         """
+        if self._chat_state is not None:
+            removed = self._chat_state.remove_by_predicate(predicate)
+            # 从 ChatState 同步回 _messages, 保证两者一致
+            self._messages = list(self._chat_state.messages)
+            self._mark_watermark_dirty()
+            return removed
         before = len(self._messages)
         self._messages = [m for m in self._messages if not predicate(m)]
         self._mark_watermark_dirty()
@@ -391,8 +431,9 @@ class AgentLoop:
         """
         # O6: clear cached git SHA at start of each run
         self._cached_git_sha.clear()
-        # B9 fix: 每次 run() 重置 watermark 计数器, 避免多次 run 累加
+        # B9 fix: 每次 run() 重置 watermark 计数器 (delegated to ContextManager)
         self._watermark_check_counter = 0
+        self._context_mgr.reset_check_counter()
 
         # ── §3.4 GoalDowngrade: 进入主循环前checkdowngrade
         self._init_downgrade()
@@ -402,9 +443,11 @@ class AgentLoop:
 
         # init化: system prompt + user_raw 作为首条 user message
         self._messages = []
+        if self._chat_state is not None:
+            self._chat_state.reset()
         if system_prompt:
-            self._messages.append(Message(role="system", content=system_prompt))
-        self._messages.append(Message.user(self._context.user_raw))
+            self._append_message(Message(role="system", content=system_prompt))
+        self._append_message(Message.user(self._context.user_raw))
 
         # Extension: on_agent_start (legacy) + on_turn_start (typed)
         if self._ext_registry is not None:
@@ -493,33 +536,10 @@ class AgentLoop:
             )
 
         try:
-            # ── 0. §9.2.9 主动水位monitor: 在调model前check水位, 防 LENGTH
-            # v0.1.0: 水位 > 75% 建议压缩, > 90% 强制压缩
-            # O2: 小context (< 20 条message) skip水位check
-            # O4: 每 3 步check一次, 减少高频无意义调用
-            # v2 fix: 首次到达 20 条message时立即check, 不等 3 步gate控
-            # Watermark monitoring: check every 3 steps once context grows large.
-            # The first check triggers immediately when messages reach 20 (no gate).
-            self._watermark_check_counter += 1
-            _should_check = (
-                self._compactor is not None
-                and self._wm is not None
-                and len(self._messages) >= 20
-                and (self._watermark_check_counter <= 1
-                     or self._watermark_check_counter % 3 == 0)
+            # ── 0. §9.2.9 主动水位monitor (delegated to ContextManager)
+            self._context_mgr.check_watermark_before_call(
+                self._messages, self._model.model_name, self._step_count,
             )
-            if _should_check:
-                wm_step = self._step_count
-                assert self._wm is not None  # guarded by _should_check above
-                watermark_action = self._wm.check_watermark(
-                    self._messages, self._model.model_name, wm_step
-                )
-                if watermark_action == "force":
-                    if self._auto_compact(reason="watermark_force"):
-                        self._wm.record_compaction(wm_step)
-                elif watermark_action == "suggest":
-                    if self._auto_compact(reason="watermark_suggest"):
-                        self._wm.record_compaction(wm_step)
 
             # ── 1. 调model (首次: 暂不broadcast model_call 渲染, 防 nudge 双重显示)
             resp = self._call_model(emit_model_call=False)
@@ -528,17 +548,9 @@ class AgentLoop:
             # v0.0.21 空 STOP backoff: model空reply (不调tool也不回答) → inject nudge retry一次。
             # 仅 STOP + 空 content 触发; retry (emit_model_call=True) 渲染retry结果。
             # 限 1 次/step, 不循环; 持续空 → 落到下方正常 dispatch (诚实显示空/fallback)。
-            if (resp.stop_reason == StopReason.STOP
-                    and not (resp.content or "").strip()):
-                self._messages.append(Message.assistant(content=""))
-                self._messages.append(Message(role="system", content=_EMPTY_STOP_NUDGE))
-                # v0.0.22 Bug fix: nudge must入 timeline, 守 §6.1 全保真。
-                # 否则 replay 无法得知两次 model_call 之间inject了 system message, 无法复现。
-                self._recorder.append(
-                    event_id=f"nudge_{self._step_count}_{self._model_call_count}",
-                    ts=int(time.time() * 1000),
-                    event_type=EventType.SYSTEM_INJECTION,
-                    payload={"reason": "empty_stop", "nudge": _EMPTY_STOP_NUDGE[:200]},
+            if self._context_mgr.is_empty_stop(resp):
+                self._context_mgr.handle_empty_stop(
+                    self._messages, self._model_call_count, self._step_count,
                 )
                 resp = self._call_model()  # emit_model_call=True: 渲染重试结果
                 self._model_call_count += 1
@@ -610,7 +622,7 @@ class AgentLoop:
                         },
                     ))
                 # 把 assistant reply加入 messages (对话pattern需要, taskpattern也无害)
-                self._messages.append(Message.assistant(content=resp.content))
+                self._append_message(Message.assistant(content=resp.content))
                 # taskpattern: check Goal termination → terminal
                 # 对话pattern: 不terminate, return awaiting_input
                 # step() 不知道自己是task还是对话 → return awaiting_input,
@@ -630,7 +642,7 @@ class AgentLoop:
                     )
 
                 self._execute_tool_calls(resp.tool_calls)
-                self._messages.append(
+                self._append_message(
                     Message.assistant(content=resp.content, tool_calls=resp.tool_calls)
                 )
                 return StepResult(
@@ -652,6 +664,38 @@ class AgentLoop:
                 kind="terminal",
                 egress=self._make_egress(TerminationState.UNDECIDABLE, error=str(e)),
             )
+
+    def _append_message(self, msg: Message) -> None:
+        """内部追加消息, 当 ChatState 启用时同步更新。
+
+        v0.4.8: 统一内部消息追加路径, 避免 ChatState 和 _messages 不同步。
+        同时维护 self._messages (model call 直接使用) 和 ChatState (事件记录 + 快照)。
+        """
+        if self._chat_state is not None:
+            # 通过 ChatState 的 push_* 方法保证事件记录
+            if msg.role == "user":
+                self._chat_state.push_user_message(msg.content)
+            elif msg.role == "assistant":
+                self._chat_state.push_assistant_response(
+                    msg.content, tool_calls=msg.tool_calls or ()
+                )
+            elif msg.role == "tool":
+                self._chat_state.push_tool_result(
+                    msg.tool_call_id or "",
+                    msg.content,
+                    tool_id=msg.tool_id or "",
+                )
+            elif msg.role == "system":
+                self._chat_state.push_system_message(msg.content)
+        # self._messages 始终保持最新 (model call 直接使用此列表)
+        self._messages.append(msg)
+
+    def append_message(self, msg: Message) -> None:
+        """公开 API: 追加消息 (供 executor.py 等外部组件使用)。
+
+        v0.4.8: 统一消息追加路径, 当 ChatState 启用时自动同步。
+        """
+        self._append_message(msg)
 
     def finalize(self) -> RunEgress:
         """Dialog mode end: construct undecidable RunEgress (no session save, no judge).
@@ -681,8 +725,12 @@ class AgentLoop:
 
         Section 4.3: user explicitly re-injects context, audited.
         O1: marks token estimation cache dirty.
+
+        v0.4.8: 当 ChatState 启用时, 委托给 ChatState.push_user_message()。
+        v0.4.9: 修复 ChatState 启用时 _messages 不同步的 Bug。
+        v0.4.10: 使用统一路径 _append_message, 消除重复逻辑。
         """
-        self._messages.append(Message.user(content))
+        self._append_message(Message.user(content))
         self._mark_watermark_dirty()
 
         # Extension: on_user_input (legacy + typed)
@@ -698,69 +746,30 @@ class AgentLoop:
                 content=content,
             )
 
-    # O1: 标记 watermark token 估算cache为脏
+    # O1: 标记 watermark token 估算cache为脏 (v0.4.8: delegates to ContextManager)
     def _mark_watermark_dirty(self) -> None:
-        """当 messages 变化时, 通知 compactor 的 watermark monitor cache失效。"""
-        if self._compactor is not None:
-            wm = getattr(self._compactor, "watermark_monitor", None)
-            if wm is not None and hasattr(wm, "mark_dirty"):
-                wm.mark_dirty()
+        """当 messages 变化时, 通知 ContextManager 的 watermark monitor cache失效。"""
+        self._context_mgr.mark_dirty()
 
-    # ── §9.2.9 auto-compact: context压缩 (v0.0.18) ──
+    # ── §9.2.9 auto-compact: context压缩 (v0.0.18, v0.4.8: delegates to ContextManager) ──
 
     def _auto_compact(self, *, reason: str) -> bool:
-        """自动压缩 model context window, return是否真的压缩了 (§9.2.9)。
+        """自动压缩 model context window, return是否真的压缩了 (§9.2.9).
+
+        v0.4.8: Delegates entirely to ContextManager, eliminating duplicate
+        compact logic between loop.py and context_manager.py.
 
         - 无 compactor 注入 → False (行为与旧版一致, 不改变既有测试)。
         - compactor 抛异常 → 吞掉并广播 error 事件, 返回 False (失败安全 IPR-0:
           压缩故障不得让 agent 崩溃, 退回原 LENGTH 终止路径)。
         - 压缩 0 条 → False (已无可压缩空间)。
-        - 成功 → 替换 self._messages, 记 CONTEXT_COMPACTION 到 timeline (§6.1 全保真),
-          广播 observer 事件, 返回 True。
+        - 成功 → ContextManager 负责替换 self._messages、记 CONTEXT_COMPACTION
+          到 timeline 并广播 observer 事件, 返回 True。
 
         本方法只压缩 model 看到的 messages; timeline (审计轨迹) 永不压缩 ——
         压缩本身反而是 timeline 上的一条 CONTEXT_COMPACTION 事件 (§9.2.9 不变量)。
         """
-        if self._compactor is None:
-            return False
-        try:
-            result = self._compactor.compact(self._messages, self._model)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as e:  # 失败安全: 压缩故障不阻断, 退回 LENGTH 终止
-            self._emit(LoopEvent(
-                kind="error", step=self._step_count,
-                payload={"error": f"compaction failed: {e}", "type": type(e).__name__},
-            ))
-            return False
-        if result.compacted_count <= 0:
-            return False
-
-        self._messages = list(result.compressed_messages)
-        self._compaction_count += 1
-        # §6.1 timeline 全保真: 压缩是一条 CONTEXT_COMPACTION event (可 Replay 复现)
-        self._recorder.append(
-            event_id=f"compact_{self._model_call_count}_{self._compaction_count}",
-            ts=int(time.time() * 1000),
-            event_type=EventType.CONTEXT_COMPACTION,
-            payload={
-                "step": self._step_count,
-                "reason": reason,
-                "compacted_count": result.compacted_count,
-                "strategy": result.strategy,
-                "summary_preview": result.summary[:200],
-            },
-        )
-        self._emit(LoopEvent(
-            kind="context_compaction",
-            step=self._step_count,
-            payload={
-                "reason": reason,
-                "compacted_count": result.compacted_count,
-                "strategy": result.strategy,
-            },
-        ))
-        return True
+        return self._context_mgr._auto_compact(reason=reason)
 
     # ── §3.4 GoalDowngrade: downgradeinit化 (v0.0.11) ──
 
@@ -769,12 +778,21 @@ class AgentLoop:
 
         流程:
           1. 若 _allow_downgrade=False, 跳过
-          2. 尝试 suggest_downgrade (基于当前 Goal 的 GoalType)
-          3. 若有候选 → 询问用户 (通过闸门)
-          4. 用户接受 → 替换 _goal, 记录降级状态 (R4/R5/R6)
-          5. 用户拒绝 → 保持原 Goal (走 UNDECIDABLE 路径)
+          2. 对极短简单任务 (≤3词, 无代码相关字符) 直接跳过降级, 减少无意义交互
+          3. 尝试 suggest_downgrade (基于当前 Goal 的 GoalType)
+          4. 若有候选 → 询问用户 (通过闸门)
+          5. 用户接受 → 替换 _goal, 记录降级状态 (R4/R5/R6)
+          6. 用户拒绝 → 保持原 Goal (走 UNDECIDABLE 路径)
+
+        v0.4.10: 跳过极简单任务 (问候/打招呼/简单查询) 的目标降级,
+        避免 "hello world" 类任务出现不必要的降级弹窗。
         """
         if not self._allow_downgrade:
+            return
+
+        # 极短简单任务直接跳过降级 (≤3词, 无代码相关字符)
+        user_raw = self._context.user_raw.strip()
+        if _is_trivial_task(user_raw):
             return
 
         baseline_sha = self._resolve_git_sha() or ""
@@ -985,6 +1003,8 @@ class AgentLoop:
         # 不引入新interface (仍沿用 complete_stream 的 (token, accumulated) protocol)。
         prev_content_len = 0
         prev_reasoning_len = 0
+        # Track tool call count to detect new tool call deltas
+        prev_tool_call_count = 0
         try:
             for token, accumulated in self._model.complete_stream(  # type: ignore[attr-defined]
                 messages=self._messages,
@@ -1011,6 +1031,20 @@ class AgentLoop:
                             payload={"token": token, "accumulated": accumulated.content},
                         ))
                         prev_content_len = len(accumulated.content)
+                # Tool call delta: emit model_tool_call event so UI can show progress
+                if accumulated.tool_calls and len(accumulated.tool_calls) > prev_tool_call_count:
+                    # Only emit when new tool calls appear (not on every token)
+                    prev_tool_call_count = len(accumulated.tool_calls)
+                    self._emit(LoopEvent(
+                        kind="model_tool_call",
+                        step=self._step_count,
+                        payload={
+                            "tool_calls": [
+                                {"id": tc.id, "tool_id": tc.tool_id, "args": dict(tc.args)}
+                                for tc in accumulated.tool_calls
+                            ],
+                        },
+                    ))
                 resp = accumulated
         except GeneratorExit:
             # GeneratorExit must重抛 (Python generatorprotocol: 关闭信号不可吞)

@@ -36,7 +36,6 @@ import threading
 from collections import Counter, defaultdict
 from typing import Any
 
-from zall.core.extension import ExtensionRegistry
 from zall.core.lifecycle import (
     SelfSuggestion,
     ToolResultInput,
@@ -83,8 +82,7 @@ class AutoLearnExtension:
 
     name = "auto_learn"
 
-    def __init__(self, registry: ExtensionRegistry | None = None,
-                 learned_path: str | None = None) -> None:
+    def __init__(self, learned_path: str | None = None) -> None:
         # Core tracking state
         self._tool_counts: dict[str, int] = defaultdict(int)
         self._tool_errors: dict[str, int] = defaultdict(int)
@@ -407,9 +405,14 @@ class AutoLearnExtension:
     def _persist(self) -> None:
         """Append current session data to learned JSONL file.
 
-        This runs synchronously but is called at session end only,
-        so performance impact is minimal.
+        Runs in a background daemon thread to avoid blocking the main loop.
         """
+        import threading as _th
+        _t = _th.Thread(target=self._do_persist, daemon=True)
+        _t.start()
+
+    def _do_persist(self) -> None:
+        """Actual persistence work (runs in background thread)."""
         path = self._learned_path or _get_learned_path()
         self._learned_path = path
 
@@ -425,8 +428,7 @@ class AutoLearnExtension:
                         {
                             "kind": s.kind,
                             "target": s.target,
-                            "value": s.value if not isinstance(s.value, (set, bytes))
-                            else list(s.value) if isinstance(s.value, set) else s.value,
+                            "value": self._serialize_value(s.value),
                             "confidence": s.confidence,
                             "evidence": s.evidence,
                         }
@@ -441,6 +443,19 @@ class AutoLearnExtension:
             os.replace(tmp, path)
         except Exception:
             _logger.warning("auto_learn: failed to persist learned data", exc_info=True)
+
+    @staticmethod
+    def _serialize_value(value: Any) -> Any:
+        """Safely serialize suggestion values to JSON-compatible types."""
+        if isinstance(value, (set, frozenset)):
+            return list(value)
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        if isinstance(value, (list, tuple)):
+            return [AutoLearnExtension._serialize_value(v) for v in value]
+        if isinstance(value, dict):
+            return {k: AutoLearnExtension._serialize_value(v) for k, v in value.items()}
+        return value
 
     def _load_persisted(self) -> None:
         """Load learned data from previous sessions.
@@ -459,9 +474,9 @@ class AutoLearnExtension:
                 data = json.load(f)
 
             with self._lock:
-                # Merge tool counts
+                # Merge tool counts (cumulative across sessions)
                 for tid, count in data.get("tool_counts", {}).items():
-                    self._tool_counts[tid] = max(self._tool_counts.get(tid, 0), count)
+                    self._tool_counts[tid] = self._tool_counts.get(tid, 0) + count
 
                 # Merge tool chains (for cross-session pattern detection)
                 for chain in data.get("tool_chains", []):
@@ -471,11 +486,9 @@ class AutoLearnExtension:
                 # Merge error patterns
                 self._error_patterns.extend(data.get("error_patterns", []))
 
-                # Merge goal type counts
+                # Merge goal type counts (cumulative across sessions)
                 for gt, count in data.get("goal_type_counts", {}).items():
-                    self._goal_type_counts[gt] = max(
-                        self._goal_type_counts.get(gt, 0), count
-                    )
+                    self._goal_type_counts[gt] = self._goal_type_counts.get(gt, 0) + count
 
                 # Restore suggestions (from previous analysis)
                 for s_data in data.get("suggestions", []):
@@ -503,5 +516,5 @@ class AutoLearnExtension:
 
 
 # Factory function for easy registration
-def create_auto_learn(registry: ExtensionRegistry | None = None) -> AutoLearnExtension:
-    return AutoLearnExtension(registry=registry)
+def create_auto_learn() -> AutoLearnExtension:
+    return AutoLearnExtension()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zall"
-version = "0.4.7"
+version = "0.4.8"
 description = "A falsifiable, reproducible coding agent CLI — model-agnostic, chain-hashed, replayable. Features LSP integration, CodeGraph code intelligence, sandbox isolation, plugin system, and MCP support."
 readme = "README.md"
 requires-python = ">=3.10"

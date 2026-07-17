@@ -17,6 +17,7 @@ IPR constraints:
 
 from __future__ import annotations
 
+import atexit
 import re
 from typing import Any
 from urllib.parse import unquote
@@ -28,10 +29,14 @@ from zall.core.tool import ToolResult
 # default最大结果数
 DEFAULT_MAX_RESULTS = 5
 MAX_RESULTS_LIMIT = 10
-# searchtimeout
-SEARCH_TIMEOUT = 10.0
+# searchtimeout — 从中国等地区访问搜索引擎可能较慢
+SEARCH_TIMEOUT = 30.0
+# 备用超时
+FALLBACK_TIMEOUT = 20.0
 # snippet truncate长度
 SNIPPET_MAX = 300
+# 最大重试次数
+MAX_RETRIES = 2
 
 # O5: shared httpx.Client for connection pooling across search calls
 _SEARCH_HTTP_CLIENT: httpx.Client | None = None
@@ -63,6 +68,9 @@ def close_search_http_client() -> None:
         except Exception:
             pass
         _SEARCH_HTTP_CLIENT = None
+
+# v0.4.8: 注册 atexit 处理器, 确保进程退出时关闭共享 HTTP 连接池
+atexit.register(close_search_http_client)
 
 
 class SearchTool:
@@ -134,81 +142,137 @@ class SearchTool:
         return self._search(query, max_results)
 
     def _search(self, query: str, max_results: int) -> ToolResult:
-        """通过 DuckDuckGo Lite search并提取结果。
+        """通过 DuckDuckGo 搜索, 带重试和备用搜索引擎。
 
-        实现: 抓取 DuckDuckGo Lite 的 HTML 结果页, 解析结果条目。
-        DuckDuckGo Lite 是纯净版, 无 JavaScript, 易解析。
+        实现: 
+          1. 首选 DuckDuckGo Lite (免费, 无需 key)
+          2. 超时/失败后重试 1 次
+          3. 仍失败则降级到 Bing HTML 搜索 (备用)
+          4. 所有方式都失败 → 返回友好错误
 
         O5: uses shared httpx.Client for connection pooling.
         """
 
         import httpx  # Item C: 确保异常处理器中 httpx 可用
 
-        # 使用 DuckDuckGo Lite search (非官方 API, 但免费且无需 key)
+        # ── 尝试 1: DuckDuckGo Lite (首选) ──
+        for attempt in range(MAX_RETRIES):
+            result = self._search_duckduckgo_lite(query, max_results)
+            if result is not None:
+                return result
+            # 失败后等 1s 再重试
+            if attempt < MAX_RETRIES - 1:
+                import time as _time
+                _time.sleep(1.0)
+
+        # ── 尝试 2: 备用搜索引擎 (Bing HTML) ──
+        result = self._search_bing_fallback(query, max_results)
+        if result is not None:
+            return result
+
+        # ── 全部失败 ──
+        return ToolResult(
+            success=False,
+            output=(
+                "[ERROR: web_search is currently unavailable. "
+                "All search engines (DuckDuckGo, Bing) failed to respond. "
+                "Check your network connection or try again later. "
+                f"Timeout: {SEARCH_TIMEOUT}s per attempt.]"
+            ),
+            error="all search engines failed",
+        )
+
+    def _search_duckduckgo_lite(self, query: str, max_results: int) -> ToolResult | None:
+        """DuckDuckGo Lite 搜索. 返回 None 表示需要重试/降级。"""
+        import httpx
         url = "https://lite.duckduckgo.com/lite/"
         try:
             client = _get_search_http_client()
             resp = client.post(url, data={"q": query})
-        except httpx.ConnectError:
-            return ToolResult(
-                success=False,
-                output="[ERROR: cannot connect to DuckDuckGo. Check your network connection.]",
-                error="connection error",
-            )
-        except httpx.TimeoutException:
-            return ToolResult(
-                success=False,
-                output=f"[ERROR: search timed out (> {SEARCH_TIMEOUT}s). The service may be slow or unreachable.]",
-                error="timeout",
-            )
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                output=f"[ERROR: search failed: {e}]",
-                error=str(e),
-            )
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError):
+            return None
+        except Exception:
+            return None
 
         if resp.status_code != 200:
-            return ToolResult(
-                success=False,
-                output=f"[ERROR: DuckDuckGo returned HTTP {resp.status_code}]",
-                error=f"HTTP {resp.status_code}",
-            )
+            return None
 
         html = resp.text
 
-        # parse DuckDuckGo Lite 结果
-        # Lite version HTML 结构: 每个结果在一个 <tr> 内, 包含title(链接)和digest
-        # 匹配pattern: <a href="..." class="result-link">title</a> 和digest文本
+        # 解析 DuckDuckGo Lite 结果
         try:
             results = self._parse_lite_results(html, max_results)
         except ImportError:
-            # beautifulsoup4 未安装 → skip Lite parse, 直接走 fallback
             results = []
 
         if not results:
-            # 尝试用备用方式: 直接抓取 HTML 结果页
             try:
                 results = self._search_fallback(query, max_results)
             except ImportError:
-                return ToolResult(
-                    success=False,
-                    output="[ERROR: beautifulsoup4 is required for search. Install with: pip install beautifulsoup4]",
-                    error="beautifulsoup4 not installed",
-                )
+                return None
 
         if not results:
-            return ToolResult(
-                success=True,
-                output=f"## Search Results: {query}\n\n(no results found)",
-                artifacts={
-                    "query": query,
-                    "results_count": 0,
-                    "results": [],
-                },
-            )
+            return self._format_empty_results(query)
 
-        # 格式化output
+        return self._format_results(query, results)
+
+    def _search_bing_fallback(self, query: str, max_results: int) -> ToolResult | None:
+        """备用搜索引擎: Bing HTML 搜索 (无需 API key)。
+        
+        当 DuckDuckGo 不可用时自动降级到此方法。
+        """
+        import httpx
+        url = "https://www.bing.com/search"
+        try:
+            client = _get_search_http_client()
+            resp = client.get(url, params={"q": query}, timeout=FALLBACK_TIMEOUT)
+        except Exception:
+            return None
+
+        if resp.status_code != 200:
+            return None
+
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results: list[dict[str, str]] = []
+
+        # Bing 结果结构: <li class="b_algo"> 包含 <h2><a> 标题 + <p> 摘要
+        for li in soup.find_all("li", class_="b_algo"):
+            if len(results) >= max_results:
+                break
+            title = ""
+            url = ""
+            snippet = ""
+
+            h2 = li.find("h2")
+            if h2:
+                link = h2.find("a")
+                if link:
+                    title = link.get_text(strip=True)
+                    href = link.get("href", "")
+                    if href:
+                        url = str(href)
+
+            p = li.find("p")
+            if p:
+                snippet = p.get_text(strip=True)
+                if len(snippet) > SNIPPET_MAX:
+                    snippet = snippet[:SNIPPET_MAX] + "..."
+
+            if title and url:
+                results.append({"title": title, "url": url, "snippet": snippet})
+
+        if not results:
+            return None
+
+        return self._format_results(query, results)
+
+    def _format_results(self, query: str, results: list[dict[str, str]]) -> ToolResult:
+        """格式化搜索结果输出。"""
         output_parts = [f"## Search Results: {query}", ""]
         for i, r in enumerate(results, 1):
             output_parts.append(f"### {i}. {r['title']}")
@@ -218,7 +282,6 @@ class SearchTool:
             output_parts.append("")
 
         output = "\n".join(output_parts).strip()
-
         return ToolResult(
             success=True,
             output=output,
@@ -226,6 +289,18 @@ class SearchTool:
                 "query": query,
                 "results_count": len(results),
                 "results": results,
+            },
+        )
+
+    def _format_empty_results(self, query: str) -> ToolResult:
+        """格式化空结果。"""
+        return ToolResult(
+            success=True,
+            output=f"## Search Results: {query}\n\n(no results found)",
+            artifacts={
+                "query": query,
+                "results_count": 0,
+                "results": [],
             },
         )
 

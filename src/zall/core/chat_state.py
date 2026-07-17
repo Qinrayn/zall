@@ -249,6 +249,8 @@ class ChatState:
         self._metadata = metadata or StateMetadata()
         self._persistence = persistence or NullPersistence()
         self._compaction_strategy = compaction_strategy or SummaryCompaction(keep_last=10)
+        # Turn capture state: records offset into _messages at capture start.
+        self._capture_offset: int | None = None
 
     # ── Events ──
 
@@ -266,7 +268,40 @@ class ChatState:
         """所有事件 (只读快照)。"""
         return list(self._events)
 
-    # ── Messages ──
+    # ── Turn Capture (offset-based, avoids copying messages) ──
+
+    def begin_turn_capture(self) -> None:
+        """Begin capturing a turn by recording the current message offset.
+        
+        Instead of copying messages to a side buffer, we just record the
+        current length of _messages. When end_turn_capture() is called,
+        we slice from that offset — O(1) capture, O(n) only on access.
+        """
+        self._capture_offset = len(self._messages)
+
+    def end_turn_capture(self) -> list[Any] | None:
+        """End turn capture and return captured messages.
+        
+        Returns the messages from the current turn, or None if no capture
+        was in progress.
+        """
+        if self._capture_offset is None:
+            return None
+        captured = list(self._messages[self._capture_offset:])
+        self._capture_offset = None
+        return captured
+
+    @property
+    def is_capturing(self) -> bool:
+        """Whether a turn capture is currently in progress."""
+        return self._capture_offset is not None
+
+    @property
+    def capture_length(self) -> int:
+        """Number of messages captured so far in the current turn."""
+        if self._capture_offset is not None:
+            return len(self._messages) - self._capture_offset
+        return 0
 
     @property
     def messages(self) -> list[Any]:
@@ -281,6 +316,35 @@ class ChatState:
     @property
     def message_count(self) -> int:
         return len(self._messages)
+
+    # ── Narrow Queries (avoid full message list cloning when only one field needed) ──
+
+    def get_last_message(self) -> Any | None:
+        """获取最后一条消息 (避免完整克隆)。"""
+        if self._messages:
+            return self._messages[-1]
+        return None
+
+    def has_dangling_tool_calls(self) -> bool:
+        """检查最后一条 assistant 消息是否有未完成的 tool_calls。
+
+        用于流式场景：避免在 tool_call 未完成时推送新消息。
+        """
+        last = self.get_last_message()
+        if last is None:
+            return False
+        from zall.core.model import Message
+        if isinstance(last, Message) and last.role == "assistant" and last.tool_calls:
+            return True
+        return False
+
+    def get_last_assistant_text(self) -> str:
+        """获取最后一条 assistant 消息的文本 (避免完整克隆)。"""
+        for msg in reversed(self._messages):
+            from zall.core.model import Message
+            if isinstance(msg, Message) and msg.role == "assistant":
+                return msg.content
+        return ""
 
     def push_user_message(self, content: str) -> None:
         """添加用户消息。"""
@@ -575,6 +639,33 @@ class ChatStateHandle:
 
     def increment_prompt_index(self) -> None:
         self._state.increment_prompt_index()
+
+    # ── Turn Capture ──
+
+    def begin_turn_capture(self) -> None:
+        self._state.begin_turn_capture()
+
+    def end_turn_capture(self) -> list[Any] | None:
+        return self._state.end_turn_capture()
+
+    @property
+    def is_capturing(self) -> bool:
+        return self._state.is_capturing
+
+    @property
+    def capture_length(self) -> int:
+        return self._state.capture_length
+
+    # ── Narrow Queries ──
+
+    def get_last_message(self) -> Any | None:
+        return self._state.get_last_message()
+
+    def has_dangling_tool_calls(self) -> bool:
+        return self._state.has_dangling_tool_calls()
+
+    def get_last_assistant_text(self) -> str:
+        return self._state.get_last_assistant_text()
 
     def estimate_tokens(self) -> int:
         return self._state.estimate_tokens()
