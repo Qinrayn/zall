@@ -29,12 +29,10 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
-from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict
 
 from zall.core.action import Action
-from zall.core.accountability import AccountabilityResult, Judge
+from zall.core.accountability import AccountabilityResult
 from zall.core.chat_state import ChatState
 from zall.core.context import Context
 from zall.core.events import EventBus
@@ -55,7 +53,7 @@ from zall.core.model import (
 from zall.core.refiner import GoalRefiner
 from zall.core.safety import Judgement, RuleSet, SafeLevel
 from zall.core.tool import ToolRegistry
-from zall.core.verifiability import EventType, RunRecorder, TrustAnchor
+from zall.core.verifiability import EventType, RunRecorder
 from zall.core.compactor import Compactor
 from zall.core.checkpoint import CheckpointManager
 from zall._util import skip_noise_dirs
@@ -65,7 +63,6 @@ from zall.core.executor import ToolExecutor
 # ── Import from sibling modules (Phase 1 refactoring) ──
 from zall.core.loop_config import AgentConfig, _GitProtectProtocol
 from zall.core.loop_events import MAX_STEPS, _EMPTY_STOP_NUDGE, LoopEvent, RunEgress, StepResult
-from zall.core.loop_errors import AgentRunaway
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -5,16 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zall"
 version = "0.4.4"
-description = "zall — a falsifiable, reproducible coding agent CLI. Model-agnostic, chain-hashed, replayable."
+description = "A falsifiable, reproducible coding agent CLI — model-agnostic, chain-hashed, replayable. Features LSP integration, CodeGraph code intelligence, sandbox isolation, plugin system, and MCP support."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "zall contributors" }]
-keywords = ["coding-agent", "cli", "ai", "llm", "developer-tools", "reproducible"]
+keywords = [
+    "coding-agent", "cli", "ai", "llm", "developer-tools", "reproducible",
+    "code-assistant", "agent", "automation", "lsp", "code-intelligence",
+    "sandbox", "mcp", "plugin-system", "chain-hash",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -22,6 +27,8 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Build Tools",
     "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
     "pydantic>=2.5",
@@ -53,8 +60,10 @@ all = [
 [project.urls]
 Homepage = "https://github.com/qinrayn/zall"
 Repository = "https://github.com/qinrayn/zall"
-Documentation = "https://github.com/qinrayn/zall"
+Documentation = "https://github.com/qinrayn/zall#readme"
+Changelog = "https://github.com/qinrayn/zall/blob/master/CHANGELOG.md"
 Issues = "https://github.com/qinrayn/zall/issues"
+CI = "https://github.com/qinrayn/zall/actions"
 
 [project.scripts]
 zall = "zall.cli:main"

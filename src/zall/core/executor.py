@@ -369,7 +369,6 @@ def _is_tool_write_by_kind(loop: Any, tool_id: str) -> bool:
     """
     try:
         from zall.core.tool import get_tool_kind
-        from zall.core.tool_kind import ToolKind
         if loop._tools is not None:
             tool = loop._tools.get(tool_id)
             if tool is not None:

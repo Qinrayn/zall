@@ -169,9 +169,10 @@ class OpenAICompatAdapter(BaseAdapter):
         state = _StreamState()
 
         # Reuse persistent client; `with` only closes the response stream, not the client.
-        # Layered timeout: connect=10s, read=60s (per-read), write=10s, pool=5s.
-        # This prevents indefinite waits on server-side keepalive resets.
-        stream_timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=5.0)
+        # Layered timeout: connect=10s, read={self._timeout}s (from config), write=10s, pool=5s.
+        # The read timeout matches the overall adapter timeout so complex multi-step
+        # reasoning tasks (e.g., writing a game) don't get cut off mid-stream.
+        stream_timeout = httpx.Timeout(connect=10.0, read=self._timeout, write=10.0, pool=5.0)
         try:
             with self._client.stream("POST", url, json=body, headers=headers,
                                      timeout=stream_timeout) as resp:

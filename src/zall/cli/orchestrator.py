@@ -77,7 +77,7 @@ def build_adapter(provider: str, model: str | None = None) -> Any:
     """
     from zall.safety.config import load_config as _load_cfg
     cfg = _load_cfg()
-    timeout = cfg.get("timeout", 120.0)
+    timeout = cfg.get("timeout", 300.0)
     return _cli_config._build_adapter(provider, model=model, timeout=timeout)
 
 
