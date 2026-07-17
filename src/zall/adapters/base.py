@@ -19,8 +19,9 @@ IPR constraints:
 from __future__ import annotations
 
 import json
+import random
 import time
-from typing import Any, cast, ClassVar
+from typing import Any, Callable, cast, ClassVar
 
 import httpx
 
@@ -113,7 +114,7 @@ class BaseAdapter:
 
     # ── Error handling ──
 
-    def make_error_response(self, status_code: int, body: str) -> ModelResponse:
+    def make_error_response(self, status_code: int, body: str, raw: dict[str, Any] | None = None) -> ModelResponse:
         """Build a user-friendly error ModelResponse.
 
         Maps common HTTP error codes to readable hints, avoiding raw JSON exposure.
@@ -122,25 +123,48 @@ class BaseAdapter:
             status_code,
             f"API error (HTTP {status_code}). Check your config with /doctor.",
         )
+        error_raw = {"status": status_code, "body": body[:500]}
+        if raw:
+            error_raw.update(raw)
         return ModelResponse(
             content=f"[{hint}]",
             stop_reason=StopReason.STOP,
-            raw={"status": status_code, "body": body[:500]},
+            raw=error_raw,
         )
 
     # ── Retry ──
 
+    @staticmethod
+    def _backoff_delay(attempt: int, base_delay: float = 1.0, max_delay: float = 60.0) -> float:
+        """Exponential backoff with jitter (+/- 25%).
+
+        Formula:
+          delay = min(base_delay * 2^attempt, max_delay) * uniform(0.75, 1.25)
+
+        Jitter prevents thundering herd when multiple requests fail simultaneously.
+        Cap at max_delay prevents unbounded wait.
+        """
+        delay = min(base_delay * (2 ** attempt), max_delay)
+        jitter = random.uniform(0.75, 1.25)
+        return delay * jitter
+
     def with_retry(
         self,
-        fn: Any,
-        max_retries: int = 3,
+        fn: Callable[[], ModelResponse],
+        max_retries: int = 5,
         base_delay: float = 1.0,
+        max_delay: float = 60.0,
     ) -> ModelResponse:
-        """Exponential backoff retry.
+        """Exponential backoff retry with jitter.
 
-        Only retries on recoverable errors (429 rate limit, 5xx server errors,
-        network exceptions). Does NOT retry on client errors (400/401/403/404)
-        or programming errors (ValueError/TypeError).
+        Retry strategy (inspired by xAI Grok Build's sampler retry engine):
+          - Layer 1: Network errors (ConnectError, TimeoutException, etc.) → retry with backoff
+          - Layer 2: HTTP 429 (rate limit) → retry with longer backoff + respect Retry-After
+          - Layer 3: HTTP 5xx (server errors) → retry with backoff
+          - No retry: HTTP 4xx (except 429), programming errors (ValueError, TypeError)
+
+        Uses jitter (+/- 25%) to avoid thundering herd on shared infrastructure.
+        Caps backoff at max_delay to prevent unbounded wait.
         """
         _RETRYABLE_EXC = self.RETRYABLE_EXC
         _NON_RETRYABLE_EXC = self.NON_RETRYABLE_EXC
@@ -151,34 +175,38 @@ class BaseAdapter:
                 resp = fn()
                 if resp.raw and isinstance(resp.raw, dict):
                     status = resp.raw.get("status", 0)
-                    if status in (429,) or (500 <= status < 600):
-                        # Retryable HTTP error.
+                    if status == 429:
+                        # Rate limit: use longer backoff.
                         last_error = resp
-                        delay = base_delay * (2 ** attempt)
+                        retry_after = float(resp.raw.get("retry_after", 0)) or base_delay * 4
+                        delay = self._backoff_delay(attempt, base_delay=retry_after, max_delay=max_delay)
+                        time.sleep(delay)
+                        continue
+                    if 500 <= status < 600:
+                        # Server error: retryable with standard backoff.
+                        last_error = resp
+                        delay = self._backoff_delay(attempt, base_delay, max_delay)
                         time.sleep(delay)
                         continue
                 return cast(ModelResponse, resp)
             except _NON_RETRYABLE_EXC:
-                # Programming error: do not retry, re-raise.
                 raise
             except _RETRYABLE_EXC as e:
-                # Network error: retryable.
                 last_error = ModelResponse(
                     content=f"[API error (attempt {attempt + 1}/{max_retries}): {e}]",
                     stop_reason=StopReason.STOP,
                 )
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
+                    delay = self._backoff_delay(attempt, base_delay, max_delay)
                     time.sleep(delay)
                     continue
             except Exception as e:
-                # Other exceptions: try once more, do not retry indefinitely.
                 last_error = ModelResponse(
                     content=f"[API error (attempt {attempt + 1}/{max_retries}): {e}]",
                     stop_reason=StopReason.STOP,
                 )
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
+                    delay = self._backoff_delay(attempt, base_delay, max_delay)
                     time.sleep(delay)
                     continue
         return last_error or ModelResponse(

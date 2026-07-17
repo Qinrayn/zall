@@ -74,10 +74,12 @@ def build_adapter(provider: str, model: str | None = None) -> Any:
     """construct adapter (委托给 cli.config._build_adapter, 统一patch点)。
 
     O9: 从配置加载 timeout 并传递给 adapter。
+    环境变量 ZALL_TIMEOUT 优先级最高，可覆盖 config.toml。
     """
+    import os as _os
     from zall.safety.config import load_config as _load_cfg
     cfg = _load_cfg()
-    timeout = cfg.get("timeout", 300.0)
+    timeout = float(_os.environ.get("ZALL_TIMEOUT") or cfg.get("timeout", 300.0))
     return _cli_config._build_adapter(provider, model=model, timeout=timeout)
 
 

@@ -125,7 +125,7 @@ class OpenAICompatAdapter(BaseAdapter):
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
         # Reuse persistent client with exponential backoff retry.
-        # Retries on network jitter / 429 / 5xx (max 3); 400/401/403/404 not retried.
+        # Retries on network jitter / 429 / 5xx (max 5); 400/401/403/404 not retried.
         def _do_post() -> ModelResponse:
             try:
                 resp = self._client.post(url, json=body, headers=headers,
@@ -145,10 +145,13 @@ class OpenAICompatAdapter(BaseAdapter):
                     raw={"error": str(e)},
                 )
             if resp.status_code != 200:
-                return self.make_error_response(resp.status_code, resp.text)
+                # Capture retry_after header for rate-limit handling in with_retry.
+                retry_after = resp.headers.get("retry-after", "0") if hasattr(resp, "headers") else "0"
+                raw = {"status": resp.status_code, "retry_after": retry_after}
+                return self.make_error_response(resp.status_code, resp.text, raw=raw)
             return self._parse_response(resp.json())
 
-        return self.with_retry(_do_post, max_retries=3)
+        return self.with_retry(_do_post, max_retries=5, base_delay=1.0, max_delay=60.0)
 
     def _stream(self, messages: list[Message], tools: list[dict[str, Any]], tool_choice: ToolChoice) -> Any:
         """Stream the response, yielding (token_delta, accumulated_response).
@@ -159,7 +162,14 @@ class OpenAICompatAdapter(BaseAdapter):
           - delta.tool_calls[].index/id/function.name: first chunk
           - delta.tool_calls[].function.arguments: incremental concatenation
           - choices[0].finish_reason: only in the last chunk (maps to stop_reason)
+
+        Retry strategy:
+          Initial connection is retried up to 3 times with exponential backoff + jitter.
+          Once streaming has started, mid-stream errors are reported as partial responses
+          (the server state is lost, so retrying mid-stream would repeat tool calls).
         """
+        import random as _random
+
         body = self._build_body(messages, tools, tool_choice, stream=True)
         base = self._api_base.rstrip("/")
         url = f"{base}/chat/completions"
@@ -173,9 +183,38 @@ class OpenAICompatAdapter(BaseAdapter):
         # The read timeout matches the overall adapter timeout so complex multi-step
         # reasoning tasks (e.g., writing a game) don't get cut off mid-stream.
         stream_timeout = httpx.Timeout(connect=10.0, read=self._timeout, write=10.0, pool=5.0)
+
+        # Retry loop for the initial connection (not mid-stream).
+        # Uses exponential backoff with jitter, inspired by xAI Grok Build's sampler.
+        max_conn_retries = 3
+        for conn_attempt in range(max_conn_retries):
+            try:
+                resp = self._client.stream("POST", url, json=body, headers=headers,
+                                           timeout=stream_timeout)
+                resp.__enter__()
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                if conn_attempt < max_conn_retries - 1:
+                    delay = min(1.0 * (2 ** conn_attempt), 30.0) * _random.uniform(0.75, 1.25)
+                    import time as _time
+                    _time.sleep(delay)
+                    continue
+                yield ("", self._make_stream_error(
+                    f"cannot reach {self._api_base} after {max_conn_retries} attempts. "
+                    f"Check your network or api_base setting.", e))
+                return
+            except Exception as e:
+                if conn_attempt < max_conn_retries - 1:
+                    delay = min(1.0 * (2 ** conn_attempt), 30.0) * _random.uniform(0.75, 1.25)
+                    import time as _time
+                    _time.sleep(delay)
+                    continue
+                yield ("", self._make_stream_error(
+                    f"cannot connect to {self._api_base}. /doctor for details.", e))
+                return
+            break  # Connection succeeded
+
         try:
-            with self._client.stream("POST", url, json=body, headers=headers,
-                                     timeout=stream_timeout) as resp:
+            with resp:
                 if resp.status_code != 200:
                     # Streaming responses must be read() before .text is available.
                     err_body = resp.read().decode("utf-8", errors="replace") if hasattr(resp, "read") else resp.text
