@@ -169,6 +169,7 @@ class OpenAICompatAdapter(BaseAdapter):
           (the server state is lost, so retrying mid-stream would repeat tool calls).
         """
         import random as _random
+        import time as _time
 
         body = self._build_body(messages, tools, tool_choice, stream=True)
         base = self._api_base.rstrip("/")
@@ -185,17 +186,22 @@ class OpenAICompatAdapter(BaseAdapter):
         stream_timeout = httpx.Timeout(connect=10.0, read=self._timeout, write=10.0, pool=5.0)
 
         # Retry loop for the initial connection (not mid-stream).
-        # Uses exponential backoff with jitter, inspired by xAI Grok Build's sampler.
+        # Must use manual __enter__/__exit__ since the context manager is from the retry loop.
         max_conn_retries = 3
+        stream_ctx: Any = None
+        http_response: Any = None
         for conn_attempt in range(max_conn_retries):
             try:
-                resp = self._client.stream("POST", url, json=body, headers=headers,
-                                           timeout=stream_timeout)
-                resp.__enter__()
+                stream_ctx = self._client.stream("POST", url, json=body, headers=headers,
+                                                  timeout=stream_timeout)
+                http_response = stream_ctx.__enter__()
+                break  # Connection succeeded
             except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                if stream_ctx is not None:
+                    stream_ctx.__exit__(type(e), e, e.__traceback__)
+                    stream_ctx = None
                 if conn_attempt < max_conn_retries - 1:
                     delay = min(1.0 * (2 ** conn_attempt), 30.0) * _random.uniform(0.75, 1.25)
-                    import time as _time
                     _time.sleep(delay)
                     continue
                 yield ("", self._make_stream_error(
@@ -203,24 +209,25 @@ class OpenAICompatAdapter(BaseAdapter):
                     f"Check your network or api_base setting.", e))
                 return
             except Exception as e:
+                if stream_ctx is not None:
+                    stream_ctx.__exit__(type(e), e, e.__traceback__)
+                    stream_ctx = None
                 if conn_attempt < max_conn_retries - 1:
                     delay = min(1.0 * (2 ** conn_attempt), 30.0) * _random.uniform(0.75, 1.25)
-                    import time as _time
                     _time.sleep(delay)
                     continue
                 yield ("", self._make_stream_error(
                     f"cannot connect to {self._api_base}. /doctor for details.", e))
                 return
-            break  # Connection succeeded
 
+        assert http_response is not None, "stream connection succeeded but no response"
         try:
-            with resp:
-                if resp.status_code != 200:
-                    # Streaming responses must be read() before .text is available.
-                    err_body = resp.read().decode("utf-8", errors="replace") if hasattr(resp, "read") else resp.text
-                    yield ("", self.make_error_response(resp.status_code, err_body))
-                    return
-                for line in resp.iter_lines():
+            if http_response.status_code != 200:
+                # Streaming responses must be read() before .text is available.
+                err_body = http_response.read().decode("utf-8", errors="replace") if hasattr(http_response, "read") else http_response.text
+                yield ("", self.make_error_response(http_response.status_code, err_body))
+                return
+            for line in http_response.iter_lines():
                     chunk = self._parse_stream_line(line)
                     if chunk is None:
                         continue  # Empty / keepalive / [DONE] / corrupted JSON
@@ -255,6 +262,13 @@ class OpenAICompatAdapter(BaseAdapter):
             # On unexpected errors, return whatever was accumulated so far.
             yield self._build_partial_response(state, e)
             return
+        finally:
+            # Always clean up the stream context manager.
+            if stream_ctx is not None:
+                try:
+                    stream_ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
 
         # Build the final ModelResponse.
         yield self._build_final_stream_response(state)
