@@ -153,8 +153,6 @@ class SearchTool:
         O5: uses shared httpx.Client for connection pooling.
         """
 
-        import httpx  # Item C: 确保异常处理器中 httpx 可用
-
         # ── 尝试 1: DuckDuckGo Lite (首选) ──
         for attempt in range(MAX_RETRIES):
             result = self._search_duckduckgo_lite(query, max_results)
@@ -221,7 +219,6 @@ class SearchTool:
         
         当 DuckDuckGo 不可用时自动降级到此方法。
         """
-        import httpx
         url = "https://www.bing.com/search"
         try:
             client = _get_search_http_client()

@@ -31,7 +31,6 @@ from zall.core.verifiability import EventType
 if TYPE_CHECKING:
     from zall.core.compactor import Compactor
     from zall.core.loop import AgentLoop
-    from zall.core.loop_events import LoopEvent
 
 
 def _loop_event(*args: Any, **kwargs: Any) -> Any:

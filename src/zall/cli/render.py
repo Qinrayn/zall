@@ -476,7 +476,6 @@ class CliRenderer:
         tool_calls = p.get("tool_calls", [])
         if not tool_calls:
             return
-        tool_names = [tc.get("tool_id", "?") for tc in tool_calls]
         args_preview = []
         for tc in tool_calls:
             tid = tc.get("tool_id", "?")
