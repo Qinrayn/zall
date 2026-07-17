@@ -4,5 +4,5 @@ Model-agnostic engineering agent. This package MUST NOT import any model SDK;
 Model adapters reside in `zall.adapters`. See IMPL.md IPR-3.
 """
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 __all__ = ["__version__"]

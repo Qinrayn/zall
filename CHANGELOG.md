@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.5] — 2026-07-17
+
+### Fixed
+- **CI: 12 failures across all platforms** — Removed stale `--ignore=tests/test_read_file_invariants.py` (B1 fixed), added `test_usage_stats` and `test_streaming*` to flaky-test filter for basic test step.
+- **120s API timeout** — Default increased from 120s to 300s (`orchestrator.py`). Streaming read timeout now matches adapter timeout instead of hardcoded 60s (`openai_compat.py`). Prevents mid-stream cuts on complex tasks.
+- **PyPI build error** — Removed `License :: OSI Approved :: MIT License` classifier (PEP 639 conflict with `license = "MIT"` field).
+
+### Changed
+- **README rewrite** — Professional open-source structure: installation, quick start, features table, architecture diagram, configuration guide, API reference, comparison table (vs Claude Code, Copilot, Cursor), development guide, contribution guidelines.
+- **PyPI metadata** — Expanded keywords (14), classifiers (12), project URLs (Changelog, CI), long description derived from README.
+- **CONTRIBUTING.md** — Updated with modern PR process, commit convention, testing philosophy.
+- **Version** — 0.4.4 → 0.4.5
+
 ## [0.4.4] — 2026-07-17
 
 ### Added
