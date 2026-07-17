@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.4] — 2026-07-17
+
+### Added
+- **loop.py 拆分** — 1598 行 `loop.py` 拆分为 4 个文件: `loop_config.py` (AgentConfig), `loop_events.py` (LoopEvent/RunEgress/StepResult), `loop_errors.py` (ToolNotFound/AgentRunaway), `loop.py` (AgentLoop 主类). 借鉴 Grok Build 模块化架构, 每个模块单一职责.
+- **ToolKind 工具分类体系** — 新增 `core/tool_kind.py`: `ToolKind` 枚举 (READ/WRITE/EDIT/EXECUTE/SEARCH 等) + `ToolNamespace` 枚举 (ZALL/CODEX/MCP 等). 工具可声明 `kind` 属性, 替换硬编码 `_WRITE_TOOLS` frozenset.
+- **CompactionPolicy 一等公民** — 新增 `core/policies.py`: `CompactionPolicy` (阈值/预算/双通道) + `ReminderPolicy`. 集成到 `AgentConfig`.
+- **沙箱升级** — `SandboxMode.BWRAP` (bubblewrap 容器) + `SandboxMode.CONTAINER` (Docker). 辅助检测函数 `_bwrap_available()` / `_docker_available()`.
+
+### Changed
+- **AgentLoop 参数清理** — 移除 13 个旧式离散参数, 仅保留 `config: AgentConfig`. 旧式传参触发 `DeprecationWarning`.
+- **Tool Protocol 扩展** — 新增 `get_tool_kind()` / `get_tool_namespace()` 辅助函数, 向后兼容.
+- **Builder 优化** — `AgentBuilder.build()` 直接构造 `AgentConfig`.
+- **AgentConfig → frozen dataclass** — 防止运行时配置突变, 提升不可变性保证.
+- **完善 `__all__` 导出** — `zall/__init__.py` 和 `core/__init__.py` 增加显式 `__all__` 列表.
+- **版本号** — 0.4.2 → 0.4.4
+
+### Fixed
+- **B1: 测试修复** — `test_read_file_invariants.py` 传 `limit=100`, 修正正则兼容精确/估算行数.
+- **B3: AgentConfig.from_kwargs 补齐** — 补全 `compaction_policy`、`reminder_policy`、`anchor`、`chat_state` 4 个缺失字段.
+- **B4: 消除所有 DeprecationWarning** — 20+ 处 `AgentLoop(..., kwargs)` 全部迁移为 `AgentLoop(..., config=AgentConfig(...))`. 覆盖生产代码 (`spawn_subagent.py`, `replay.py`) 和全部测试用例.
+- **B5: 消除测试 DeprecationWarning** — 13 个测试文件全部更新, 零 DeprecationWarning 运行.
+
 ## [0.4.1] — 2026-07-17
 
 ### Added
@@ -12,6 +34,8 @@
 - Import errors for optional SDKs (anthropic, ollama) fixed.
 - macOS /var → /private/var path symlink handling.
 - Windows PowerShell CI quoting issue.
+
+## [0.4.0] — 2026-07-16
 
 ### Added
 - **ChatState 管理层** — Actor 模式的消息管理 (`src/zall/core/chat_state.py`). 借鉴 Grok Build 的 `xai-chat-state`. 支持事件追踪 (`StateEvent`)、用量分类账 (`UsageLedger`)、摘要压缩 (`SummaryCompaction`)、快照保存/恢复 (`Snapshot`)、可插拔持久化 (`ChatPersistence`).
@@ -27,7 +51,6 @@
 - Version bumped to `0.4.0`
 - `AgentConfig` 新增 `chat_state` 字段
 - `AgentLoop.__init__` 初始化 `ChatState` 实例, 通过 `self.chat_state` 属性访问
-- `loop.messages` 属性在 ChatState 可用时返回 ChatState 的消息快照
 
 ### New files
 - `src/zall/core/chat_state.py` — ChatState 管理层
@@ -54,6 +77,8 @@
 - `pyproject.toml` — added `pyyaml>=6.0` dependency for YAML frontmatter parsing
 - `SpawnSubagentTool` now supports `subagent_type` parameter (`general-purpose`, `explore`, `plan`) with capability-appropriate tool sets and system prompts.
 - `zall.core.__init__` now exports all new types from `agent` and `toolset` modules.
+
+## [0.2.7] — 2026-07-16
 
 ### Added
 - Unified logging module (`zall._util.logging`) — replaces silent `except Exception: pass` with observable warnings, strengthening IPR-0 self-falsifiability across all CLI and core modules

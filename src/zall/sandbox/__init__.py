@@ -49,10 +49,39 @@ from typing import Any
 
 
 class SandboxMode(str, Enum):
-    """沙箱模式 — 隔离级别。"""
+    """沙箱模式 — 隔离级别。
+    
+    NONE       — 无隔离 (默认, 与当前行为一致)
+    WORKTREE   — Git worktree 隔离 (子 agent 在独立 worktree 中操作)
+    PROCESS    — 子进程隔离 (子 agent 在独立 Python 进程中运行)
+    BWRAP      — bwrap 容器隔离 (Linux only, 需要 bubblewrap)
+    CONTAINER  — Docker 容器隔离 (完全隔离, 需要 Docker)
+    """
     NONE = "none"
     WORKTREE = "worktree"
     PROCESS = "process"
+    BWRAP = "bwrap"
+    CONTAINER = "container"
+
+
+# 检查 bwrap 是否可用
+def _bwrap_available() -> bool:
+    """Check if bubblewrap (bwrap) is available on this system."""
+    try:
+        r = subprocess.run(["bwrap", "--version"], capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+# 检查 Docker 是否可用
+def _docker_available() -> bool:
+    """Check if Docker is available on this system."""
+    try:
+        r = subprocess.run(["docker", "--version"], capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 @dataclass

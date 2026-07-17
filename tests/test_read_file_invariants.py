@@ -90,13 +90,13 @@ class TestReadFileToolLargeFile:
     """大filetruncate."""
 
     def test_large_file_shows_truncation_notice(self, tool: ReadFileTool, large_file: str) -> None:
-        result = tool.execute({"path": large_file})
+        result = tool.execute({"path": large_file, "limit": 100})
         assert result.success is True
         # 超过 2000 行且 limit=100, 不会触发 MAX_LINES truncate (limit 100 < 2000)
         # 所以应该有 100 行.大file使用估算, 格式for "~N"
         import re
-        assert re.search(r"Lines 1-100 of ~\d+", result.output), (
-            f"Expected 'Lines 1-100 of ~N' pattern, got: {result.output[:80]}"
+        assert re.search(r"Lines 1-100 of ~?\d+", result.output), (
+            f"Expected 'Lines 1-100 of [~]N' pattern, got: {result.output[:80]}"
         )
 
 

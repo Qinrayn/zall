@@ -29,7 +29,7 @@ from rich.text import Text
 
 from zall.core.accountability import base_judge
 from zall.core.goal import GoalTriple
-from zall.core.loop import LoopEvent
+from zall.core.loop_events import LoopEvent
 
 
 # ──────────────────────────────────────────────────────────────────────────

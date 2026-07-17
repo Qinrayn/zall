@@ -19,6 +19,7 @@ from typing import Any
 from zall._util.path import resolve_path
 
 from zall.core.tool import ToolResult
+from zall.core.tool_kind import ToolKind
 
 
 class WriteFileTool:
@@ -40,6 +41,10 @@ class WriteFileTool:
     @property
     def tool_id(self) -> str:
         return "write_file"
+
+    @property
+    def kind(self) -> ToolKind:
+        return ToolKind.WRITE
 
     @property
     def schema(self) -> dict[str, Any]:

@@ -15,7 +15,7 @@ from __future__ import annotations
 import io
 import json
 
-from zall.core.loop import LoopEvent
+from zall.core.loop_events import LoopEvent
 from zall.cli.render import CliRenderer, render_egress_summary, render_goal_card
 
 

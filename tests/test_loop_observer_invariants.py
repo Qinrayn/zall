@@ -36,7 +36,9 @@ from zall.core.goal import (
     GoalType,
     TerminationState,
 )
-from zall.core.loop import AgentLoop, LoopEvent
+from zall.core.loop import AgentLoop
+from zall.core.loop_config import AgentConfig
+from zall.core.loop_events import LoopEvent
 from zall.core.model import (
     Message,
     ModelResponse,
@@ -168,8 +170,7 @@ def _make_loop(
         goal=_make_goal(),
         context=_make_context(),
         user_responder=_AutoAcceptResponder(),
-        judge=judge,
-        observer=observer,
+        config=AgentConfig(judge=judge, observer=observer),
     )
 
 

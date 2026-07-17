@@ -335,6 +335,7 @@ class TestRealApiEventBus:
 
         # create loop (用 EventBus)
         adapter = OpenAICompatAdapter()
+        from zall.core.loop_config import AgentConfig
         loop = AgentLoop(
             model=adapter,
             tools=tools,
@@ -342,9 +343,7 @@ class TestRealApiEventBus:
             goal=goal,
             context=context,
             user_responder=responder,
-            judge=UndecidableJudge(),
-            event_bus=bus,
-            max_steps=1,
+            config=AgentConfig(judge=UndecidableJudge(), event_bus=bus, max_steps=1),
         )
 
         # 运行

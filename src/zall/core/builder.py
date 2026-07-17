@@ -239,7 +239,8 @@ class AgentBuilder:
 
         self._validate()
 
-        from zall.core.loop import AgentLoop, AgentConfig
+        from zall.core.loop import AgentLoop
+        from zall.core.loop_config import AgentConfig
 
         config = AgentConfig(
             judge=self._judge,

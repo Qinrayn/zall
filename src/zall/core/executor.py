@@ -44,13 +44,13 @@ if TYPE_CHECKING:
 
 def _loop_event(*args: Any, **kwargs: Any) -> Any:
     """Lazy import LoopEvent to avoid circular import with loop.py."""
-    from zall.core.loop import LoopEvent
+    from zall.core.loop_events import LoopEvent
     return LoopEvent(*args, **kwargs)
 
 
 def _tool_not_found(*args: Any, **kwargs: Any) -> Any:
     """Lazy import ToolNotFound to avoid circular import with loop.py."""
-    from zall.core.loop import ToolNotFound
+    from zall.core.loop_errors import ToolNotFound
     return ToolNotFound(*args, **kwargs)
 
 
@@ -85,7 +85,8 @@ class ToolExecutor:
             # Plan mode: write tools forced to GREYLIST
             if (
                 loop._plan_mode
-                and action.tool_id in loop._WRITE_TOOLS
+                and (action.tool_id in loop._WRITE_TOOLS
+                     or _is_tool_write_by_kind(loop, action.tool_id))
                 and judgement.level != SafeLevel.BLACKLIST
             ):
                 judgement = Judgement(
@@ -359,3 +360,20 @@ def _cast_gate_result(result: Any) -> GateResult:
     if isinstance(result, GateResult):
         return result
     raise TypeError(f"expected GateResult, got {type(result).__name__}: {result}")
+
+
+def _is_tool_write_by_kind(loop: Any, tool_id: str) -> bool:
+    """Check if a tool is a write-type tool via its ToolKind.
+    
+    Falls back to False if ToolKind is not available.
+    """
+    try:
+        from zall.core.tool import get_tool_kind
+        from zall.core.tool_kind import ToolKind
+        if loop._tools is not None:
+            tool = loop._tools.get(tool_id)
+            if tool is not None:
+                return get_tool_kind(tool).is_write()
+    except (ImportError, AttributeError):
+        pass
+    return False

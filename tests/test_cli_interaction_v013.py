@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import io
 
-from zall.core.loop import LoopEvent
+from zall.core.loop_events import LoopEvent
 from zall.cli.render import CliRenderer
 from zall.tools.todo import TodoListTool
 from zall.safety.rules_file import load_rules

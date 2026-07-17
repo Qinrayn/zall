@@ -46,6 +46,7 @@ from zall.core.goal import (
     TerminationState,
 )
 from zall.core.loop import AgentLoop
+from zall.core.loop_config import AgentConfig
 from zall.core.safety import Judgement, Rule, RuleSet, SafeLevel
 from zall.core.tool import ToolRegistry, ToolResult
 
@@ -534,8 +535,7 @@ class SpawnSubagentTool:
                 goal=sub_goal,
                 context=sub_context,
                 user_responder=_SubagentResponder(),
-                judge=None,
-                max_steps=self.MAX_SUBAGENT_STEPS,
+                config=AgentConfig(judge=None, max_steps=self.MAX_SUBAGENT_STEPS),
             )
 
             egress = sub_loop.run(

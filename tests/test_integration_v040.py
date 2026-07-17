@@ -52,7 +52,9 @@ class TestChatStateAgentLoopIntegration:
 
     def test_chat_state_in_agent_config(self):
         """ChatState 可以通过 AgentConfig 注入 AgentLoop。"""
-        from zall.core.loop import AgentLoop, AgentConfig, RunEgress
+        from zall.core.loop import AgentLoop
+        from zall.core.loop_config import AgentConfig
+        from zall.core.loop_events import RunEgress
         from zall.core.goal import GoalTriple, TerminationState
 
         # Create a minimal mock adapter
@@ -70,7 +72,8 @@ class TestChatStateAgentLoopIntegration:
 
     def test_agentloop_chat_state_property(self):
         """AgentLoop.chat_state 属性返回 ChatState 实例。"""
-        from zall.core.loop import AgentLoop, AgentConfig
+        from zall.core.loop import AgentLoop
+        from zall.core.loop_config import AgentConfig
         from zall.core.goal import GoalTriple
         from zall.core.context import Context
         from zall.cli.environment import CwdMeta
@@ -105,7 +108,8 @@ class TestChatStateAgentLoopIntegration:
 
     def test_get_chat_state_lazy_creation(self):
         """get_chat_state() 惰性创建 ChatState。"""
-        from zall.core.loop import AgentLoop, AgentConfig
+        from zall.core.loop import AgentLoop
+        from zall.core.loop_config import AgentConfig
         from zall.core.goal import GoalTriple
         from zall.core.context import Context
         from zall.cli.environment import CwdMeta

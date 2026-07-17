@@ -287,7 +287,9 @@ class TestBugFixes:
 
     def test_b2_max_steps_zero_allowed(self) -> None:
         """B2 regression: max_steps=0 is not overwritten to MAX_STEPS."""
-        from zall.core.loop import AgentLoop, MAX_STEPS
+        from zall.core.loop import AgentLoop
+        from zall.core.loop_config import AgentConfig
+        from zall.core.loop_events import MAX_STEPS
         from zall.core.gate import UserResponse, UserResponseType
         from zall.core.tool import ToolRegistry, ToolResult
 
@@ -306,7 +308,8 @@ class TestBugFixes:
         loop = AgentLoop(
             model=object(), tools=tools, rules=object(),
             goal=object(), context=object(),
-            user_responder=_MockResponder(), max_steps=0,
+            user_responder=_MockResponder(),
+            config=AgentConfig(max_steps=0),
         )
         # If B2 not fixed, loop._max_steps would be MAX_STEPS(50). After fix, 0 stays 0.
         # fix后 0 应preserve
@@ -315,7 +318,8 @@ class TestBugFixes:
         loop2 = AgentLoop(
             model=object(), tools=tools, rules=object(),
             goal=object(), context=object(),
-            user_responder=_MockResponder(), max_steps=None,
+            user_responder=_MockResponder(),
+            config=AgentConfig(max_steps=None),
         )
         assert loop2._max_steps == MAX_STEPS  # None → default
 

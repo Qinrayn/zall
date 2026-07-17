@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zall"
-version = "0.4.1"
+version = "0.4.4"
 description = "zall — a falsifiable, reproducible coding agent CLI. Model-agnostic, chain-hashed, replayable."
 readme = "README.md"
 requires-python = ">=3.10"

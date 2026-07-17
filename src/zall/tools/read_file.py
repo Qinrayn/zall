@@ -24,6 +24,7 @@ import itertools
 from typing import Any
 
 from zall.core.tool import ToolResult
+from zall.core.tool_kind import ToolKind
 from zall._util import is_binary
 from zall._util.file import detect_text_encoding as _detect_encoding
 from zall._util.path import resolve_path
@@ -53,6 +54,10 @@ class ReadFileTool:
     @property
     def tool_id(self) -> str:
         return "read_file"
+
+    @property
+    def kind(self) -> ToolKind:
+        return ToolKind.READ
 
     @property
     def schema(self) -> dict[str, Any]:

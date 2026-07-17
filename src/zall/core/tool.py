@@ -21,6 +21,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from zall.core.tool_kind import ToolKind, ToolNamespace
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # ToolResult (统一returntype)
@@ -81,6 +83,11 @@ class Tool(Protocol):
     IPR-0 不变量:
         - tool_id 非空 (与 Action.tool_id 对应)
         - schema 是Valid JSON Schema dict (描述参数, 给模型看)
+
+    可选属性 (Phase 2: ToolKind 分类):
+        - kind: ToolKind (默认 OTHER)
+        - namespace: ToolNamespace (默认 ZALL)
+        如果没有定义, 视为 ToolKind.OTHER / ToolNamespace.ZALL。
     """
 
     @property
@@ -90,6 +97,20 @@ class Tool(Protocol):
     def schema(self) -> dict[str, Any]: ...
 
     def execute(self, args: dict[str, Any]) -> ToolResult: ...
+
+
+def get_tool_kind(tool: Any) -> ToolKind:
+    """Get a tool's kind, defaulting to ToolKind.OTHER if not set."""
+    if hasattr(tool, 'kind') and tool.kind is not None:
+        return tool.kind
+    return ToolKind.OTHER
+
+
+def get_tool_namespace(tool: Any) -> ToolNamespace:
+    """Get a tool's namespace, defaulting to ToolNamespace.ZALL if not set."""
+    if hasattr(tool, 'namespace') and tool.namespace is not None:
+        return tool.namespace
+    return ToolNamespace.ZALL
 
 
 # ──────────────────────────────────────────────────────────────────────────

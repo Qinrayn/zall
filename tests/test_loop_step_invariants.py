@@ -21,7 +21,9 @@ from zall.core.gate import UserResponder, UserResponse, UserResponseType
 from zall.core.goal import (
     AcceptanceContract, GoalStatement, GoalTriple, GoalType, TerminationState,
 )
-from zall.core.loop import AgentLoop, LoopEvent, RunEgress, StepResult
+from zall.core.loop import AgentLoop
+from zall.core.loop_config import AgentConfig
+from zall.core.loop_events import LoopEvent, RunEgress, StepResult
 from zall.core.model import (
     Message, ModelResponse, StopReason, ToolCall, ToolChoice,
 )
@@ -123,7 +125,7 @@ def _make_loop(adapter, judge=None) -> AgentLoop:
         goal=_make_goal(),
         context=Context(user_raw="x", cwd_meta=_CwdMetaStub()),
         user_responder=_AutoAcceptResponder(),
-        judge=judge,
+        config=AgentConfig(judge=judge),
     )
 
 

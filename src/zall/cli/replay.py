@@ -29,7 +29,9 @@ from zall.core.context import Context
 from zall.core.goal import (
     AcceptanceContract, GoalStatement, GoalTriple, GoalType, TerminationState,
 )
-from zall.core.loop import AgentLoop, RunEgress
+from zall.core.loop import AgentLoop
+from zall.core.loop_config import AgentConfig
+from zall.core.loop_events import RunEgress
 from zall.core.model import (
     Message, ModelResponse, StopReason, ToolCall, ToolChoice,
 )
@@ -269,8 +271,7 @@ def replay_session(session_dir: str | Path) -> tuple[RunEgress, dict[str, Any]] 
         goal=goal,
         context=context,
         user_responder=_AutoAcceptResponder(),
-        judge=_NoOpJudge(),
-        stream=False,  # replay 不流式
+        config=AgentConfig(judge=_NoOpJudge(), stream=False),
     )
 
     egress = loop.run(system_prompt="replay")

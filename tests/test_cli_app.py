@@ -552,7 +552,7 @@ class TestSessionsAndResume:
 # 新增commandtest (对齐 Claude Code 水准): init / cost / diff / doctor / compact / usage
 # ──────────────────────────────────────────────────────────────────────────
 
-from zall.core.loop import LoopEvent  # noqa: E402  (放在类外末尾, 保持导入区style)
+from zall.core.loop_events import LoopEvent  # noqa: E402  (放在类外末尾, 保持导入区style)
 
 
 class TestNewCommands:

@@ -165,7 +165,7 @@ class _FakeEgress:
 class _FakeAgentLoop:
     captured_rules: RuleSet | None = None
 
-    def __init__(self, model, tools, rules, goal, context, user_responder, judge, max_steps):
+    def __init__(self, model, tools, rules, goal, context, user_responder, config=None, **kwargs):
         _FakeAgentLoop.captured_rules = rules
         self.recorder = SimpleNamespace(events=[])
 

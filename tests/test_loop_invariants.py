@@ -29,12 +29,10 @@ from zall.core.goal import (
     GoalType,
     TerminationState,
 )
-from zall.core.loop import (
-    AgentLoop,
-    AgentRunaway,
-    RunEgress,
-    ToolNotFound,
-)
+from zall.core.loop import AgentLoop
+from zall.core.loop_config import AgentConfig
+from zall.core.loop_errors import AgentRunaway, ToolNotFound
+from zall.core.loop_events import RunEgress
 from zall.core.model import (
     Message,
     ModelAdapter,
@@ -201,8 +199,7 @@ def _make_loop(
         goal=_make_goal(),
         context=_make_context(),
         user_responder=_AutoAcceptResponder(),
-        judge=judge,
-        observer=observer,
+        config=AgentConfig(judge=judge, observer=observer),
     )
 
 

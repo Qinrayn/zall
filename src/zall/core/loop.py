@@ -7,22 +7,10 @@ Corresponds to:
   §4.5    confirm_gate state machine
   §6.1    RunRecorder full recording + observer presentation projection (same record point, not a new primitive)
 
-This is the S0 skeleton cap — orchestration of all primitives.
-Before IPR-4 the main Loop was prohibited; all primitives are now in place.
-
-This iteration: **synchronous** version (asynchronous/streaming deferred).
-hello-world: fake adapter + fake tool runs the minimal cycle.
-
-Observer seam (§6.1 presentation projection):
-  AgentLoop.__init__ accepts optional observer: Callable[[LoopEvent], None].
-  Adds one _emit call at each existing RunRecorder record point — no new record points, no control flow changes.
-  observer exceptions are swallowed — presentation layer failures must not alter RunEgress (IPR-0 counterexample).
-  Without observer the behavior is identical to the original -> all existing tests unaffected.
-
-Key features:
-  - GitProtect safety net: automatic checkpoint after write/edit/bash operations
-  - MODIFY path fix: re-run context_judge + confirm_gate when gate returns deferred
-  - Real Evidence collection: _check_termination collects real git SHA
+This module imports its building blocks from sibling modules:
+  loop_config  → AgentConfig, _GitProtectProtocol
+  loop_events  → MAX_STEPS, _EMPTY_STOP_NUDGE, LoopEvent, RunEgress, StepResult
+  loop_errors  → AgentRunaway
 
 IPR constraints:
   IPR-0: invariant tests at tests/test_loop_invariants.py + tests/test_loop_observer_invariants.py
@@ -38,13 +26,12 @@ import fnmatch
 import os
 import re
 import time
-from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
-
 from typing import Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict
 
 from zall.core.action import Action
 from zall.core.accountability import AccountabilityResult, Judge
@@ -75,240 +62,10 @@ from zall._util import skip_noise_dirs
 from zall._util.path import NOISE_DIRS
 from zall.core.executor import ToolExecutor
 
-
-# Nudge injected when the model returns an empty response (no tool call, no answer).
-# Weak models (e.g. flash tier) often "empty stop" on exploratory tasks;
-# the nudge gives them one chance to emit a tool call or substantive answer.
-# Only triggers once per step (no internal loop); retry response goes to normal dispatch.
-# v0.0.21b: tightened — prohibits "intention-only" responses; enforces tool calls for actionable requests.
-_EMPTY_STOP_NUDGE = (
-    "Your previous turn produced no tool_call and no useful answer. You MUST now emit a "
-    "tool_call to actually perform the user's request (bash / write_file / edit_file / "
-    "list_dir / grep / etc.). Do NOT reply with text that only describes what you intend "
-    "to do (eg. 'I will create ...') — that is a failure. Execute the action via a "
-    "tool_call in THIS turn. If the request is truly a pure question that needs no tool, "
-    "answer it concisely and substantively. Never return an empty response."
-)
-
-
-@runtime_checkable
-class _GitProtectProtocol(Protocol):
-    """Minimal GitProtect protocol — core/ does not import tools/ (IPR-3).
-
-    GitProtect lives in tools/git_protect.py; core/ cannot import it directly.
-    Defined as Protocol with a minimal interface, injected by the CLI layer.
-    """
-
-    def is_git_repo(self) -> bool: ...
-    def checkpoint(self, label: str = "") -> dict[str, Any] | None: ...
-    def rollback(self, to_index: int | None = None) -> bool: ...
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Constants
-# ──────────────────────────────────────────────────────────────────────────
-
-MAX_STEPS = 50  # prevents runaway (noted in design layer §0)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# LoopEvent (§6.1 presentation projection — observer payload, not a new primitive)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-class LoopEvent(BaseModel):
-    """A single event received by the observer (§6.1 presentation projection of RunRecorder record points).
-
-    Relationship with TimelineEvent:
-        TimelineEvent is the Verifiability audit trail (chained hash, persistent).
-        LoopEvent is the presentation projection of the same record point (for observer, not persistent).
-        Both originate from the same record point (§6.1), but LoopEvent is not a new primitive:
-          - Does not participate in chained hashing (that is RunRecorder's responsibility)
-          - Is not persisted (that is the CLI session's responsibility)
-          - Only broadcasts "what just happened inside the Loop" to the presentation layer
-
-    kind ∈ {model_call, tool_call_start, tool_call_end, gate_decision,
-            judge_result, runaway, length_exceeded, error}
-    Aligned with EventType (§6.1), plus 3 extra ones for exceptional branches
-    (RunRecorder does not record these 3 because exceptions go through _make_egress, not into timeline).
-
-    IPR-0 invariants:
-        - frozen (observer must not mutate)
-        - kind must be non-empty
-        - step >= 1 (Loop steps start at 1)
-
-    Counterexample: observer tries to modify event.step -> must raise (frozen).
-    """
-
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
-
-    kind: str
-    step: int
-    # Presentation-layer payload; structure varies by kind, loosely typed (self-describing by presentation layer)
-    payload: dict[str, Any] = {}
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# RunEgress (simplified, S0)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-class RunEgress(BaseModel):
-    """Run output (S1: full version includes §3.4.5 downgrade fields).
-
-    §3.4.5 full version: original_goal + candidate_goals + final_claim + downgrade_depth.
-    Must report both original_goal (always undecidable) and candidate_goals,
-    prohibited from reporting only candidate met without mentioning original undecidable.
-
-    IPR-0 invariants:
-        - frozen
-        - if downgrade_depth > 0 then original_goal must be non-None
-    """
-
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
-
-    run_id: str
-    final_state: TerminationState
-    step_count: int
-    total_tool_calls: int
-    total_model_calls: int
-    error: str | None = None
-
-    # §3.4.5 GoalDowngrade reporting obligation
-    original_goal: GoalTriple | None = None
-    """Original Goal — after downgrade, the original Goal is always UNDECIDABLE"""
-    candidate_goals: tuple[GoalTriple, ...] = ()
-    """Downgrade candidate list — each is the target the outermost attempt approximates"""
-    downgrade_depth: int = 0
-    """Actual downgrade depth"""
-    final_claim: str = ""
-    """Final determination explanation (e.g. 'candidate[0]=investigate MET, original=undecidable')"""
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# StepResult (single step execution result, used in dialog mode)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-class StepResult(BaseModel):
-    """Return value of AgentLoop.step() (used in dialog mode).
-
-    step() executes one iteration (model call + possibly tool calls) without auto-termination.
-    run() also calls step() internally but returns RunEgress on terminal state.
-
-    kind:
-      tool_used     — the model invoked a tool, executed, continue to next iteration (non-terminal)
-      awaiting_input — the model STOPped, waiting for the next user utterance (natural pause in dialog mode)
-      terminal      — termination (exception / runaway / length / dialog explicitly ended)
-
-    Dialog mode: on awaiting_input -> show model reply to user -> wait for input -> continue step()
-    Task mode: run() loops step() internally until terminal
-
-    IPR-0 invariants:
-        - frozen
-        - on terminal, egress must be non-None
-        - on non-terminal, egress must be None
-    """
-
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
-
-    kind: str  # "tool_used" | "awaiting_input" | "terminal"
-    egress: RunEgress | None = None
-    # On awaiting_input: the model's reply content (for dialog mode display)
-    content: str = ""
-    # On tool_used: summary of tool calls in this iteration (for dialog mode display)
-    tools_used: tuple[str, ...] = ()
-
-    @property
-    def is_terminal(self) -> bool:
-        return self.kind == "terminal"
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# AgentLoopError
-# ──────────────────────────────────────────────────────────────────────────
-
-
-class ToolNotFound(Exception):
-    """The model invoked a tool_id not registered in ToolRegistry."""
-
-
-class AgentRunaway(Exception):
-    """Agent exceeded MAX_STEPS without terminating (§0 prevents runaway)."""
-
-
-class ContextLimitExceeded(Exception):
-    """Context window exceeded (LENGTH stop_reason), ContextManager not ready (deferred)."""
-
-
-# ── AgentConfig: optional configuration (R7 reduces AgentLoop.__init__ parameter explosion) ──
-
-
-@dataclass
-class AgentConfig:
-    """AgentLoop 配置 (所有可选参数)。
-
-    Usage:
-        config = AgentConfig(stream=True, max_steps=100, compactor=ModelCompactor())
-        loop = AgentLoop(model, tools, rules, goal, context, responder, config=config)
-
-    O9: AgentConfig 是 AgentLoop 可选参数的唯一配置入口。
-    旧式离散参数仍保留于 __init__ 签名供向后兼容, 但内部统一转为 AgentConfig。
-    """
-    judge: Judge | None = None
-    observer: Callable[[LoopEvent], None] | None = None
-    event_bus: EventBus | None = None
-    max_steps: int | None = None
-    stream: bool | None = None
-    git_protect: _GitProtectProtocol | None = None
-    checkpoint_mgr: CheckpointManager | None = None
-    allow_downgrade: bool | None = None
-    plan_mode: bool | None = None
-    compactor: Compactor | None = None
-    anchor: TrustAnchor | None = None
-    ext_registry: ExtensionRegistry | None = None
-    chat_state: ChatState | None = None
-    """ChatState 实例 — 提供 Actor 模式的消息管理 (v0.4.0)"""
-
-    # ── 从离散参数构造 AgentConfig (O9: 统一化入口) ──
-
-    @classmethod
-    def from_kwargs(
-        cls,
-        judge: Judge | None = None,
-        observer: Callable[[LoopEvent], None] | None = None,
-        event_bus: EventBus | None = None,
-        max_steps: int | None = None,
-        stream: bool | None = None,
-        git_protect: _GitProtectProtocol | None = None,
-        checkpoint_mgr: CheckpointManager | None = None,
-        allow_downgrade: bool | None = None,
-        plan_mode: bool | None = None,
-        compactor: Compactor | None = None,
-        anchor: TrustAnchor | None = None,
-        ext_registry: ExtensionRegistry | None = None,
-        chat_state: ChatState | None = None,
-    ) -> AgentConfig:
-        """从离散参数构造 AgentConfig (O9: 统一化入口)。
-
-        stream/allow_downgrade/plan_mode 的 bool 默认值在 AgentLoop 中定义,
-        AgentConfig 用 None 表示"未设置"。
-        """
-        return cls(
-            judge=judge,
-            observer=observer,
-            event_bus=event_bus,
-            max_steps=max_steps,
-            stream=stream,
-            git_protect=git_protect,
-            checkpoint_mgr=checkpoint_mgr,
-            allow_downgrade=allow_downgrade,
-            plan_mode=plan_mode,
-            compactor=compactor,
-            anchor=anchor,
-            ext_registry=ext_registry,
-            chat_state=chat_state,
-        )
+# ── Import from sibling modules (Phase 1 refactoring) ──
+from zall.core.loop_config import AgentConfig, _GitProtectProtocol
+from zall.core.loop_events import MAX_STEPS, _EMPTY_STOP_NUDGE, LoopEvent, RunEgress, StepResult
+from zall.core.loop_errors import AgentRunaway
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -353,35 +110,28 @@ class AgentLoop:
         goal: GoalTriple,
         context: Context,
         user_responder: UserResponder,
-        # ── 可选参数: 建议用 config: AgentConfig ──
         config: AgentConfig | None = None,
-        # ── 旧式离散参数 (向后兼容, 内部归一化为 AgentConfig) ──
-        judge: Judge | None = None,
-        observer: Callable[[LoopEvent], None] | None = None,
-        event_bus: EventBus | None = None,
-        max_steps: int | None = None,
-        stream: bool | None = None,
-        git_protect: _GitProtectProtocol | None = None,
-        checkpoint_mgr: CheckpointManager | None = None,
-        allow_downgrade: bool | None = None,
-        plan_mode: bool | None = None,
-        compactor: Compactor | None = None,
-        anchor: TrustAnchor | None = None,
-        ext_registry: ExtensionRegistry | None = None,
+        **kwargs: Any,
     ) -> None:
         # O9: 统一归一化为 AgentConfig
-        if config is None:
-            config = AgentConfig.from_kwargs(
-                judge=judge, observer=observer, event_bus=event_bus,
-                max_steps=max_steps, stream=stream,
-                git_protect=git_protect, checkpoint_mgr=checkpoint_mgr,
-                allow_downgrade=allow_downgrade, plan_mode=plan_mode,
-                compactor=compactor, anchor=anchor, ext_registry=ext_registry,
-            )
+        # Phase 3: 移除旧式离散参数, 仅接受 config: AgentConfig
+        _config = config
+        if _config is None:
+            if kwargs:
+                import warnings
+                warnings.warn(
+                    "Passing legacy discrete parameters to AgentLoop is deprecated. "
+                    "Use AgentConfig instead: AgentLoop(..., config=AgentConfig(...)).",
+                    DeprecationWarning, stacklevel=2,
+                )
+                _config = AgentConfig.from_kwargs(**kwargs)
+            else:
+                _config = AgentConfig()
+
         # stream/allow_downgrade/plan_mode 的最终默认值
-        _stream = config.stream if config.stream is not None else False
-        _allow_downgrade = config.allow_downgrade if config.allow_downgrade is not None else True
-        _plan_mode = config.plan_mode if config.plan_mode is not None else False
+        _stream = _config.stream if _config.stream is not None else False
+        _allow_downgrade = _config.allow_downgrade if _config.allow_downgrade is not None else True
+        _plan_mode = _config.plan_mode if _config.plan_mode is not None else False
 
         self._model = model
         self._tools = tools
@@ -389,38 +139,38 @@ class AgentLoop:
         self._goal = goal
         self._context = context
         self._user_responder = user_responder
-        self._judge = config.judge
+        self._judge = _config.judge
         # EventBus takes priority over observer (v0.1.2)
-        self._event_bus = config.event_bus or EventBus()
-        self._observer = config.observer
-        if config.observer is not None:
-            _observer = config.observer
+        self._event_bus = _config.event_bus or EventBus()
+        self._observer = _config.observer
+        if _config.observer is not None:
+            _observer = _config.observer
             # Legacy observer adapter via EventBus (avoids circular import in events.py)
             def _legacy_adapter(kind: str, payload: dict[str, Any]) -> None:
                 _observer(LoopEvent(kind=kind, step=payload.get("step", 0), payload=payload))
             self._event_bus.on("*", _legacy_adapter)
-        self._max_steps = config.max_steps if config.max_steps is not None and config.max_steps >= 0 else MAX_STEPS
+        self._max_steps = _config.max_steps if _config.max_steps is not None and _config.max_steps >= 0 else MAX_STEPS
         # stream: True and adapter supports complete_stream -> use streaming (same semantics, broadcasts tokens)
         self._stream = _stream and hasattr(model, "complete_stream")
         # GitProtect safety net: injected by CLI layer, core does not import tools/
-        self._git_protect = config.git_protect
+        self._git_protect = _config.git_protect
         # CheckpointManager: filesystem snapshot safety net
-        self._checkpoint_mgr = config.checkpoint_mgr
+        self._checkpoint_mgr = _config.checkpoint_mgr
         # plan_mode (§9.2.5 read-only posture) — write tools force greylist requiring confirmation.
         self._plan_mode = _plan_mode
         # §9.2.9 reactive auto-compact strategy (optional injection).
-        self._compactor = config.compactor
+        self._compactor = _config.compactor
         self._compaction_count = 0
-        self._anchor = config.anchor
+        self._anchor = _config.anchor
 
         # Extension registry (Pi-style lifecycle hooks)
-        self._ext_registry: ExtensionRegistry | None = config.ext_registry
+        self._ext_registry: ExtensionRegistry | None = _config.ext_registry
 
         # ToolExecutor: extracted tool execution orchestrator (v0.3.0)
         self._tool_executor = ToolExecutor(self)
 
         # ── v0.4.0: ChatState 集成 — Actor 模式消息管理 ──
-        self._chat_state: ChatState | None = config.chat_state
+        self._chat_state: ChatState | None = _config.chat_state
         # 向后兼容: 保持 _messages 作为原始列表
         self._messages: list[Message] = []
 
@@ -1310,9 +1060,26 @@ class AgentLoop:
         self._tool_executor.execute_all(tool_calls, self._step_count)
 
     # ── GitProtect security网 (v0.0.10) + CheckpointManager (v0.1.0) ──
+    # Phase 2: replaced hardcoded _WRITE_TOOLS with ToolKind-based detection
     _WRITE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "batch_edit", "bash"})
     WRITE_TOOLS: frozenset[str] = _WRITE_TOOLS
     """公开写tool集合 (供 CLI /undo 等command使用)"""
+
+    @classmethod
+    def _is_write_tool_kind(cls, tool_id: str, loop: AgentLoop | None = None) -> bool:
+        """Use ToolKind to check if a tool is a write tool.
+        
+        Falls back to _WRITE_TOOLS frozenset for tools that don't have kind set.
+        """
+        if tool_id in cls._WRITE_TOOLS:
+            return True
+        # Check via ToolRegistry if available
+        if loop is not None and loop._tools is not None:
+            from zall.core.tool import get_tool_kind
+            tool = loop._tools.get(tool_id)
+            if tool is not None:
+                return get_tool_kind(tool).is_write()
+        return False
 
     # B2: bash 写operation关键词 — 仅当command含这些关键词时才触发 checkpoint
     _BASH_WRITE_KEYWORDS: tuple[str, ...] = (

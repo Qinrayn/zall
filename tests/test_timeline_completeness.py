@@ -19,6 +19,7 @@ from zall.core.goal import (
     AcceptanceContract, GoalStatement, GoalTriple, GoalType, TerminationState,
 )
 from zall.core.loop import AgentLoop
+from zall.core.loop_config import AgentConfig
 from zall.core.model import Message, ModelResponse, StopReason, ToolCall, ToolChoice
 from zall.core.safety import RuleSet, SafeLevel
 from zall.core.tool import Tool, ToolRegistry, ToolResult
@@ -119,7 +120,7 @@ def _make_loop(adapter) -> AgentLoop:
         goal=_make_goal(),
         context=Context(user_raw="x", cwd_meta=_CwdMetaStub()),
         user_responder=_AutoAcceptResponder(),
-        judge=_MetJudge(),
+        config=AgentConfig(judge=_MetJudge()),
     )
 
 

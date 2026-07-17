@@ -22,6 +22,7 @@ from zall.core.action import Action
 from zall.core.context import Context
 from zall.core.gate import UserResponse, UserResponseType
 from zall.core.loop import AgentLoop
+from zall.core.loop_config import AgentConfig
 from zall.core.model import ModelResponse, StopReason, ToolCall, ToolChoice
 from zall.core.refiner import GoalRefiner
 from zall.core.safety import Judgement, Rule, RuleSet, SafeLevel
@@ -263,7 +264,7 @@ class TestPlanMode:
             goal=_refined_goal("add a new feature endpoint"),
             context=_make_context(),
             user_responder=responder,
-            plan_mode=True,
+            config=AgentConfig(plan_mode=True),
         )
         loop.run(system_prompt="")
         # 写tool经 greylist 走了confirm (被问到)
@@ -283,7 +284,7 @@ class TestPlanMode:
             goal=_refined_goal("add a new feature endpoint"),
             context=_make_context(),
             user_responder=responder,
-            plan_mode=False,
+            config=AgentConfig(plan_mode=False),
         )
         loop.run(system_prompt="")
         # non- plan pattern: whitelist directlyexecute, 不应被问

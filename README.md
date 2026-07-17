@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.4.1-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
-    <img alt="zall" src="https://img.shields.io/badge/zall-v0.4.1-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.4.4-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+    <img alt="zall" src="https://img.shields.io/badge/zall-v0.4.4-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
   </picture>
 </p>
 
@@ -61,13 +61,15 @@ zall
 - **PR-0**: Architectural hallucination detection — `stop_reason=STOP` with no `tool_calls` → flagged.
 - **Chain-hash timeline** — every session is cryptographically chained and replayable.
 - **ConfirmGate** — three-layer safety (rule engine + gate + override audit).
-- **Sandbox** — process isolation with worktree/process modes, resource limits.
+- **Sandbox** — process isolation with worktree/process/bwrap/container modes, resource limits.
+- **ToolKind classification** — 19 semantic tool kinds with read/write detection.
 
 ### 🔌 Extensibility
 - **Plugin system** — manifest-based plugins with git install, Python entry points.
 - **21 agent tools** — read/write/edit/bash/grep/glob/list_dir/search/web_fetch/spawn_subagent + LSP + CodeGraph.
 - **MCP support** — connect any MCP server.
 - **AgentDefinition** — YAML-based agent profiles with toolset presets.
+- **ToolKind classification** — 19 semantic tool kinds for cross-tool analysis and safety filtering.
 
 ### 🎯 Agent Architecture
 - **ChatState** — actor-based message management with events, usage tracking, compaction.
@@ -83,18 +85,23 @@ zall
 zall/
 ├── core/              # Primitives: model, agent, chat_state, gate, goal, safety, tool
 │   ├── loop.py        # AgentLoop orchestrator
+│   ├── loop_config.py # AgentConfig (v0.4.4)
+│   ├── loop_events.py # LoopEvent, RunEgress, StepResult (v0.4.4)
+│   ├── loop_errors.py # ToolNotFound, AgentRunaway (v0.4.4)
+│   ├── tool_kind.py   # ToolKind taxonomy — 19 semantic kinds (v0.4.4)
+│   ├── policies.py    # CompactionPolicy, ReminderPolicy (v0.4.4)
 │   ├── agent.py       # AgentDefinition + ToolsetPreset + CapabilityMode
-│   ├── chat_state.py  # Actor-based message management (NEW)
+│   ├── chat_state.py  # Actor-based message management
 │   ├── safety.py      # Three-state context_judge
 │   ├── gate.py        # ConfirmGate state machine
 │   └── verifiability.py  # RunRecorder (chain-hash) + TrustAnchor
 ├── cli/               # Rich REPL, 25+ slash commands, replay
 ├── tools/             # 21 tools: read/write/edit/bash/grep/lsp/codegraph/…
 ├── adapters/          # OpenAI-compat, Anthropic, Gemini, Ollama
-├── codegraph/         # Multi-language symbol indexer (NEW)
-├── lsp/               # LSP client (pyright, rust-analyzer, etc.) (NEW)
-├── sandbox/           # Process isolation (NEW)
-├── plugin/            # Plugin system (NEW)
+├── codegraph/         # Multi-language symbol indexer
+├── lsp/               # LSP client (pyright, rust-analyzer, etc.)
+├── sandbox/           # Process isolation (worktree/process/bwrap/container)
+├── plugin/            # Plugin system
 ├── mcp/               # MCP client
 ├── safety/            # Rule loader
 ├── eval/              # 5-dimensional R-Metric evaluation

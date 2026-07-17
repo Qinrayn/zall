@@ -191,7 +191,7 @@ class TestReplaySession:
 
     def test_compare_egress_detects_match(self) -> None:
         """Happy path: step+tool 一致 → reproduced=True."""
-        from zall.core.loop import RunEgress
+        from zall.core.loop_events import RunEgress
         from zall.core.goal import TerminationState
         eg = RunEgress(run_id="x", final_state=TerminationState.UNDECIDABLE,
                        step_count=2, total_tool_calls=1, total_model_calls=2)
@@ -203,7 +203,7 @@ class TestReplaySession:
 
     def test_compare_egress_detects_divergence(self) -> None:
         """Counterexample: step 不一致 → reproduced=False."""
-        from zall.core.loop import RunEgress
+        from zall.core.loop_events import RunEgress
         from zall.core.goal import TerminationState
         eg = RunEgress(run_id="x", final_state=TerminationState.UNDECIDABLE,
                        step_count=3, total_tool_calls=1, total_model_calls=3)

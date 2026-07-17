@@ -39,7 +39,7 @@ from zall.core.goal import (
     RefinedGoal,
     TerminationState,
 )
-from zall.core.loop import RunEgress
+from zall.core.loop_events import RunEgress
 from zall.core.refiner import GoalRefiner
 from zall.core.tool import ToolRegistry, ToolResult
 from zall.core.compactor import ModelCompactor

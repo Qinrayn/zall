@@ -26,6 +26,7 @@ import base64
 from typing import Any, Protocol, runtime_checkable
 
 from zall.core.tool import ToolResult
+from zall.core.tool_kind import ToolKind
 
 MAX_OUTPUT_BYTES = 50_000  # Maximum output (50KB, prevents context pollution)
 
@@ -446,6 +447,10 @@ class BashTool:
     @property
     def tool_id(self) -> str:
         return "bash"
+
+    @property
+    def kind(self) -> ToolKind:
+        return ToolKind.EXECUTE
 
     @property
     def schema(self) -> dict[str, Any]:

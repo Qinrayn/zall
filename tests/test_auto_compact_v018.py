@@ -26,6 +26,7 @@ from zall.core.goal import (
     TerminationState,
 )
 from zall.core.loop import AgentLoop
+from zall.core.loop_config import AgentConfig
 from zall.core.model import (
     Message,
     ModelResponse,
@@ -172,7 +173,7 @@ def _make_loop(adapter, compactor=None) -> AgentLoop:
         goal=_make_goal(),
         context=Context(user_raw="do x", cwd_meta=_CwdMetaStub()),
         user_responder=_AutoAcceptResponder(),
-        compactor=compactor,
+        config=AgentConfig(compactor=compactor),
     )
 
 
@@ -255,8 +256,7 @@ class TestAutoCompactOnLength:
             goal=_make_goal(),
             context=Context(user_raw="do x", cwd_meta=_CwdMetaStub()),
             user_responder=_AutoAcceptResponder(),
-            observer=events.append,
-            compactor=_FakeCompactor("reduce"),
+            config=AgentConfig(observer=events.append, compactor=_FakeCompactor("reduce")),
         )
         _seed(loop)
         loop.step()
@@ -297,8 +297,7 @@ class TestAutoCompactCounterExamples:
             goal=_make_goal(),
             context=Context(user_raw="do x", cwd_meta=_CwdMetaStub()),
             user_responder=_AutoAcceptResponder(),
-            observer=events.append,
-            compactor=_FakeCompactor("raise"),
+            config=AgentConfig(observer=events.append, compactor=_FakeCompactor("raise")),
         )
         _seed(loop)
         result = loop.step()

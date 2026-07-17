@@ -19,7 +19,7 @@ from typing import Any
 from zall.cli.environment import build_system_prompt as _build_system_prompt_context
 from zall.core.context import Context
 from zall.core.goal import TerminationState
-from zall.core.loop import RunEgress
+from zall.core.loop_events import RunEgress
 from zall.mcp.tool import MCPTool
 from zall._util.win32 import ensure_utf8_stdio as _ensure_utf8_stdio, set_console_title as _set_console_title
 
