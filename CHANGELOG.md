@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.7] — 2026-07-17
+
+### Fixed
+- **流式重试 bug** — `_stream()` 中 `resp.__enter__()` 的返回值（真实 `httpx.Response`）被丢弃，后续 `with resp:` 重复进入已耗尽的上下文管理器导致 `'_GeneratorContextManager' object has no attribute 'args'`. 现在正确捕获 `http_response` 用于读取状态码和迭代行，`stream_ctx` 保留用于 finally 清理。
+
+## [0.4.6] — 2026-07-17
+
+### Changed
+- **重试重构** — `BaseAdapter.with_retry` 使用 +/-25% 随机抖动，上限 60s，默认 5 次重试. 429 限流读取 Retry-After 头，5xx 可重试，4xx 不重试.
+- **流式连接重试** — `_stream()` 初始连接 3 次重试+抖动（之前零重试），连接成功后中断不重试.
+- **ZALL_TIMEOUT 环境变量** — 优先级最高，可覆盖 config.toml.
+
 ## [0.4.5] — 2026-07-17
 
 ### Fixed
