@@ -1,6 +1,17 @@
 # Changelog
 
-## [0.4.0] — 2026-07-17
+## [0.4.1] — 2026-07-17
+
+### Added
+- First PyPI release! `pip install zall` now works.
+- Comprehensive README updated with all v0.4.0 features.
+- CI pipeline fully green across 12 platforms (4 Python × 3 OS).
+
+### Fixed
+- All ruff lint errors resolved.
+- Import errors for optional SDKs (anthropic, ollama) fixed.
+- macOS /var → /private/var path symlink handling.
+- Windows PowerShell CI quoting issue.
 
 ### Added
 - **ChatState 管理层** — Actor 模式的消息管理 (`src/zall/core/chat_state.py`). 借鉴 Grok Build 的 `xai-chat-state`. 支持事件追踪 (`StateEvent`)、用量分类账 (`UsageLedger`)、摘要压缩 (`SummaryCompaction`)、快照保存/恢复 (`Snapshot`)、可插拔持久化 (`ChatPersistence`).
