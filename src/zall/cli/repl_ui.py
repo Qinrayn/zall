@@ -231,6 +231,16 @@ def repl(
         from zall.extensions.usage_tracker import create_usage_tracker
         ext_registry.register(create_auto_learn())
         ext_registry.register(create_usage_tracker())
+        # v0.4.10 (B1): connect auto-learn config overrides to config layer
+        from zall.cli.config_layers import set_extension_suggestions
+        _learn_ext = ext_registry.get("auto_learn")
+        if _learn_ext is not None and hasattr(_learn_ext, "get_config_overrides"):
+            try:
+                _overrides = _learn_ext.get_config_overrides()
+                if _overrides:
+                    set_extension_suggestions(_overrides)
+            except Exception:
+                pass
     except Exception as _ext_err:
         _log.warning("built-in extensions skipped: %s", _ext_err)  # Built-in extensions are optional
 
@@ -384,7 +394,7 @@ def repl(
                                     renderer = state.get("_renderer")
                                     if renderer is not None and hasattr(renderer, "_stop_spinner"):
                                         renderer._stop_spinner()
-                                    result = loop.step()
+                                    result = loop.retry_step()  # v0.4.9 (A2): no step_count drift
                                 except KeyboardInterrupt:
                                     out.write("  \u00b7 interrupted\n")
                                     out.flush()
@@ -425,6 +435,10 @@ def repl(
                     break
             out.flush()
     finally:
+        # v0.4.9 (A3): 退出时停止持久 spinner 线程
+        _renderer = state.get("_renderer")
+        if _renderer is not None and hasattr(_renderer, "shutdown_spinner"):
+            _renderer.shutdown_spinner()
         for t in mcp_tools:
             t.close()
         # v0.3.0 (B2): 关闭session级 adapter (httpx 连接池释放); fake adapter 无 close skip

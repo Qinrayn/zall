@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.4.4-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
-  <img alt="zall" src="https://img.shields.io/badge/zall-v0.4.4-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+  <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.4.10-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+  <img alt="zall" src="https://img.shields.io/badge/zall-v0.4.10-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
 </picture>
 
 <p align="center">
@@ -120,7 +120,7 @@ zall
 | **ChatState** | Actor-based message management with events, usage tracking, compaction |
 | **AgentBuilder** | Fluent builder for AgentLoop construction |
 | **Subagent** | Typed sub-agents (general-purpose, explore, plan) with capability isolation |
-| **Self-Evolution** | Extension hooks for auto-learning, usage tracking, and pattern discovery |
+| **Self-Evolution** | Extension hooks for auto-learning, usage tracking, pattern discovery; `/suggest` and `/learn` commands for insight and application; high-confidence K-value auto-adjustment; cross-session learned memory injection |
 
 ## 🏗️ Architecture
 
@@ -264,7 +264,7 @@ Commands in REPL:
   /chatstate, /plugin, /add, /drop, /diff, /search,
   /web, /git, /commit, /sessions, /resume, /replay,
   /eval, /cost, /compact, /undo, /retry, /doctor,
-  /checkpoint, /clear
+  /checkpoint, /clear, /suggest, /learn
 ```
 
 ## 🆚 Comparison

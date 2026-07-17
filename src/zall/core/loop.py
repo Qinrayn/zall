@@ -202,6 +202,9 @@ class AgentLoop:
         self._tool_call_count = 0
         self._model_call_count = 0
         self._gate_decision_count = 0
+        # v0.4.9 (A1): last streaming exception, if any. Lets callers/observers
+        # know a stream degraded — instead of silently pretending success.
+        self._last_stream_error: BaseException | None = None
         # B9: SUSPENDED 计数器已在 executor.py 中以局部变量正确实现,
         # loop 层不再维护此状态。
         # O3: cached tool schemas from ToolRegistry cache (avoids per-instance deepcopy).
@@ -490,9 +493,12 @@ class AgentLoop:
                         typed_input=_td_input,
                         egress=result.egress,
                     )
+                # v0.4.10 (B1): auto-apply high-confidence adjust_k suggestions
+                if self._ext_registry is not None:
+                    self._auto_apply_suggestions()
                 return result.egress
             if result.kind == "awaiting_input":
-                # task mode: model STOP → check Goal termination → return RunEgress
+                # task mode: model STOP → check Goal termination -> return RunEgress
                 # (dialog mode does not call run(), it calls step() and waits on awaiting_input)
                 egress = self._check_termination()
                 if self._ext_registry is not None:
@@ -509,6 +515,8 @@ class AgentLoop:
                         typed_input=_td_input,
                         egress=egress,
                     )
+                    # v0.4.10 (B1): auto-apply high-confidence adjust_k suggestions
+                    self._auto_apply_suggestions()
                 return egress
             # tool_used → 继续循环
 
@@ -534,7 +542,20 @@ class AgentLoop:
                     error=f"exceeded MAX_STEPS={self._max_steps} without termination",
                 ),
             )
+        return self._run_step_body()
 
+    def retry_step(self) -> StepResult:
+        """Retry the current step without incrementing step_count.
+
+        v0.4.9 (A2): CLI-level transient error retry (e.g. 429/503) calls
+        retry_step() instead of step() so the step counter does not drift.
+        All internal invariants (watermark monitor, empty-stop backoff, etc.)
+        behave identically to step() — only the counter increment is skipped.
+        """
+        return self._run_step_body()
+
+    def _run_step_body(self) -> StepResult:
+        """Core step execution body shared by step() and retry_step()."""
         try:
             # ── 0. §9.2.9 主动水位monitor (delegated to ContextManager)
             self._context_mgr.check_watermark_before_call(
@@ -718,7 +739,46 @@ class AgentLoop:
                 typed_input=_td_input,
                 egress=egress,
             )
+            # v0.4.10 (B1): auto-apply high-confidence adjust_k suggestions
+            self._auto_apply_suggestions()
         return egress
+
+    def _auto_apply_suggestions(self) -> None:
+        """Auto-apply high-confidence adjust_k suggestions from extensions.
+
+        v0.4.10 (B1): Called after on_turn_done to apply trustworthy
+        suggestions. Currently only auto-applies adjust_k (K-value changes)
+        with confidence >= 0.5. Other suggestion kinds require manual
+        approval via /suggest apply.
+        """
+        if self._ext_registry is None:
+            return
+        try:
+            suggestions = self._ext_registry.collect_suggestions()
+        except Exception:
+            return
+        if not suggestions:
+            return
+        for s in suggestions:
+            if s.kind == "adjust_k" and s.confidence >= 0.5:
+                # Try to find and apply through the extension
+                for ext in list(self._ext_registry._extensions.values()):
+                    if hasattr(ext, "apply_suggestion") and callable(ext.apply_suggestion):
+                        try:
+                            result = ext.apply_suggestion(s)
+                            if result.get("applied"):
+                                self._emit(LoopEvent(
+                                    kind="self_adjust",
+                                    step=self._step_count,
+                                    payload={
+                                        "kind": s.kind,
+                                        "target": s.target,
+                                        "value": s.value,
+                                        "message": result.get("message", ""),
+                                    },
+                                ))
+                        except Exception:
+                            pass
 
     def add_user_message(self, content: str) -> None:
         """Dialog mode: user input appended as new user message.
@@ -1050,11 +1110,23 @@ class AgentLoop:
             # GeneratorExit must重抛 (Python generatorprotocol: 关闭信号不可吞)
             # 吞掉会破坏 with/finally cleanup链, 导致资源leak
             raise
-        except Exception:
-            # 其他stream式exception → downgrade为 STOP (失败security)
-            if resp is None:
-                return ModelResponse(content="", stop_reason=StopReason.STOP)
-            return resp
+        except Exception as _stream_exc:
+            # v0.4.9 (A1): stream exception must be observable and honest.
+            # Previously this was silently downgraded to an empty/partial STOP
+            # response, so callers (step/UI/auto-retry) had no signal that
+            # streaming failed. Now we log it, record it for introspection
+            # (self._last_stream_error), and let it propagate so step()'s
+            # terminal handler emits a real, diagnosable error egress instead
+            # of pretending the turn succeeded. This keeps the fail-safe
+            # semantic (no crash, clean terminal) while making the failure
+            # visible — matching the sync call path's behavior.
+            self._last_stream_error = _stream_exc
+            import logging as _zall_logging
+            _zall_logging.getLogger("zall.core.loop").warning(
+                "stream model call failed: %s: %s",
+                type(_stream_exc).__name__, _stream_exc,
+            )
+            raise
         # stream式结束, resp 是最终 ModelResponse (含完整 content + tool_calls + stop_reason)
         if resp is None:
             # stream式没产出任何东西 (exception) → downgrade为 STOP

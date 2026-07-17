@@ -46,6 +46,10 @@ __all__ = [
     "cmd_init", "cmd_update",
     # reload
     "cmd_reload",
+    # v040
+    "cmd_lsp", "cmd_sandbox", "cmd_codegraph", "cmd_chatstate", "cmd_plugin",
+    # v0.4.10 self-evolution
+    "cmd_suggest", "cmd_learn",
 ]
 
 # Import from _common (shared infrastructure)
@@ -156,4 +160,10 @@ from zall.cli.commands.v040 import (  # noqa: F401
     cmd_codegraph,
     cmd_chatstate,
     cmd_plugin,
+)
+
+# v0.4.10: 自进化命令
+from zall.cli.commands.suggest import (  # noqa: F401
+    cmd_suggest,
+    cmd_learn,
 )

@@ -224,6 +224,7 @@ class CliRenderer:
         self._spinner_thread: threading.Thread | None = None
         self._spinner_stop = threading.Event()
         self._spinner_trigger = threading.Event()  # O9: persistent spinner trigger
+        self._spinner_shutdown = threading.Event()  # v0.4.9 (A3): permanent exit
         self._spinner_step: int = 0
         self._spinner_model: str = ""
         self._spinner_start: float = 0.0
@@ -237,6 +238,7 @@ class CliRenderer:
         self._call_depth: int = 0
         self._subagent_summary: dict[str, Any] = {}
         self._folded_tool_outputs: dict[int, str] = {}
+        self._folded_tool_outputs_max = 64  # v0.4.9 (A4): evict oldest to prevent unbounded growth
         self._tool_step_counter: int = 0
         self._term_width = shutil.get_terminal_size().columns
 
@@ -364,15 +366,24 @@ class CliRenderer:
                      "\u28bf", "\u28fb", "\u28fd", "\u28fe")
 
     def _spinner_loop(self) -> None:
-        """持久 spinner 线程: 循环等待 _spinner_trigger, 触发后旋转直到 _spinner_stop。"""
-        while True:
+        """持久 spinner 线程: 循环等待 _spinner_trigger, 触发后旋转直到 _spinner_stop。
+
+        v0.4.9 (A3): 不再因 _stop_spinner 退出, 而是回到 wait() 等待下次触发。
+        真正的线程退出由 _spinner_shutdown 控制 (shutdown_spinner 调用)。
+        """
+        while not self._spinner_shutdown.is_set():
             self._spinner_trigger.wait()
-            if self._spinner_stop.is_set():
-                # 线程退出信号
+            if self._spinner_shutdown.is_set():
                 return
+            if self._spinner_stop.is_set():
+                # 被唤醒但 stop 已设置 (边缘情况): 回到等待
+                self._spinner_trigger.clear()
+                continue
             self._spinner_trigger.clear()
             idx = 0
             while not self._spinner_stop.is_set():
+                if self._spinner_shutdown.is_set():
+                    return
                 elapsed = time.time() - self._spinner_start
                 frame = self._SPIN_FRAMES[idx % len(self._SPIN_FRAMES)]
                 label = self._spinner_model or "model"
@@ -382,7 +393,7 @@ class CliRenderer:
                 else:
                     status = f"  {frame} {label}"
                 with self._write_lock:
-                    if self._spinner_stop.is_set():
+                    if self._spinner_stop.is_set() or self._spinner_shutdown.is_set():
                         break
                     self._raw_stream.write(f"\r{status}")
                     self._raw_stream.flush()
@@ -400,14 +411,29 @@ class CliRenderer:
         if not self._spinner_active:
             return
         self._spinner_stop.set()
-        # 如果是持久线程在等待, 触发它唤醒并退出
+        # 触发持久线程退出旋转循环, 回到 _spinner_trigger.wait() 等待
         self._spinner_trigger.set()
-        # 等待线程确认
-        if self._spinner_thread and self._spinner_thread.is_alive():
-            self._spinner_thread.join(timeout=0.5)
-        self._spinner_thread = None
+        # 不 join 也不设 None —— 持久线程继续存活等待下次触发
+        # v0.4.9 (A3): 修复之前 unconditionally 设 _spinner_thread = None
+        # 破坏持久线程设计, 导致每次 model_call 重建线程。
         self._clear_line()
         self._spinner_active = False
+
+    def shutdown_spinner(self) -> None:
+        """REPL 退出时真正停止持久 spinner 线程。
+
+        与 _stop_spinner 不同: _stop_spinner 只是暂停旋转,
+        线程继续存在等待下次触发; shutdown_spinner 发送退出信号
+        并清理线程引用。
+        """
+        self._stop_spinner()
+        # 发送永久退出信号, 线程在 _spinner_shutdown 检查时 return
+        self._spinner_shutdown.set()
+        self._spinner_trigger.set()
+        if self._spinner_thread is not None:
+            if self._spinner_thread.is_alive():
+                self._spinner_thread.join(timeout=1.0)
+            self._spinner_thread = None
 
     def _clear_thinking_line(self) -> None:
         if not self._thinking_active:
@@ -763,6 +789,11 @@ class CliRenderer:
         needs_fold = len(body_lines) > MAX_PREVIEW_LINES and not self._verbose
 
         if needs_fold:
+            # v0.4.9 (A4): LRU eviction — remove oldest entries when over limit
+            if len(self._folded_tool_outputs) >= self._folded_tool_outputs_max:
+                # dict preserves insertion order; pop the first (oldest) key
+                _oldest = next(iter(self._folded_tool_outputs))
+                self._folded_tool_outputs.pop(_oldest)
             self._folded_tool_outputs[tool_idx] = body
             preview_lines = body_lines[:MAX_PREVIEW_LINES]
             remaining = len(body_lines) - MAX_PREVIEW_LINES

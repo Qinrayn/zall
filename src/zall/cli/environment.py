@@ -570,12 +570,16 @@ class PromptBuilder:
         return self
 
     def add_session_memory(self) -> PromptBuilder:
-        """Cross-session memory injection."""
+        """Cross-session memory injection (user memories + learned patterns)."""
         try:
-            from zall.core.memory import get_session_memory
+            from zall.core.memory import get_session_memory, load_learned_memo
             memory_ctx = get_session_memory().build_context()
             if memory_ctx:
                 self._parts.append("\n" + memory_ctx)
+            # v0.4.10 (B2): inject learned patterns from AutoLearn data
+            learned_memo = load_learned_memo()
+            if learned_memo:
+                self._parts.append("\n" + learned_memo)
         except Exception:
             pass  # Memory loading failure does not block
         return self

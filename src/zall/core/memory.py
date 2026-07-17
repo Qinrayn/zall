@@ -214,3 +214,95 @@ def get_session_memory() -> SessionMemory:
     if _global_memory is None:
         _global_memory = SessionMemory()
     return _global_memory
+
+
+# ═══════════════════════════════════════════════════════════════════
+# v0.4.10 (B2): Cross-session learned memo from AutoLearn data
+# ═══════════════════════════════════════════════════════════════════
+
+
+def load_learned_memo() -> str:
+    """Load cross-session learned patterns as a system-prompt memo.
+
+    Reads ~/.zall/learned/auto_learn.jsonl and produces a short (5-10 line)
+    text summary of known patterns. Returns empty string if no data exists.
+
+    Inspired by grok-build's memory dreaming — but without extra model calls.
+    This is the minimal v0 of cross-session memory.
+    """
+    path = _learned_path()
+    if not path.exists():
+        return ""
+
+    records = _load_learned_records(path)
+    if not records:
+        return ""
+
+    lines: list[str] = []
+    lines.append("[Cross-session learned patterns]")
+
+    # Tool usage frequency (top 5)
+    tool_counts: dict[str, int] = {}
+    for r in records:
+        tc = r.get("tool_counts", {})
+        if isinstance(tc, dict):
+            for tid, count in tc.items():
+                if isinstance(count, (int, float)):
+                    tool_counts[tid] = tool_counts.get(tid, 0) + int(count)
+
+    if tool_counts:
+        top_tools = sorted(tool_counts.items(), key=lambda x: -x[1])[:5]
+        tools_str = ", ".join(f"{tid}({c})" for tid, c in top_tools)
+        lines.append(f"  Frequent tools: {tools_str}")
+
+    # Tool error patterns
+    tool_errors: dict[str, int] = {}
+    for r in records:
+        te = r.get("tool_errors", {})
+        if isinstance(te, dict):
+            for tid, count in te.items():
+                if isinstance(count, (int, float)):
+                    tool_errors[tid] = tool_errors.get(tid, 0) + int(count)
+
+    if tool_errors:
+        error_tools = sorted(tool_errors.items(), key=lambda x: -x[1])[:3]
+        err_str = ", ".join(f"{tid}({c} errors)" for tid, c in error_tools)
+        lines.append(f"  Known failure patterns: {err_str}")
+
+    chain_count = sum(
+        1 for r in records
+        if isinstance(r.get("tool_chains", []), list) and len(r["tool_chains"]) > 0
+    )
+    if chain_count > 0:
+        lines.append(f"  Learned tool sequences: {chain_count} session(s) with chains")
+
+    total_tools = sum(tool_counts.values())
+    total_errors = sum(tool_errors.values())
+    if total_tools > 0 and total_errors > 0:
+        err_rate = total_errors / total_tools * 100
+        if err_rate > 10:
+            lines.append(f"  Note: overall error rate {err_rate:.0f}%")
+
+    return "\n".join(lines)
+
+
+def _learned_path() -> Path:
+    from zall.safety.config import CONFIG_DIR
+    base = str(CONFIG_DIR)
+    return Path(base) / "learned" / "auto_learn.jsonl"
+
+
+def _load_learned_records(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    except OSError:
+        pass
+    return records

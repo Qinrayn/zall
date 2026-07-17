@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.4.10] — 2026-07-18
+
+### Added
+- **`/suggest` 命令** — 列出 AutoLearn 生成的建议（adjust_k / create_skill / register_goaltype / adjust_judge），支持 `apply N`、`ignore N`、`detail N` 操作。被忽略的建议持久化到 `~/.zall/learned/ignored_suggestions.json`。
+- **`/learn` 命令** — 显示跨会话学习统计（工具使用频率、错误率、工具链数量），支持 `clear` 重置忽略列表。
+- **Auto-apply 高置信度建议** — `AgentLoop._auto_apply_suggestions()` 在 each turn done 后自动应用 confidence >= 0.5 的 `adjust_k` 建议，并 emit `self_adjust` event。
+- **`load_learned_memo()`** — 跨会话学习记忆注入：启动时读取 `auto_learn.jsonl`，注入系统 prompt 作为 `[Cross-session learned patterns]` 节（工具频率、错误模式、工具链统计）。
+- **Config 层连通 AutoLearn** — `repl_ui.py` 启动时调用 `set_extension_suggestions()`，将 `get_config_overrides()` 结果注入配置层。
+- **回归测试** — `test_suggest_command`、`test_learned_memory_invariants`、`test_auto_learn_apply_invariants`。
+
+### Changed
+- **`memory.py` 扩展** — 新增 `load_learned_memo()` 函数，复用现有 `SessionMemory`；`PromptBuilder.add_session_memory()` 现也注入 learned memo。
+- **`repl_ui.py` 扩展注册** — 启动时连接 AutoLearn 的 `get_config_overrides()` 到 `config_layers.set_extension_suggestions()`。
+- **`loop.py` 扩展钩子** — `finalize()` 和 `run()` 的 on_turn_done 后调用 `_auto_apply_suggestions()`。
+
+## [0.4.9] — 2026-07-18
+
+### Fixed
+- **[严重] 流式异常静默吞没 (A1)** — `_call_model_stream()` 中任何流式异常（API 断开、解码错误、速率限制等）之前被 `except Exception` 静默吞没，返回截断的 `ModelResponse`，调用方完全不知失败。现已记录日志、设置 `_last_stream_error` 字段，异常传播到 `step()` 的终端处理器，生成诚实可诊断的 `RunEgress` 错误。
+- **[严重] CLI 重试 step 计数漂移 (A2)** — `repl_ui.py` 自动重试（429/503 等瞬态错误）调用 `loop.step()` 导致 `_step_count` 每次重试额外 +1，可能误触 `MAX_STEPS` 终止。新增 `AgentLoop.retry_step()`（不递增计数器），CLI 重试使用此方法，确保重试不会导致计数器漂移。
+- **[严重] spinner 持久线程被破坏 (A3)** — `_stop_spinner()` 无条件设置 `_spinner_thread = None`，违反设计意图（注释说"单线程复用"），导致每次 model call 创建新线程。现在 `_stop_spinner()` 保留线程引用，线程回到等待状态等待下次触发；新增 `shutdown_spinner()` 供 REPL 退出时安全终止线程。
+- **工具折叠输出无界堆积 (A4)** — `_folded_tool_outputs` 字典按 tool_idx 累积，会话中无上限。现在设置最大 64 条，超限时淘汰最早条目。
+- **`ContextLimitExceeded` 死类** — 标记为废弃（deprecated），保留向后兼容的导入路径，但使用时会触发 `DeprecationWarning`。
+
+### Changed
+- **`AgentLoop` 重构** — 提取 `_run_step_body()` 方法，消除 `step()` 与 `retry_step()` 的代码重复，保障步计数器语义正确。
+- **`loop_errors.py` 废弃标记** — `ContextLimitExceeded` 不再被使用，保留为兼容性别名。
+
+### Added
+- **`AgentLoop.retry_step()`** — 不递增步计数器的重试方法，消除 CLI 重试漂移。
+- **`CliRenderer.shutdown_spinner()`** — REPL 退出时安全终止持久 spinner 线程。
+- **回归测试** — `test_stream_error_invariants.py`（A1）、`test_retry_step_invariants.py`（A2）、`test_render_spinner_invariants.py`（A3）。
+
 ## [0.4.8] — 2026-07-17
 
 ### Fixed
