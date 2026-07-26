@@ -49,14 +49,16 @@ jobs:
 
       - name: Test with pytest
         run: |
-          python -m pytest tests/ -q --tb=line \
-            -k 'not (test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)'
+          python -m pytest tests/ -v --tb=short -q --no-header --junitxml=pytest-results.xml \
+            -k 'not (test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)' 2>&1 | tail -30
 
-      - name: Test with coverage
-        run: |
-          pip install pytest-cov
-          python -m pytest tests/ -q --tb=line --cov=zall --cov-report=term-missing \
-            -k 'not (test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)'
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-results-${{ matrix.python-version }}-${{ matrix.os }}
+          path: pytest-results.xml
+          retention-days: 7
 
   publish:
     needs: [test]
