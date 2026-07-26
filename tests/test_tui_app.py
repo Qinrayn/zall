@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
+pytest.importorskip("textual")
 
 from zall.core.loop_events import LoopEvent
 

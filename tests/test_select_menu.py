@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import io
 
+import pytest
+pytest.importorskip("textual")
+
 from zall.cli.select import parse_selection, render_choices, select_prompt
 from zall.cli.tui.widgets import SelectMenu
 

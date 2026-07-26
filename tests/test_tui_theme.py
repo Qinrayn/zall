@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import re
 
+import pytest
+pytest.importorskip("textual")
+
 _HEX = re.compile(r"#[0-9a-fA-F]{6}\b")
 
 

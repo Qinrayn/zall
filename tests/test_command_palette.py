@@ -19,6 +19,8 @@ from __future__ import annotations
 import inspect
 import re
 
+import pytest
+
 from zall.cli.commands import fuzzy_rank, get_palette_commands
 
 
@@ -147,6 +149,10 @@ class TestAliasAnnotation:
 
 class TestPaletteBehavior:
     """InputBar._refresh_menu + CommandMenu 面板行为 (未挂载可测)。"""
+
+    @pytest.fixture(autouse=True)
+    def _require_textual(self):
+        pytest.importorskip("textual")
 
     def _bar(self, text: str):
         from zall.cli.tui.widgets import InputBar

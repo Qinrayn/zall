@@ -11,6 +11,9 @@ IPR-0: 每个 test 含 counterexample。
 
 from __future__ import annotations
 
+import pytest
+pytest.importorskip("textual")
+
 from zall.cli.tui import TuiApp
 from zall.cli.tui.widgets import ChatMessage, LiveRegion, MessageList
 

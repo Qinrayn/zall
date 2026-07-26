@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import io
 
+import pytest
+pytest.importorskip("textual")
+
 from rich.console import Console
 
 from zall.cli.tui.widgets import ChatMessage, InputBar, SelectMenu

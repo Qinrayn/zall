@@ -14,6 +14,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+pytest.importorskip("textual")
 
 from rich.console import Group
 from rich.markdown import Markdown
