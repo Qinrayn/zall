@@ -312,6 +312,7 @@ class TestTuiTerminalDetection:
 
     def test_detect_terminal_capabilities_returns_dict(self) -> None:
         """Happy path: _detect_terminal_capabilities 返回 dict。"""
+        pytest.importorskip("textual")
         from zall.cli.tui.app import _detect_terminal_capabilities
         caps = _detect_terminal_capabilities()
         assert isinstance(caps, dict)
@@ -321,6 +322,7 @@ class TestTuiTerminalDetection:
 
     def test_tui_supported_in_tty(self) -> None:
         """Happy path: 在 TTY 中 TUI 应被支持。"""
+        pytest.importorskip("textual")
         from zall.cli.tui.app import _detect_terminal_capabilities
         caps = _detect_terminal_capabilities()
         if sys.stdout.isatty():
@@ -332,6 +334,7 @@ class TestTuiTerminalDetection:
     def test_tui_fallback_on_dumb_terminal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Counterexample: dumb terminal 不支持 TUI。"""
         monkeypatch.setenv("TERM", "dumb")
+        pytest.importorskip("textual")
         from zall.cli.tui.app import _detect_terminal_capabilities
         caps = _detect_terminal_capabilities()
         assert caps["tui_supported"] is False
@@ -339,12 +342,14 @@ class TestTuiTerminalDetection:
     def test_tui_fallback_in_ci_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Counterexample: CI 环境默认不支持 TUI。"""
         monkeypatch.setenv("CI", "true")
+        pytest.importorskip("textual")
         from zall.cli.tui.app import _detect_terminal_capabilities
         caps = _detect_terminal_capabilities()
         assert caps["tui_supported"] is False
 
     def test_check_tui_supported_returns_bool(self) -> None:
         """Happy path: _check_tui_supported 返回 bool。"""
+        pytest.importorskip("textual")
         from zall.cli.tui.app import _check_tui_supported
         result = _check_tui_supported()
         assert isinstance(result, bool)

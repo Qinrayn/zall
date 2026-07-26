@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 
 import pytest
+pytest.importorskip("textual")
 
 from zall.cli.tui.widgets import (
     SELECT_GRACE_S,

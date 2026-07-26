@@ -64,6 +64,7 @@ class _ScriptedLoop:
 def _make_app(monkeypatch):
     import time as _time
     monkeypatch.setattr(_time, "sleep", lambda *_a, **_k: None)  # no real backoff delay
+    pytest.importorskip("textual")
     from zall.cli.tui import TuiApp
     app = TuiApp()
     # no-op UI bridge (app is not mounted / no event loop)

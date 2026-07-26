@@ -141,6 +141,7 @@ def test_switch_round_trip_restores_default() -> None:
 
 def test_tui_theme_builder_follows_active(monkeypatch: pytest.MonkeyPatch) -> None:
     """TUI 色板构建器从生效主题取值 (启动时派生)。"""
+    pytest.importorskip("textual")
     from zall.cli.tui.app import _build_zall_theme
     monkeypatch.setenv("ZALL_THEME", "attic")
     t = _build_zall_theme()

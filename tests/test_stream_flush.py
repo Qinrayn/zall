@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+pytest.importorskip("textual")
+
 from zall.core.loop_events import LoopEvent
 from zall.cli.tui.app import TuiApp
 from zall.cli.tui.widgets import LiveRegion, MessageList

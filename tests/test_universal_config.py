@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 from rich.console import Console
 
 
@@ -30,6 +32,7 @@ def _plain(renderable) -> str:
 class TestCommandPaletteScroll:
     def test_keeps_all_items_not_capped(self) -> None:
         """Happy path: 全部命令保留 (不再 [:8] 截断丢失)。"""
+        pytest.importorskip("textual")
         from zall.cli.tui.widgets import CommandMenu
         m = CommandMenu()
         m.update_items([(f"cmd{i}", f"d{i}") for i in range(30)], prefix="/")
@@ -37,6 +40,7 @@ class TestCommandPaletteScroll:
 
     def test_scroll_window_reaches_all(self) -> None:
         """Happy path: 向上环绕到末项时窗口滚到底 (可达全部)。"""
+        pytest.importorskip("textual")
         from zall.cli.tui.widgets import CommandMenu
         m = CommandMenu()
         m.update_items([(f"cmd{i}", "") for i in range(30)], prefix="/")
@@ -47,6 +51,7 @@ class TestCommandPaletteScroll:
 
     def test_position_counter_shown(self) -> None:
         """Counterexample: 超窗口时渲染带位置计数 (告知还有更多, 非只 8 条)。"""
+        pytest.importorskip("textual")
         from zall.cli.tui.widgets import CommandMenu
         m = CommandMenu()
         m.update_items([(f"cmd{i}", "") for i in range(30)], prefix="/", hint="h")
@@ -54,6 +59,7 @@ class TestCommandPaletteScroll:
 
     def test_small_list_no_counter(self) -> None:
         """Counterexample: 项数不超窗口 → 不显位置计数 (无多余噪音)。"""
+        pytest.importorskip("textual")
         from zall.cli.tui.widgets import CommandMenu
         m = CommandMenu()
         m.update_items([("a", ""), ("b", "")], prefix="/", hint="h")
