@@ -49,13 +49,11 @@ jobs:
           mypy src/zall/ --ignore-missing-imports || true
 
       - name: Test with pytest
-        shell: bash
         run: |
           python -m pytest tests/ -q --tb=line \
             -k 'not (test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)'
 
       - name: Test with coverage
-        shell: bash
         run: |
           pip install pytest-cov
           python -m pytest tests/ -q --tb=line --cov=zall --cov-report=term-missing \
