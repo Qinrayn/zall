@@ -131,7 +131,6 @@ class TestB3ProjectRootCwd:
 
     def test_loop_stores_project_root(self):
         """AgentLoop 应存储从 context 获取的项目根path."""
-        from zall.core.loop import AgentLoop
 
         class FakeModel:
             model_name = "test"
@@ -172,7 +171,6 @@ class TestB3ProjectRootCwd:
 
     def test_fallback_to_dot(self):
         """当 context 没有 cwd_meta 时fallback到 '.'."""
-        from zall.core.loop import AgentLoop
 
         class FakeModel:
             model_name = "test"
@@ -314,7 +312,6 @@ class TestB6WriteToolsConsistency:
 
     def test_loop_write_tools_includes_batch_edit(self):
         """AgentLoop 的 _WRITE_TOOLS 应包含 batch_edit."""
-        from zall.core.loop import AgentLoop
         assert "batch_edit" in AgentLoop._WRITE_TOOLS
         assert "bash" in AgentLoop._WRITE_TOOLS
         assert "write_file" in AgentLoop._WRITE_TOOLS
@@ -322,5 +319,4 @@ class TestB6WriteToolsConsistency:
 
     def test_write_tools_is_frozenset(self):
         """_WRITE_TOOLS 应for frozenset."""
-        from zall.core.loop import AgentLoop
         assert isinstance(AgentLoop._WRITE_TOOLS, frozenset)

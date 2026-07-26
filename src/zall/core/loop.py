@@ -22,9 +22,6 @@ IPR constraints:
 from __future__ import annotations
 
 import copy
-import fnmatch
-import os
-import re
 import time
 from typing import Any, Callable
 from uuid import uuid4
@@ -48,45 +45,105 @@ from zall.core.model import (
     ModelResponse,
     StopReason,
     ToolCall,
-    ToolChoice,
 )
+from zall.core.prompt_template import render as _render_template
 from zall.core.refiner import GoalRefiner
 from zall.core.safety import Judgement, RuleSet, SafeLevel
+from zall.core.plan_mode import PlanModeTracker, PlanModeState
 from zall.core.tool import ToolRegistry
 from zall.core.verifiability import EventType, RunRecorder
 from zall.core.compactor import Compactor
 from zall.core.checkpoint import CheckpointManager
-from zall._util import skip_noise_dirs
-from zall._util.path import NOISE_DIRS
+from zall._util.logging import get_zall_logger as _get_zall_logger
 from zall.core.executor import ToolExecutor
 from zall.core.context_manager import ContextManager
+from zall.core import loop_checkpoint, loop_perception
 
 # ── Import from sibling modules (Phase 1 refactoring) ──
 from zall.core.loop_config import AgentConfig, _GitProtectProtocol
 from zall.core.loop_events import MAX_STEPS, LoopEvent, RunEgress, StepResult
 
 
-# ── Helper: trivial task detection ──
+_log = _get_zall_logger(__name__)
 
 
-def _is_trivial_task(user_raw: str) -> bool:
-    """判断用户输入是否为极简任务 (问候/打招呼/简单查询)。
+# ── Doom-loop detection constants (§3.6 Grok Build 启发) ──
 
-    v0.4.10: 用于跳过不必要的目标降级交互, 减少对 hello world 类任务的打扰。
-    只匹配明确的问候/打招呼/极简打印, 不误伤 "implement feature X" 等3词任务。
+# 环检测窗口: 记住最近 N 个 tool call 序列的哈希, 用于检测模型循环
+_DOOM_LOOP_WINDOW_SIZE = 5
+# 相同序列出现多少次触发警告
+_DOOM_LOOP_WARN_THRESHOLD = 3
+# 相同序列出现多少次触发终端终止
+_DOOM_LOOP_TERMINAL_THRESHOLD = 5
+
+
+def _tool_sequence_hash(tool_calls: tuple) -> str:
+    """从 tool call 元组生成序列哈希 (仅 tool_id, 忽略参数)。"""
+    return "|".join(tc.tool_id if hasattr(tc, 'tool_id') else str(tc)
+                    for tc in (tool_calls or ()))
+
+
+# 瞬态(可重试)错误分类 — 核心层真相源 (run/REPL/TUI 三路径共用)。
+# 一次 429/5xx/timeout 不应杀死整个多步任务 (修"失败后中途就停")。IPR-3: 纯 stdlib。
+TRANSIENT_KEYWORDS: tuple[str, ...] = (
+    "429", "rate limit", "rate_limit", "timeout",
+    "connection reset", "connection refused", "connection error",
+    "503", "502",
+    "temporary", "try again", "retry",
+    "service unavailable", "bad gateway", "too many requests",
+    "server error", "internal server error",
+)
+
+
+def is_transient_error(err: str | None) -> bool:
+    """错误是否为瞬态/可重试 (429/5xx/timeout/connection 等)。
+
+    Counterexample: 401/模型拒绝/空串/MAX_STEPS → False (不重试).
     """
-    if not user_raw or len(user_raw) > 60:
+    if not err:
         return False
-    cleaned = user_raw.strip().lower()
-    # 问候/打招呼
-    greetings = {"hi", "hello", "hey", "你好", "嗨", "哈喽", "test", "help"}
-    if cleaned in greetings:
-        return True
-    # "print <word>" / "say <word>" / "echo <word>" 模式
-    for prefix in ("print ", "say ", "echo "):
-        if cleaned.startswith(prefix) and len(cleaned) < 30:
-            return True
-    return False
+    low = err.lower()
+    # 明确排除非瞬态错误 (防止子串误匹配, 如 "MAX_STEPS=500" 中的 "500")
+    if "max_steps" in low or "step limit" in low or "length exceeded" in low:
+        return False
+    return any(kw in low for kw in TRANSIENT_KEYWORDS)
+
+
+# §10 I-0 六维本体论完整性 (Ontological Completeness, MASTER.md §1.2)
+ONTOLOGY_DIMENSIONS: tuple[str, ...] = (
+    "identity",           # ① 它是谁
+    "commitment",         # ② 它承诺做什么
+    "perception_engine",  # ③ 它如何理解世界
+    "authority",          # ④ 它被允许用什么手段
+    "accountability",     # ⑤ 做到什么程度算完成
+    "verifiability",      # ⑥ 全过程可被第三方独立复核
+)
+"""六维本体论的运行时属性名 (MASTER.md §1.2)。I-7: 核心恰好暴露这 6 维。"""
+
+# 强制维度: 缺失即"不是 agent, 是工具"(§1.2)。Perception/Accountability 可为 None
+# (可选维度: Q&A 无 judge、无感知引擎仍是合法 agent, §12.1)。
+_MANDATORY_DIMENSIONS: tuple[str, ...] = (
+    "identity", "commitment", "authority", "verifiability",
+)
+
+
+def agent_has_all_dimensions(obj: Any) -> bool:
+    """§10 I-0: 判断对象是否实现全部六维本体论组件。
+
+    六维 = Identity/Commitment/Perception/Authority/Accountability/Verifiability。
+    判据: (a) 六个维度属性槽位都存在; (b) 四个强制维度非 None。
+    Perception/Accountability 允许 None (可选维度), 但属性必须存在。
+
+    Counterexample: 缺任一维度属性, 或强制维度为 None → 返回 False
+    (它退化为"工具"而非 agent, §1.2)。
+    """
+    for dim in ONTOLOGY_DIMENSIONS:
+        if not hasattr(obj, dim):
+            return False
+    for dim in _MANDATORY_DIMENSIONS:
+        if getattr(obj, dim, None) is None:
+            return False
+    return True
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -132,27 +189,15 @@ class AgentLoop:
         context: Context,
         user_responder: UserResponder,
         config: AgentConfig | None = None,
-        **kwargs: Any,
     ) -> None:
         # O9: 统一归一化为 AgentConfig
-        # Phase 3: 移除旧式离散参数, 仅接受 config: AgentConfig
-        _config = config
-        if _config is None:
-            if kwargs:
-                import warnings
-                warnings.warn(
-                    "Passing legacy discrete parameters to AgentLoop is deprecated. "
-                    "Use AgentConfig instead: AgentLoop(..., config=AgentConfig(...)).",
-                    DeprecationWarning, stacklevel=2,
-                )
-                _config = AgentConfig.from_kwargs(**kwargs)
-            else:
-                _config = AgentConfig()
+        _config = config if config is not None else AgentConfig()
 
-        # stream/allow_downgrade/plan_mode 的最终默认值
+        # stream/allow_downgrade/plan_mode/strict 的最终默认值
         _stream = _config.stream if _config.stream is not None else False
         _allow_downgrade = _config.allow_downgrade if _config.allow_downgrade is not None else True
         _plan_mode = _config.plan_mode if _config.plan_mode is not None else False
+        _strict = _config.strict if _config.strict is not None else False
 
         self._model = model
         self._tools = tools
@@ -161,6 +206,7 @@ class AgentLoop:
         self._context = context
         self._user_responder = user_responder
         self._judge = _config.judge
+        self._judges = _config.judges  # §12.1 多 Judge 编排
         # EventBus takes priority over observer (v0.1.2)
         self._event_bus = _config.event_bus or EventBus()
         self._observer = _config.observer
@@ -173,16 +219,60 @@ class AgentLoop:
         self._max_steps = _config.max_steps if _config.max_steps is not None and _config.max_steps >= 0 else MAX_STEPS
         # stream: True and adapter supports complete_stream -> use streaming (same semantics, broadcasts tokens)
         self._stream = _stream and hasattr(model, "complete_stream")
+        # 重试可见性 (2026-07-26): adapter 静默退避期间转发 retry 事件给 UI。
+        # duck-typed: core 不 import adapters (IPR-3); 无 set_retry_callback 则跳过。
+        if hasattr(model, "set_retry_callback"):
+            def _on_adapter_retry(
+                category: str, delay: float, attempt: int, max_attempts: int,
+            ) -> None:
+                self._emit(LoopEvent(kind="retry", step=self._step_count, payload={
+                    "category": category,
+                    "delay": round(delay, 1),
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                }))
+            try:
+                model.set_retry_callback(_on_adapter_retry)
+            except Exception:
+                pass  # 老 adapter 签名不兼容时降级为静默重试 (原行为)
         # GitProtect safety net: injected by CLI layer, core does not import tools/
         self._git_protect = _config.git_protect
         # CheckpointManager: filesystem snapshot safety net
         self._checkpoint_mgr = _config.checkpoint_mgr
         # plan_mode (§9.2.5 read-only posture) — write tools force greylist requiring confirmation.
         self._plan_mode = _plan_mode
+        # v0.5.1: PlanModeTracker 状态机 (替代纯 bool)
+        self._planner = _config.planner if _config.planner is not None else (
+            PlanModeTracker() if not _plan_mode else PlanModeTracker(PlanModeState.Active)
+        )
+        # strict mode (v0.5.1): when True, full confirm/downgrade gates; when False, auto-skip.
+        self._strict = _strict
         # §9.2.9 reactive auto-compact strategy (optional injection) via ContextManager.
         self._compactor = _config.compactor
         self._context_mgr = ContextManager(self, self._compactor)
         self._anchor = _config.anchor
+
+        # ── 六维本体论 ① Identity (MASTER.md §1.2 + §4.2.1) ──
+        # Identity 是必需维度: 无身份无法归因/追责 (§1.2 缺①)。未显式提供时构造
+        # 默认身份, 保证 I-0 六维完整性不变量成立 (test_ontology_invariants)。
+        from zall.core.agent import AgentIdentity
+        self._identity: Any = _config.identity or AgentIdentity.default()
+
+        # v0.6.0: Perception Engine (MASTER.md §4.2.3)
+        self._perception_engine = _config.perception_engine
+        self._last_perception_state: Any | None = None
+        """最近一次感知状态估计 (用于 anomaly 检测和状态对比, §12.3 E1)"""
+        self._prev_perception_snapshot: dict[str, Any] | None = None
+        """上一步感知快照, 用于检测关键状态变化 (§12.3 E1.2)"""
+
+        # v1.1: 记录 run 启动时 git modified 文件数基线, 用于 anomaly 检测
+        # Bug fix (2026-07-26): 必须先于 _init_baseline_modified 赋值 _project_root —
+        # 旧顺序 (271 行调用 / 341 行才赋值) 使 cwd=self._project_root 报
+        # AttributeError 被 except 吞掉, 基线恒为 0 — 脏仓库 (>50 存量改动)
+        # 下每步误报 "anomaly detected"。
+        self._project_root: str = context.cwd_meta.cwd_path if hasattr(context, 'cwd_meta') else "."
+        self._baseline_modified_files: int = 0
+        self._init_baseline_modified()
 
         # Extension registry (Pi-style lifecycle hooks)
         self._ext_registry: ExtensionRegistry | None = _config.ext_registry
@@ -191,9 +281,13 @@ class AgentLoop:
         self._tool_executor = ToolExecutor(self)
 
         # ── v0.4.0: ChatState 集成 — Actor 模式消息管理 ──
-        self._chat_state: ChatState | None = _config.chat_state
-        # 向后兼容: 保持 _messages 作为原始列表
-        self._messages: list[Message] = []
+        # v0.5.1: ChatState 是消息的唯一来源。
+        # _messages 保留为向后兼容属性, 始终通过 _sync_messages() 与 ChatState 同步。
+        self._chat_state: ChatState = _config.chat_state or ChatState(messages=[])
+        # C3 fix: 从 ChatState 同步初始化 _messages (修复旧 bug: 若 chat_state
+        # 预填消息, 旧代码 _messages=[] 与 _chat_state 不同步). _messages 保留为
+        # 向后兼容影子属性 (多处测试直接赋值 loop._messages, 故不用 property).
+        self._messages: list[Message] = list(self._chat_state.messages)
 
         self._run_id = uuid4().hex
         self._recorder = RunRecorder(self._run_id)
@@ -202,6 +296,11 @@ class AgentLoop:
         self._tool_call_count = 0
         self._model_call_count = 0
         self._gate_decision_count = 0
+        # PARADIGM Step 0: 最近一次 model 响应的真实 usage (供水位真实 token 计数)
+        self._last_usage: dict[str, int] = {}
+        # max_steps 软处理: 到上限时压缩上下文 + 重置步数继续, 最多重试这么多次
+        self._max_steps_retries = 0
+        self._MAX_STEPS_RETRIES = 2  # 最多压缩 2 次, 防无限重试
         # v0.4.9 (A1): last streaming exception, if any. Lets callers/observers
         # know a stream degraded — instead of silently pretending success.
         self._last_stream_error: BaseException | None = None
@@ -222,6 +321,14 @@ class AgentLoop:
         # B1: instance-level tracked file cache (not class-level, prevents multi-instance sharing)
         self._cached_tracked_files: set[str] | None = None
 
+        # §3.6 Doom-loop detection (v0.5.0, inspired by Grok Build)
+        self._tool_seq_history: list[str] = []
+        """Circular buffer of recent tool call sequence hashes"""
+        self._doom_loop_count: int = 0
+        """Number of times doom-loop was detected"""
+        self._last_doom_loop_step: int = 0
+        """Step of last doom-loop detection (for debounce)"""
+
         # §3.4 GoalDowngrade tracking
         self._allow_downgrade = _allow_downgrade
         self._original_goal: GoalTriple | None = None
@@ -234,8 +341,7 @@ class AgentLoop:
 
         # Capture git SHA at run start, used for Evidence comparison
         self._run_start_sha: str | None = None
-        # B3: get project root path from context, used for git commands
-        self._project_root: str = context.cwd_meta.cwd_path if hasattr(context, 'cwd_meta') else "."
+        # B3: project root 已在 __init__ 早期赋值 (_init_baseline_modified 之前)
         # O4: watermark check step gating delegated to ContextManager
         self._watermark_check_counter: int = 0  # kept for backward compat during refactor
         # v0.4.8: use ContextManager for watermark + compaction logic
@@ -262,9 +368,8 @@ class AgentLoop:
             raise
         except Exception as _emit_err:
             # IPR-0: Presentation layer failures must not affect RunEgress semantics,
-            # but they must be observable (silent pass → violates falsifiability).
-            import logging as _zall_logging
-            _zall_logging.getLogger("zall.core.loop").warning(
+            # but they must be observable (silent pass -> violates falsifiability).
+            _log.warning(
                 "observer _emit failed (IPR-0 safe): %s", _emit_err,
             )
 
@@ -305,24 +410,30 @@ class AgentLoop:
     # v0.0.22: 公开property, 供 /compact /doctor 等 CLI command只读访问 (替代直接访问 _private property)
     @property
     def messages(self) -> list[Message]:
-        """当前 model context (只读snapshot, 不可直接修改)。"""
-        if self._chat_state is not None:
-            return self._chat_state.messages
-        return list(self._messages)
+        """当前 model context (只读snapshot, 不可直接修改)。
+
+        v0.5.1: ChatState 是唯一来源, 通过 _chat_state.messages 读取。
+        """
+        return self._chat_state.messages
+
+    def _sync_messages(self) -> None:
+        """v0.5.2: 将 ChatState 的消息同步回 _messages 向后兼容属性。
+        
+        ChatState 是消息的唯一来源。_messages 保留为向后兼容的影子属性，
+        供外部代码通过 loop._messages 直接读取时使用。
+        """
+        self._messages = list(self._chat_state.messages)
 
     @property
     def chat_state(self) -> ChatState | None:
-        """ChatState 实例 (v0.4.0)。如果未启用, 可惰性创建。"""
+        """ChatState 实例 (v0.4.0)。v0.5.1: 总是非 None。"""
         return self._chat_state
 
     def get_chat_state(self) -> ChatState:
         """获取或惰性创建 ChatState 实例。
 
-        首次调用时基于当前 _messages 创建 ChatState。
-        之后返回同一个实例。
+        v0.5.1: ChatState 始终存在, 此方法仅保留向后兼容。
         """
-        if self._chat_state is None:
-            self._chat_state = ChatState(messages=list(self._messages))
         return self._chat_state
 
     @property
@@ -342,17 +453,58 @@ class AgentLoop:
 
     @property
     def plan_mode(self) -> bool:
-        """当前 plan_mode state。"""
-        return self._plan_mode
+        """当前 plan_mode state (委托到 PlanModeTracker)。"""
+        return self._planner.is_active
+
+    @property
+    def planner(self) -> PlanModeTracker:
+        """PlanModeTracker 实例 (供 executor/CLI 使用)。"""
+        return self._planner
 
     @property
     def compactor(self) -> Compactor | None:
         """当前 compactor (可能为 None)。"""
         return self._compactor
 
+    @property
+    def perception_engine(self) -> Any | None:
+        """当前 Perception Engine (可能为 None, MASTER.md §4.2.3)。"""
+        return self._perception_engine
+
+    # ── 六维本体论只读投影 (MASTER.md §1.2 + §10 I-0) ──
+    # Identity/Commitment/Perception/Authority/Accountability/Verifiability
+    @property
+    def identity(self) -> Any:
+        """① Identity — agent 身份 (恒非 None, §4.2.1)。"""
+        return self._identity
+
+    @property
+    def commitment(self) -> GoalTriple:
+        """② Commitment — 当前 Goal 承诺 (§4.2.2)。"""
+        return self._goal
+
+    @property
+    def authority(self) -> Any:
+        """④ Authority — 权限规则集 (§4.2.4)。"""
+        return self._rules
+
+    @property
+    def accountability(self) -> Any | None:
+        """⑤ Accountability — Judge (可为 None: Q&A 场景无判定, §12.1)。"""
+        return self._judges if self._judges is not None else self._judge
+
+    @property
+    def verifiability(self) -> RunRecorder:
+        """⑥ Verifiability — RunRecorder 链式哈希审计 (恒非 None, §6.1)。"""
+        return self._recorder
+
     def set_plan_mode(self, enabled: bool) -> None:
         """更新 plan_mode state (供 CLI /plan command使用)。"""
-        self._plan_mode = enabled
+        if enabled and not self._planner.is_active:
+            self._planner.activate()
+        elif not enabled and self._planner.is_active:
+            self._planner.deactivate()
+        self._plan_mode = enabled  # 保持向后兼容
 
     def set_messages(self, messages: list[Message]) -> None:
         """replace model context messagelist (供 /compact/CLI command使用)。
@@ -361,13 +513,10 @@ class AgentLoop:
         在 timeline 上追加 CONTEXT_COMPACTION 事件以维持可复现性。
         O1: 标记 token 估算缓存为脏。
 
-        v0.4.8: 当 ChatState 启用时, 委托给 ChatState.replace_messages()。
-        v0.4.9: 修复外部引用别名 — 创建副本而非直接引用输入列表。
+        v0.5.1: ChatState 是唯一来源, _messages 通过 _sync_messages() 同步。
         """
-        if self._chat_state is not None:
-            self._chat_state.replace_messages(messages)
-        # 创建副本避免外部列表修改意外影响内部状态
-        self._messages = list(messages)
+        self._chat_state.replace_messages(messages)
+        self._sync_messages()
         self._mark_watermark_dirty()
 
     # v0.1.3: 公开 API 供 CLI 层使用 (替代直接访问私有property)
@@ -391,19 +540,13 @@ class AgentLoop:
         追加适当事件 (如 CONTEXT_COMPACTION) 以维持可复现性。
         O1: 标记 token 估算缓存为脏。
 
-        v0.4.8: 当 ChatState 启用时, 委托给 ChatState.remove_by_predicate()。
-        v0.4.9: 修复 ChatState 启用时 _messages 不同步的 Bug。
+        v0.5.1: 委托给 ChatState.remove_by_predicate(), _sync_messages() 保持同步。
         """
-        if self._chat_state is not None:
-            removed = self._chat_state.remove_by_predicate(predicate)
-            # 从 ChatState 同步回 _messages, 保证两者一致
-            self._messages = list(self._chat_state.messages)
+        removed = self._chat_state.remove_by_predicate(predicate)
+        self._sync_messages()
+        if removed > 0:
             self._mark_watermark_dirty()
-            return removed
-        before = len(self._messages)
-        self._messages = [m for m in self._messages if not predicate(m)]
-        self._mark_watermark_dirty()
-        return before - len(self._messages)
+        return removed
 
     @property
     def git_protect(self) -> _GitProtectProtocol | None:
@@ -437,6 +580,8 @@ class AgentLoop:
         # B9 fix: 每次 run() 重置 watermark 计数器 (delegated to ContextManager)
         self._watermark_check_counter = 0
         self._context_mgr.reset_check_counter()
+        # max_steps 软处理: 每次 run 重置重试计数
+        self._max_steps_retries = 0
 
         # ── §3.4 GoalDowngrade: 进入主循环前checkdowngrade
         self._init_downgrade()
@@ -445,12 +590,11 @@ class AgentLoop:
         self._run_start_sha = self._resolve_git_sha("HEAD")
 
         # init化: system prompt + user_raw 作为首条 user message
-        self._messages = []
-        if self._chat_state is not None:
-            self._chat_state.reset()
+        self._chat_state.reset()
         if system_prompt:
             self._append_message(Message(role="system", content=system_prompt))
         self._append_message(Message.user(self._context.user_raw))
+        # C3 fix: 移除冗余 _sync_messages() -- 上面两个 _append_message 内部已同步。
 
         # Extension: on_agent_start (legacy) + on_turn_start (typed)
         if self._ext_registry is not None:
@@ -458,7 +602,7 @@ class AgentLoop:
             _ts_input = TurnStartInput(
                 goal=self._goal,
                 model_name=getattr(self._model, "model_name", ""),
-                messages=list(self._messages),
+                messages=self._chat_state.messages,
                 tools=self._tools.tools if self._tools else (),
                 step=0,
             )
@@ -467,14 +611,119 @@ class AgentLoop:
                 typed_input=_ts_input,
                 goal=self._goal,
                 model=self._model,
-                messages=list(self._messages),
+                messages=self._chat_state.messages,
             )
+
+        # ── Phase 1 (修裂缝): 记录 goal_statement + user_confirm 到 timeline
+        # §9.2.1 + §6.1: 在第一条 tool_call_start 之前, 必须有 goal_statement 和
+        # user_confirm 事件。这是 PR-0 自证伪 + §6.1 事件先于行动的落地。
+        #
+        # 不变量 (IPR-0): timeline 中第一条 tool_call_start 之前必须有
+        # goal_statement + user_confirm。反例: run 跳过 Refiner/confirm 直接进循环 →
+        # 测试 test_refiner_integrates_with_run 捕获。
+        _now = int(time.time() * 1000)
+        self._recorder.append(
+            event_id=f"goal_statement_{self._run_id}",
+            ts=_now,
+            event_type=EventType.GOAL_STATEMENT,
+            payload={
+                "intent": self._goal.statement.intent,
+                "rewriting": self._goal.statement.rewriting,
+                "goal_type": self._goal.statement.goal_type.value,
+                "rewrite_confidence": self._goal.statement.rewrite_confidence,
+                "translation_of": list(self._goal.statement.translation_of),
+                "added_intent": list(self._goal.statement.added_intent),
+                "termination_exposed": (
+                    tuple(self._goal.termination.exposed_dependency_set)
+                    if self._goal.termination.exposed_dependency_set is not None
+                    else None
+                ),
+                "baseline_frozen_at": self._goal.acceptance.baseline_frozen_at,
+            },
+        )
+        self._emit(LoopEvent(
+            kind="goal_statement",
+            step=0,
+            payload={
+                "goal_type": self._goal.statement.goal_type.value,
+                "intent": self._goal.statement.intent[:500],
+            },
+        ))
+
+        # user_confirm 事件 (run() 被调用意味着 confirm_goal 已通过;
+        # 若 strict 模式, 确认在 orchestrator.confirm_goal 中已完成)
+        self._recorder.append(
+            event_id=f"user_confirm_{self._run_id}",
+            ts=_now + 1,  # 晚于 goal_statement 1ms, 保证时序
+            event_type=EventType.USER_CONFIRM,
+            payload={
+                "confirmed": True,
+                "mode": "auto" if not self._strict else "strict",
+                "goal_type": self._goal.statement.goal_type.value,
+            },
+        )
+        self._emit(LoopEvent(
+            kind="user_confirm",
+            step=0,
+            payload={"confirmed": True, "goal_type": self._goal.statement.goal_type.value},
+        ))
 
         while True:
             result = self.step()
+            # 容错: 瞬态错误(429/5xx/timeout)退避重试, 与 REPL/TUI 对齐 (修"失败后中途就停")。
+            # 用 retry_step() 不漂移 step_count; 成功恢复则继续任务。
+            if (result.is_terminal and result.egress
+                    and is_transient_error(result.egress.error)):
+                result = self._run_retry_transient(result)
             if result.is_terminal:
                 if result.egress is None:
                     raise RuntimeError("terminal StepResult must have non-None egress")
+                # max_steps 软处理: 到上限不直接终止, 先尝试压缩上下文 + 重置步数继续。
+                # 用户痛点: "步数有限制是不是不合理" -- 限制是安全阀(防 doom loop 烧钱),
+                # 但到上限就 UNDECIDABLE 太粗暴。Claude Code 的做法是压缩后继续。
+                # 策略: 到上限时调 compactor 压缩, 若压缩成功(消息数减少)则重置步数继续;
+                # 若压缩无效果或已重试超过 _MAX_STEPS_RETRIES 次, 才真正终止。
+                if (
+                    result.egress.error
+                    and "MAX_STEPS" in result.egress.error
+                    and self._max_steps_retries < self._MAX_STEPS_RETRIES
+                ):
+                    compacted = self._try_compact_for_continuation()
+                    if compacted:
+                        # 压缩成功, 重置步数继续
+                        self._max_steps_retries += 1
+                        self._step_count = self._max_steps // 2  # 给一半预算继续
+                        self._emit(LoopEvent(
+                            kind="steps_extended",
+                            step=self._step_count,
+                            payload={
+                                "retry": self._max_steps_retries,
+                                "msgs": len(self._messages),
+                            },
+                        ))
+                        continue  # 回到 while True 继续跑
+                # P1 fix (dogfood 发现): max_steps runaway 时也要调 judge,
+                # 否则 --judge system 模式下 agent 跑满 max_steps 时 judge 永远不执行。
+                # 仅在 max_steps 场景 (error 含 "MAX_STEPS") 调, 异常 terminal 不调
+                # (异常时 judge 判定无意义, 且可能产生意外 egress 覆盖)。
+                if (
+                    result.egress.error
+                    and "MAX_STEPS" in result.egress.error
+                    and (self._judge is not None or self._judges is not None)
+                ):
+                    judged_egress = self._check_termination()
+                    # 保留原 max_steps error, judge 判定覆盖 final_state
+                    result = StepResult(
+                        kind=result.kind,
+                        egress=judged_egress.model_copy(
+                            update={
+                                "error": result.egress.error,
+                                "chain_warning": result.egress.chain_warning,
+                            }
+                        ),
+                        content=result.content,
+                        tools_used=result.tools_used,
+                    )
                 # M2: anchor run tail before returning
                 if self._anchor is not None:
                     self._recorder.anchor_to(self._anchor, int(time.time() * 1000))
@@ -496,6 +745,18 @@ class AgentLoop:
                 # v0.4.10 (B1): auto-apply high-confidence adjust_k suggestions
                 if self._ext_registry is not None:
                     self._auto_apply_suggestions()
+                # §12.1 Verifiability: 运行时链完整性自检 (MASTER.md §12.1 + §3.1.4)
+                # 不阻止运行, 只标记。IPR-3: stdlib only.
+                chain_warning = self._check_chain_integrity()
+                if chain_warning:
+                    result = StepResult(
+                        kind=result.kind,
+                        egress=result.egress.model_copy(
+                            update={"chain_warning": chain_warning}
+                        ),
+                        content=result.content,
+                        tools_used=result.tools_used,
+                    )
                 return result.egress
             if result.kind == "awaiting_input":
                 # task mode: model STOP → check Goal termination -> return RunEgress
@@ -517,8 +778,45 @@ class AgentLoop:
                     )
                     # v0.4.10 (B1): auto-apply high-confidence adjust_k suggestions
                     self._auto_apply_suggestions()
+                # §12.1 Verifiability: 运行时链完整性自检 (MASTER.md §12.1 + §3.1.4)
+                chain_warning = self._check_chain_integrity()
+                if chain_warning:
+                    egress = egress.model_copy(update={"chain_warning": chain_warning})
                 return egress
             # tool_used → 继续循环
+
+    def _run_retry_transient(self, result: StepResult) -> StepResult:
+        """run() 一次性路径的瞬态错误退避重试 (最多 3 次, 指数抖动退避)。
+
+        返回: 成功恢复则为非 terminal (调用方继续循环); 非瞬态/耗尽则 terminal。
+        用 retry_step() 避免 step_count 漂移。与 TUI/REPL 同源 backoff_delay (G13)。
+        """
+        from zall._util.backoff import backoff_delay
+        for attempt in range(1, 4):
+            delay = round(backoff_delay(attempt), 1)  # G13: 指数+抖动, 防惊群
+            self._emit(LoopEvent(
+                kind="transient_retry",
+                step=self._step_count,
+                payload={
+                    "attempt": attempt, "max": 3, "delay": delay,
+                    "error": ((result.egress.error if result.egress else "") or "")[:120],
+                },
+            ))
+            time.sleep(delay)
+            try:
+                result = self.retry_step()
+            except (KeyboardInterrupt, SystemExit, GeneratorExit):
+                raise
+            except Exception as e:
+                return StepResult(
+                    kind="terminal",
+                    egress=self._make_egress(TerminationState.UNDECIDABLE, error=str(e)),
+                )
+            if not result.is_terminal:
+                return result  # 成功恢复
+            if result.egress and not is_transient_error(result.egress.error):
+                return result  # 非瞬态 terminal → 不再重试
+        return result  # 重试耗尽
 
     def step(self) -> StepResult:
         """execute一轮 (调model + 可能调tool), 不自动terminate。
@@ -554,122 +852,266 @@ class AgentLoop:
         """
         return self._run_step_body()
 
-    def _run_step_body(self) -> StepResult:
-        """Core step execution body shared by step() and retry_step()."""
-        try:
-            # ── 0. §9.2.9 主动水位monitor (delegated to ContextManager)
-            self._context_mgr.check_watermark_before_call(
-                self._messages, self._model.model_name, self._step_count,
+    def _drain_interjections_and_check_watermark(self) -> None:
+        """处理 mid-turn interjections 并检查水位。
+
+        v0.5.0: 在每次 model call 前 drain interjections,
+        追加 system 消息并记录到 timeline。然后委托 ContextManager
+        检查 watermark, 当 context 接近满时提前触发 compaction。
+        """
+        interjections = self._context_mgr.drain_interjections()
+        if interjections:
+            for interjection_text in interjections:
+                self._append_message(Message(
+                    role="system",
+                    content=_render_template(
+                        "mid_turn_interjection",
+                        text=interjection_text,
+                    ),
+                ))
+                self._recorder.append(
+                    event_id=f"interjection_{self._step_count}",
+                    ts=int(time.time() * 1000),
+                    event_type=EventType.SYSTEM_INJECTION,
+                    payload={"reason": "interjection", "text": interjection_text[:200]},
+                )
+
+        self._context_mgr.check_watermark_before_call(
+            self._chat_state.messages, self._model.model_name, self._step_count,
+            real_tokens=(self._last_usage or {}).get("prompt") or None,
+        )
+
+    def _call_model_with_retry(self) -> ModelResponse | None:
+        """调 model + 空 STOP backoff + LENGTH auto-compact。
+
+        流程:
+          1. 首次调 model (emit_model_call=False, 防 nudge 双重显示)
+          2. 空 STOP backoff: 检测到空回复 → inject nudge 重试一次
+          3. LENGTH auto-compact: 模型返回 LENGTH → 压缩后重试一次
+          4. 压缩后仍 LENGTH → 广播 length_exceeded 事件, 返回 None 表示 terminal
+
+        Returns:
+          ModelResponse — 最终有效的模型响应 (stop_reason 为 STOP 或 TOOL_USE)
+          None — LENGTH terminal, 调用方应构造 terminal StepResult
+        """
+        resp = self._call_model(emit_model_call=False)
+        self._model_call_count += 1
+
+        # v0.0.21 空 STOP backoff: model空reply → inject nudge retry一次
+        if self._context_mgr.is_empty_stop(resp):
+            self._context_mgr.handle_empty_stop(
+                self._chat_state.messages, self._model_call_count, self._step_count,
+            )
+            resp = self._call_model()  # emit_model_call=True: 渲染重试结果
+            self._model_call_count += 1
+        else:
+            # 非 nudge: 补发首次 model_call 渲染event (停 spinner + 显示结果)
+            self._emit_model_call_event(resp)
+
+        # LENGTH auto-compact: 反应式压缩后重试一次
+        if resp.stop_reason == StopReason.LENGTH:
+            if self._auto_compact(reason="model_length"):
+                resp = self._call_model()
+                self._model_call_count += 1
+            # 压缩后仍 LENGTH → 诚实 terminate
+            if resp.stop_reason == StopReason.LENGTH:
+                self._emit(LoopEvent(kind="length_exceeded", step=self._step_count,
+                                     payload={"error": "context length"}))
+                return None
+
+        # PARADIGM Step 0: 记录真实 usage, 供下一次水位判定用真实 token (非字符估算)
+        self._last_usage = dict(resp.usage or {})
+        return resp
+
+    def _handle_model_stop_response(self, resp: ModelResponse) -> StepResult:
+        """STOP 分支处理: API error 检测 + 幻觉扫描 + 返回 awaiting_input。
+
+        流程:
+          1. 检测 false STOP (API error 伪装成 STOP, HTTP status >= 400)
+          2. PR-0: 扫描 STOP reply 中是否包含伪造的工具输出
+          3. 追加 assistant reply 到 messages
+          4. 返回 awaiting_input (step() 不自判 termination, 由 run() 处理)
+        """
+        # P0 fix: 检测伪装成 STOP 的 API error
+        raw = resp.raw if isinstance(resp.raw, dict) else {}
+        api_status = raw.get("status", 0) if raw else 0
+        if api_status >= 400:
+            err_msg = resp.content or f"HTTP {api_status}"
+            self._emit(LoopEvent(
+                kind="error",
+                step=self._step_count,
+                payload={"error": err_msg, "api_status": api_status},
+            ))
+            return StepResult(
+                kind="terminal",
+                egress=self._make_egress(
+                    TerminationState.UNDECIDABLE,
+                    error=f"API error (HTTP {api_status}): {err_msg}",
+                ),
+            )
+        # PR-0 自证伪: 扫描 STOP reply 是否伪造了 tool output
+        hallucinations = self._scan_hallucinated_content(resp.content)
+        if hallucinations:
+            self._recorder.append(
+                event_id=f"pr0_warn_{self._model_call_count}",
+                ts=int(time.time() * 1000),
+                event_type=EventType.PR0_HALLUCINATION,
+                payload={
+                    "step": self._step_count,
+                    "hallucination_tags": list(hallucinations),
+                    "content_preview": resp.content[:200],
+                },
+            )
+            self._emit(LoopEvent(
+                kind="pr0_warning",
+                step=self._step_count,
+                payload={
+                    "tags": list(hallucinations),
+                    "message": "模型 STOP 回复中检测到伪造的工具输出 — 违 PR-0 自证伪",
+                },
+            ))
+        # 把 assistant reply 加入 messages
+        self._append_message(Message.assistant(content=resp.content))
+        return StepResult(kind="awaiting_input", content=resp.content)
+
+    def _handle_tool_use(self, resp: ModelResponse) -> StepResult:
+        """TOOL_USE 分支处理: 执行工具 + 记录消息 + doom-loop 检测。
+
+        流程:
+          1. 空 tool_calls 检测 (PR-0 hallucination)
+          2. 执行工具调用
+          3. 追加 assistant message (含 tool_calls)
+          4. Doom-loop 检测: 检查近期 tool call 序列是否重复
+          5. 返回 tool_used StepResult
+        """
+        if not resp.tool_calls:
+            err = ("stop_reason=TOOL_USE but tool_calls is empty — "
+                   "model hallucinated tool use (PR-0 violation)")
+            self._emit(LoopEvent(kind="error", step=self._step_count,
+                                 payload={"error": err}))
+            return StepResult(
+                kind="terminal",
+                egress=self._make_egress(TerminationState.UNDECIDABLE, error=err),
             )
 
-            # ── 1. 调model (首次: 暂不broadcast model_call 渲染, 防 nudge 双重显示)
-            resp = self._call_model(emit_model_call=False)
-            self._model_call_count += 1
-
-            # v0.0.21 空 STOP backoff: model空reply (不调tool也不回答) → inject nudge retry一次。
-            # 仅 STOP + 空 content 触发; retry (emit_model_call=True) 渲染retry结果。
-            # 限 1 次/step, 不循环; 持续空 → 落到下方正常 dispatch (诚实显示空/fallback)。
-            if self._context_mgr.is_empty_stop(resp):
-                self._context_mgr.handle_empty_stop(
-                    self._messages, self._model_call_count, self._step_count,
+        # §12.3 E1.5: 感知预测 (可选, 降级为 no-op)
+        if self._perception_engine is not None and self._last_perception_state is not None:
+            try:
+                _tc = resp.tool_calls[0]
+                _action = Action(tool_id=_tc.tool_id, args=dict(_tc.args or {}))
+                _predicted = self._perception_engine.predict(_action)
+                self._recorder.append(
+                    event_id=f"perception_predict_{self._step_count}",
+                    ts=int(time.time() * 1000),
+                    event_type=EventType.SYSTEM_INJECTION,
+                    payload={
+                        "reason": "perception_predict",
+                        "tool_id": _tc.tool_id,
+                        "predicted_confidence": _predicted.confidence,
+                        "predicted_keys": list(_predicted.state.keys()),
+                    },
                 )
-                resp = self._call_model()  # emit_model_call=True: 渲染重试结果
-                self._model_call_count += 1
-            else:
-                # 非 nudge: 补发首次 model_call 渲染event (停 spinner + 显示结果)
-                self._emit_model_call_event(resp)
+            except Exception as _e:
+                _log.debug("perception predict degraded to no-op: %s", _e)
 
-            # ── 2. 停车条件
-            if resp.stop_reason == StopReason.LENGTH:
-                # §9.2.9 反应式 auto-compact: window爆 → 压缩 model context 后retry一次。
-                # 反应式 (而非预测式) 是 PR-3 model-agnostic的直接推论: zall 不预设各model的
-                # 确切window大小, 靠model自报 LENGTH 触发压缩, 天然model-agnostic。
-                # timeline 全保真 (§6.1): 压缩只影响 model 看到什么, audit轨迹不丢。
-                if self._auto_compact(reason="model_length"):
-                    resp = self._call_model()
-                    self._model_call_count += 1
-                # 压缩后仍 LENGTH (或无 compactor / 已无可压缩) → 诚实terminate
-                if resp.stop_reason == StopReason.LENGTH:
-                    self._emit(LoopEvent(kind="length_exceeded", step=self._step_count,
-                                         payload={"error": "context length"}))
-                    return StepResult(
-                        kind="terminal",
-                        egress=self._make_egress(
-                            TerminationState.UNDECIDABLE,
-                            error="model returned LENGTH; context compaction "
-                                  "could not reduce further",
-                        ),
-                    )
-                # 压缩后 resp 变为 STOP / TOOL_USE → 落到下方正常handlepath
+        self._append_message(
+            Message.assistant(content=resp.content, tool_calls=resp.tool_calls)
+        )
+        self._execute_tool_calls(resp.tool_calls)
+        # v0.5.0: Doom-loop detection — 检查重复 tool call 序列
+        seq_hash = _tool_sequence_hash(resp.tool_calls)
+        self._tool_seq_history.append(seq_hash)
+        if len(self._tool_seq_history) > _DOOM_LOOP_WINDOW_SIZE:
+            self._tool_seq_history.pop(0)
+        seq_count = self._tool_seq_history.count(seq_hash)
+        if seq_count >= _DOOM_LOOP_TERMINAL_THRESHOLD and seq_hash:
+            if self._step_count - self._last_doom_loop_step >= 3:
+                self._last_doom_loop_step = self._step_count
+                self._doom_loop_count += 1
+                err = (
+                    f"doom-loop detected: tool sequence '{seq_hash}' "
+                    f"repeated {seq_count} times in last "
+                    f"{_DOOM_LOOP_WINDOW_SIZE} steps. "
+                    f"Model is stuck in a loop."
+                )
+                self._emit(LoopEvent(
+                    kind="doom_loop",
+                    step=self._step_count,
+                    payload={
+                        "error": err,
+                        "seq_hash": seq_hash,
+                        "seq_count": seq_count,
+                        "window": _DOOM_LOOP_WINDOW_SIZE,
+                    },
+                ))
+                loop_nudge = _render_template("doom_loop_nudge")
+                self._append_message(Message(role="system", content=loop_nudge))
+                self._recorder.append(
+                    event_id=f"doom_loop_{self._step_count}",
+                    ts=int(time.time() * 1000),
+                    event_type=EventType.SYSTEM_INJECTION,
+                    payload={"reason": "doom_loop", "nudge": loop_nudge},
+                )
+        elif seq_count >= _DOOM_LOOP_WARN_THRESHOLD and seq_hash:
+            self._emit(LoopEvent(
+                kind="doom_loop_warning",
+                step=self._step_count,
+                payload={
+                    "seq_hash": seq_hash,
+                    "seq_count": seq_count,
+                    "window": _DOOM_LOOP_WINDOW_SIZE,
+                },
+            ))
+        return StepResult(
+            kind="tool_used",
+            tools_used=tuple(tc.tool_id for tc in resp.tool_calls),
+        )
+
+    def _run_step_body(self) -> StepResult:
+        """Core step execution body shared by step() and retry_step().
+
+        编排子方法完成一次 step 的执行:
+          0. _perceive — 感知引擎更新状态估计 (v0.6.0)
+          1. _drain_interjections_and_check_watermark — 排空 interjections + 水位检查
+          2. _call_model_with_retry — 调 model + backoff + LENGTH 处理
+          3. 按 stop_reason 分发到 _handle_model_stop_response 或 _handle_tool_use
+
+        v0.6.0 (UX): 每个子步骤开始时广播 step_progress 事件, 呈现层显示进度提示。
+        """
+        try:
+            # 子步骤 0: 感知 (v0.6.0, MASTER.md §4.2.3) — 逻辑抽取到 core/loop_perception.py
+            # (PARADIGM Step 0 热循环瘦身); 感知引擎为 None 时该函数直接返回, 不进热路径。
+            loop_perception.run_perception(self)
+            # 子步骤 1: 准备上下文
+            self._emit(LoopEvent(
+                kind="step_progress",
+                step=self._step_count,
+                payload={"phase": "context", "message": "preparing context..."},
+            ))
+            self._drain_interjections_and_check_watermark()
+
+            # 子步骤 2: 调用模型
+            self._emit(LoopEvent(
+                kind="step_progress",
+                step=self._step_count,
+                payload={"phase": "model", "message": "calling model..."},
+            ))
+            resp = self._call_model_with_retry()
+            if resp is None:
+                return StepResult(
+                    kind="terminal",
+                    egress=self._make_egress(
+                        TerminationState.UNDECIDABLE,
+                        error="model returned LENGTH; context compaction "
+                              "could not reduce further",
+                    ),
+                )
 
             if resp.stop_reason == StopReason.STOP:
-                # P0 fix: 检测false装成 STOP 的 API error (adapters/base.py make_error_response)
-                raw = resp.raw if isinstance(resp.raw, dict) else {}
-                api_status = raw.get("status", 0) if raw else 0
-                if api_status >= 400:
-                    err_msg = resp.content or f"HTTP {api_status}"
-                    self._emit(LoopEvent(
-                        kind="error",
-                        step=self._step_count,
-                        payload={"error": err_msg, "api_status": api_status},
-                    ))
-                    return StepResult(
-                        kind="terminal",
-                        egress=self._make_egress(
-                            TerminationState.UNDECIDABLE,
-                            error=f"API error (HTTP {api_status}): {err_msg}",
-                        ),
-                    )
-                # model说完了
-                # ── PR-0 自证false: 扫描 STOP reply是否false造了tooloutput
-                hallucinations = self._scan_hallucinated_content(resp.content)
-                if hallucinations:
-                    self._recorder.append(
-                        event_id=f"pr0_warn_{self._model_call_count}",
-                        ts=int(time.time() * 1000),
-                        event_type=EventType.PR0_HALLUCINATION,
-                        payload={
-                            "step": self._step_count,
-                            "hallucination_tags": list(hallucinations),
-                            "content_preview": resp.content[:200],
-                        },
-                    )
-                    self._emit(LoopEvent(
-                        kind="pr0_warning",
-                        step=self._step_count,
-                        payload={
-                            "tags": list(hallucinations),
-                            "message": "模型 STOP 回复中检测到伪造的工具输出 — 违 PR-0 自证伪",
-                        },
-                    ))
-                # 把 assistant reply加入 messages (对话pattern需要, taskpattern也无害)
-                self._append_message(Message.assistant(content=resp.content))
-                # taskpattern: check Goal termination → terminal
-                # 对话pattern: 不terminate, return awaiting_input
-                # step() 不知道自己是task还是对话 → return awaiting_input,
-                # run() 会在收到 STOP 后调 _check_termination judgment (见下)
-                return StepResult(kind="awaiting_input", content=resp.content)
+                return self._handle_model_stop_response(resp)
 
             if resp.stop_reason == StopReason.TOOL_USE:
-                if not resp.tool_calls:
-                    # PR-0: stop_reason=TOOL_USE 但无 tool_calls → hallucination
-                    err = ("stop_reason=TOOL_USE but tool_calls is empty — "
-                           "model hallucinated tool use (PR-0 violation)")
-                    self._emit(LoopEvent(kind="error", step=self._step_count,
-                                         payload={"error": err}))
-                    return StepResult(
-                        kind="terminal",
-                        egress=self._make_egress(TerminationState.UNDECIDABLE, error=err),
-                    )
-
-                self._execute_tool_calls(resp.tool_calls)
-                self._append_message(
-                    Message.assistant(content=resp.content, tool_calls=resp.tool_calls)
-                )
-                return StepResult(
-                    kind="tool_used",
-                    tools_used=tuple(tc.tool_id for tc in resp.tool_calls),
-                )
+                return self._handle_tool_use(resp)
 
             raise RuntimeError(f"unexpected stop_reason: {resp.stop_reason}")
 
@@ -687,29 +1129,26 @@ class AgentLoop:
             )
 
     def _append_message(self, msg: Message) -> None:
-        """内部追加消息, 当 ChatState 启用时同步更新。
+        """内部追加消息。
 
-        v0.4.8: 统一内部消息追加路径, 避免 ChatState 和 _messages 不同步。
-        同时维护 self._messages (model call 直接使用) 和 ChatState (事件记录 + 快照)。
+        v0.5.1: ChatState 是唯一来源, 所有消息追加通过 ChatState 完成。
+        _messages 通过 _sync_messages() 保持同步。
         """
-        if self._chat_state is not None:
-            # 通过 ChatState 的 push_* 方法保证事件记录
-            if msg.role == "user":
-                self._chat_state.push_user_message(msg.content)
-            elif msg.role == "assistant":
-                self._chat_state.push_assistant_response(
-                    msg.content, tool_calls=msg.tool_calls or ()
-                )
-            elif msg.role == "tool":
-                self._chat_state.push_tool_result(
-                    msg.tool_call_id or "",
-                    msg.content,
-                    tool_id=msg.tool_id or "",
-                )
-            elif msg.role == "system":
-                self._chat_state.push_system_message(msg.content)
-        # self._messages 始终保持最新 (model call 直接使用此列表)
-        self._messages.append(msg)
+        role = msg.role
+        if role == "user":
+            self._chat_state.push_user_message(msg.content)
+        elif role == "assistant":
+            self._chat_state.push_assistant_response(
+                msg.content, tool_calls=msg.tool_calls or ()
+            )
+        elif role == "tool":
+            self._chat_state.push_tool_result(
+                msg.tool_call_id or "", msg.content,
+                tool_id=msg.tool_id or "",
+            )
+        elif role == "system":
+            self._chat_state.push_system_message(msg.content)
+        self._sync_messages()
 
     def append_message(self, msg: Message) -> None:
         """公开 API: 追加消息 (供 executor.py 等外部组件使用)。
@@ -761,8 +1200,8 @@ class AgentLoop:
             return
         for s in suggestions:
             if s.kind == "adjust_k" and s.confidence >= 0.5:
-                # Try to find and apply through the extension
-                for ext in list(self._ext_registry._extensions.values()):
+                # Try to find and apply through the extension (v0.5.0: use public API)
+                for ext in self._ext_registry.iter_extensions():
                     if hasattr(ext, "apply_suggestion") and callable(ext.apply_suggestion):
                         try:
                             result = ext.apply_suggestion(s)
@@ -777,8 +1216,11 @@ class AgentLoop:
                                         "message": result.get("message", ""),
                                     },
                                 ))
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            _log.warning(
+                                "auto_learn: apply_suggestion failed for extension %s: %s",
+                                getattr(ext, 'name', 'unknown'), type(_e).__name__,
+                            )
 
     def add_user_message(self, content: str) -> None:
         """Dialog mode: user input appended as new user message.
@@ -831,6 +1273,45 @@ class AgentLoop:
         """
         return self._context_mgr._auto_compact(reason=reason)
 
+    def _try_compact_for_continuation(self) -> bool:
+        """max_steps 软处理: 到上限时压缩上下文, 给 agent 继续的机会。
+
+        复用 _auto_compact (CONTEXT_COMPACTION 事件记 timeline)。
+        返回 True 表示压缩发生且消息数减少; False 表示无法压缩 (已最简或失败)。
+        """
+        try:
+            # M4 fix: 用 ChatState 作为唯一真相源 (self._messages 是向后兼容影子列表,
+            # 压缩经 ChatState 更新后可能未同步, 用它判断会漏判压缩效果)。
+            old_count = self._chat_state.message_count
+            self._auto_compact(reason="max_steps_continuation")
+            return self._chat_state.message_count < old_count
+        except Exception:
+            return False
+
+    def _init_baseline_modified(self) -> None:
+        """v1.1: 记录 run 启动时 git modified 文件数基线, 用于 anomaly 检测。
+        
+        如果工作区启动时就有大量 modified 文件, 不计入 run 期间的 anomaly。
+        静默失败: git 不可用时不阻塞 run。
+        """
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+                cwd=self._project_root,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                files = [f for f in result.stdout.split("\n") if f.strip()]
+                self._baseline_modified_files = len(files)
+            # 将基线设置到世界模型
+            if self._perception_engine is not None:
+                wm = getattr(self._perception_engine, 'world_model', None)
+                if wm is not None and hasattr(wm, 'set_baseline_modified'):
+                    wm.set_baseline_modified(self._baseline_modified_files)
+        except Exception:
+            self._baseline_modified_files = 0
+
     # ── §3.4 GoalDowngrade: downgradeinit化 (v0.0.11) ──
 
     def _init_downgrade(self) -> None:
@@ -838,21 +1319,15 @@ class AgentLoop:
 
         流程:
           1. 若 _allow_downgrade=False, 跳过
-          2. 对极短简单任务 (≤3词, 无代码相关字符) 直接跳过降级, 减少无意义交互
-          3. 尝试 suggest_downgrade (基于当前 Goal 的 GoalType)
-          4. 若有候选 → 询问用户 (通过闸门)
-          5. 用户接受 → 替换 _goal, 记录降级状态 (R4/R5/R6)
-          6. 用户拒绝 → 保持原 Goal (走 UNDECIDABLE 路径)
+          2. 尝试 suggest_downgrade (基于当前 Goal 的 GoalType)
+          3. 若 strict=False (默认): 记录候选到 timeline, 保持原 Goal, 不打扰用户
+          4. 若 strict=True: 询问用户 (通过闸门), 用户可选择候选
 
-        v0.4.10: 跳过极简单任务 (问候/打招呼/简单查询) 的目标降级,
-        避免 "hello world" 类任务出现不必要的降级弹窗。
+        v0.5.1: 默认非交互。降级候选仅记录到 timeline, 不弹出交互确认。
+        仅在 strict 模式或用户显式 /goal 时启用交互降级。
+        移除了 _is_trivial_task hack。
         """
         if not self._allow_downgrade:
-            return
-
-        # 极短简单任务直接跳过降级 (≤3词, 无代码相关字符)
-        user_raw = self._context.user_raw.strip()
-        if _is_trivial_task(user_raw):
             return
 
         baseline_sha = self._resolve_git_sha() or ""
@@ -863,7 +1338,24 @@ class AgentLoop:
         if downgrade is None:
             return  # 当前 GoalType 不适用降级
 
-        # ── gate: ask用户是否acceptdowngrade
+        # ── v0.5.1: 非 strict 模式 → 仅记录候选, 保持原 Goal, 不打扰用户
+        if not self._strict:
+            self._recorder.append(
+                event_id=f"downgrade_skipped_{self._step_count}",
+                ts=int(time.time() * 1000),
+                event_type=EventType.GOAL_DOWNGRADE,
+                payload={
+                    "original_type": downgrade.original.statement.goal_type.value,
+                    "action": "auto_skip_non_strict",
+                    "candidate_count": len(downgrade.candidates),
+                    "candidates": [
+                        c.statement.goal_type.value for c in downgrade.candidates
+                    ],
+                },
+            )
+            return
+
+        # ── strict 模式: 交互式降级 ──
 
         # construct一个假 action 用于gate交互 (downgrade是 Goal 层面，非tool层面)
         placeholder_action = Action(
@@ -886,7 +1378,21 @@ class AgentLoop:
             matched_rule_ids=("goal_downgrade",),
         )
 
-        # 补记 GATE_DECISION event (参考正常 gate stream程在 _process_gate 中的写法)
+        # v0.5.0 (C6 fix): 先询问用户, 再记录 GATE_DECISION 事件
+        # 保证 timeline 顺序: user_response → gate_decision → downgrade_applied
+        user_resp = self._user_responder.ask(placeholder_action, dummy_judgement)
+
+        # 记录 USER_RESPONSE event (实际交互顺序)
+        self._recorder.append(
+            event_id=f"user_response_downgrade_{self._step_count}",
+            ts=int(time.time() * 1000),
+            event_type=EventType.USER_RESPONSE,
+            payload={
+                "response_type": user_resp.response_type.value,
+            },
+        )
+
+        # 在用户响应后记录 GATE_DECISION (反映实际决策时序)
         self._gate_decision_count += 1
         self._recorder.append(
             event_id=f"gate_decision_{self._gate_decision_count}",
@@ -908,18 +1414,6 @@ class AgentLoop:
                 "matched_rules": list(dummy_judgement.matched_rule_ids),
             },
         ))
-
-        user_resp = self._user_responder.ask(placeholder_action, dummy_judgement)
-
-        # M2: record USER_RESPONSE event
-        self._recorder.append(
-            event_id=f"user_response_downgrade_{self._step_count}",
-            ts=int(time.time() * 1000),
-            event_type=EventType.USER_RESPONSE,
-            payload={
-                "response_type": user_resp.response_type.value,
-            },
-        )
 
         if user_resp.response_type == UserResponseType.ACCEPT_DOWNGRADE:
             idx = max(0, min(user_resp.downgrade_index,
@@ -978,185 +1472,32 @@ class AgentLoop:
         ))
 
     def _call_model(self, *, emit_model_call: bool = True) -> ModelResponse:
-        """调model, 记录到 RunRecorder。
+        """调model, 记录到 RunRecorder (薄委托 → loop_model_call.call_model)。
 
-        stream 分流 (P2):
-          self._stream=True 且 adapter 有 complete_stream → 流式分支
-          否则 → 阻塞 complete() (P1 行为, 零变化)
-
-        流式语义 ≡ 阻塞: 最终 ModelResponse 一致, 记录点一致,
-        只是过程中逐 token 广播 model_token 事件给 observer。
-
-        emit_model_call (v0.0.21c): 默认 True 广播 model_call 渲染事件;
-          False 时只记 timeline + model_call_start (spinner), 不广播 model_call
-          渲染。供 step() 的"首次调用"用 —— 防 nudge 重试时第一次空回复被渲染成
-          "(empty)" 与重试结果双重显示。调用方在确认不需 nudge 后补发渲染。
+        stream 分流/记录点/emit_model_call 语义见 loop_model_call 模块 docstring。
+        抽取缘由: loop.py 瘦身 (同 loop_perception/loop_checkpoint 协作者模式);
+        行为等价由 test_loop_stream_invariants / test_stream_error_invariants 守护。
         """
-        # O2: use cached tool schemas (avoid rebuilding every model call)
-        tool_schemas: list[dict[str, Any]] = self._tool_schemas
-
-        # Extension: on_before_model
-        if self._ext_registry is not None:
-            self._ext_registry.fire(
-                "on_before_model",
-                messages=list(self._messages),
-                step=self._step_count,
-            )
-
-        # §6.1 呈现层投影: 调model前broadcast model_call_start (让呈现层显示 spinner)
-        # 纯 observer event, 不进 RunRecorder (start 不是auditevent, 完成才记)
-        self._emit(LoopEvent(
-            kind="model_call_start",
-            step=self._step_count,
-            payload={"model": self._model.model_name},
-        ))
-
-        if self._stream:
-            resp = self._call_model_stream(tool_schemas)
-        else:
-            resp = self._model.complete(
-                messages=self._messages,
-                tools=tool_schemas,
-                tool_choice=ToolChoice.AUTO,
-            )
-
-        # 记录 model_call event (stream式/blocking共用同一record point)
-        # §6.2 replay 要求 timeline 存完整 ModelResponse (不只digest)
-        # B2 fix: 同时存储真实 usage 数据, 供 /undo 校正使用
-        self._recorder.append(
-            event_id=f"model_call_{self._model_call_count}",
-            ts=int(time.time() * 1000),
-            event_type=EventType.MODEL_CALL,
-            payload={
-                "model": self._model.model_name,
-                "stop_reason": resp.stop_reason.value,
-                "content_length": len(resp.content),
-                "tool_calls_count": len(resp.tool_calls),
-                # §6.2 replay 用: 完整response数据 (让 timeline reproducible)
-                "content": resp.content,
-                "reasoning": resp.reasoning,
-                "reasoning_length": len(resp.reasoning),
-                "tool_calls": [
-                    {"id": tc.id, "tool_id": tc.tool_id, "args": dict(tc.args)}
-                    for tc in resp.tool_calls
-                ],
-                # B2: 真实 usage 数据, 供 _recalc_usage_from_timeline 使用
-                "usage": dict(resp.usage) if resp.usage else {},
-            },
-        )
-        # §6.1 呈现层投影: 同一record pointbroadcast给 observer
-        if emit_model_call:
-            self._emit_model_call_event(resp)
-
-        return resp
+        from zall.core.loop_model_call import call_model
+        return call_model(self, emit_model_call=emit_model_call)
 
     def _call_model_stream(self, tool_schemas: list[dict[str, Any]]) -> ModelResponse:
-        """stream式调model, 逐 token broadcast, return最终 ModelResponse。
-
-        语义 ≡ 阻塞: 最终返回的 ModelResponse 与 complete() 等价。
-        过程中每个 token 通过 observer 广播 model_token 事件 (呈现层用)。
-        RunRecorder 不记 token (那是呈现层, 不是审计轨迹)。
-        """
-        resp: ModelResponse | None = None
-        # 思考过程分stream (§9.2.12): model先给 reasoning 再给 content。
-        # 用长度增量judgment当前 token 属于哪条通道 (reasoning 阶段 content 不增长),
-        # 不引入新interface (仍沿用 complete_stream 的 (token, accumulated) protocol)。
-        prev_content_len = 0
-        prev_reasoning_len = 0
-        # Track tool call count to detect new tool call deltas
-        prev_tool_call_count = 0
-        try:
-            for token, accumulated in self._model.complete_stream(  # type: ignore[attr-defined]
-                messages=self._messages,
-                tools=tool_schemas,
-                tool_choice=ToolChoice.AUTO,
-            ):
-                if token:
-                    reasoning = accumulated.reasoning
-                    if (len(reasoning) > prev_reasoning_len
-                            and len(accumulated.content) == prev_content_len):
-                        # 思考过程增量 → model_thinking (呈现层透明展示)
-                        delta = reasoning[prev_reasoning_len:]
-                        self._emit(LoopEvent(
-                            kind="model_thinking",
-                            step=self._step_count,
-                            payload={"token": delta, "accumulated": reasoning},
-                        ))
-                        prev_reasoning_len = len(reasoning)
-                    else:
-                        # content增量 → model_token (呈现层stream式显示)
-                        self._emit(LoopEvent(
-                            kind="model_token",
-                            step=self._step_count,
-                            payload={"token": token, "accumulated": accumulated.content},
-                        ))
-                        prev_content_len = len(accumulated.content)
-                # Tool call delta: emit model_tool_call event so UI can show progress
-                if accumulated.tool_calls and len(accumulated.tool_calls) > prev_tool_call_count:
-                    # Only emit when new tool calls appear (not on every token)
-                    prev_tool_call_count = len(accumulated.tool_calls)
-                    self._emit(LoopEvent(
-                        kind="model_tool_call",
-                        step=self._step_count,
-                        payload={
-                            "tool_calls": [
-                                {"id": tc.id, "tool_id": tc.tool_id, "args": dict(tc.args)}
-                                for tc in accumulated.tool_calls
-                            ],
-                        },
-                    ))
-                resp = accumulated
-        except GeneratorExit:
-            # GeneratorExit must重抛 (Python generatorprotocol: 关闭信号不可吞)
-            # 吞掉会破坏 with/finally cleanup链, 导致资源leak
-            raise
-        except Exception as _stream_exc:
-            # v0.4.9 (A1): stream exception must be observable and honest.
-            # Previously this was silently downgraded to an empty/partial STOP
-            # response, so callers (step/UI/auto-retry) had no signal that
-            # streaming failed. Now we log it, record it for introspection
-            # (self._last_stream_error), and let it propagate so step()'s
-            # terminal handler emits a real, diagnosable error egress instead
-            # of pretending the turn succeeded. This keeps the fail-safe
-            # semantic (no crash, clean terminal) while making the failure
-            # visible — matching the sync call path's behavior.
-            self._last_stream_error = _stream_exc
-            import logging as _zall_logging
-            _zall_logging.getLogger("zall.core.loop").warning(
-                "stream model call failed: %s: %s",
-                type(_stream_exc).__name__, _stream_exc,
-            )
-            raise
-        # stream式结束, resp 是最终 ModelResponse (含完整 content + tool_calls + stop_reason)
-        if resp is None:
-            # stream式没产出任何东西 (exception) → downgrade为 STOP
-            return ModelResponse(content="", stop_reason=StopReason.STOP)
-        return resp
+        """stream式调model (薄委托 → loop_model_call.call_model_stream)。"""
+        from zall.core.loop_model_call import call_model_stream
+        return call_model_stream(self, tool_schemas)
 
     # ── PR-0 contenthallucination扫描 (v0.0.11) ──
 
-    # modelfalse造tooloutput的常见pattern (预编译正则, 避免每次 STOP 都编译)
-    _HALLUCINATION_RE: tuple[tuple[re.Pattern[str], str], ...] = (
-        (re.compile(r"\$\s+(?:sudo|apt|pip|npm|git|python|node|cd|ls|cat|cp|mv|rm|mkdir|chmod|echo)\b"), "fake_bash_prompt"),
-        (re.compile(r"\w+@\w+:~[/\w]*\$"), "fake_user_host_prompt"),
-        (re.compile(r"---\s*(?:BEGIN|START|END)\s*(?:FILE|CONTENT)?\s*---"), "fake_file_delimiter"),
-        (re.compile(r"\b\d+\s*(?:bytes|KB|MB)\s+(?:written|read|modified|saved|created)\b"), "fake_file_size_report"),
-        # Tightened: requires @@ hunk header followed by +/- lines to avoid false
-        # positives on bullet points, markdown lists, and negative numbers.
-        (re.compile(r"(?m)^@@.*\n[\s\S]*?^(?:\+|\-)[^+\-]"), "fake_diff_block"),
-        (re.compile(r"HTTP/\d\.\d\s+\d{3}"), "fake_http_response"),
-        (re.compile(r"<tool_output>"), "fake_tool_output_xml"),
-        (re.compile(r"<function_call>"), "fake_function_call_xml"),
-    )
+    @staticmethod
+    def _scan_hallucinated_content(content: str) -> tuple[str, ...]:
+        """PR-0: Scan STOP response for faked tool output patterns.
 
-    @classmethod
-    def _scan_hallucinated_content(cls, content: str) -> tuple[str, ...]:
-        """PR-0: Scan STOP response for faked tool output patterns."""
-        found: list[str] = []
-        for pattern, label in cls._HALLUCINATION_RE:
-            if pattern.search(content):
-                found.append(label)
-        return tuple(found)
+        实现已抽取到 core/hallucination.py (loop.py 瘦身, 架构评估 P0-item2);
+        此处保留薄委托 staticmethod 以兼容内部调用与既有测试
+        (AgentLoop._scan_hallucinated_content)。
+        """
+        from zall.core.hallucination import scan_hallucinated_content
+        return scan_hallucinated_content(content)
 
     def _execute_tool_calls(self, tool_calls: tuple[ToolCall, ...]) -> None:
         """Execute tool calls via ToolExecutor (delegated)."""
@@ -1240,141 +1581,55 @@ class AgentLoop:
         if self._git_protect is not None:
             try:
                 self._git_protect.checkpoint(label=f"step_{self._step_count}")
-            except Exception:
-                pass  # 安全网故障不得改变 RunEgress (IPR-0 反例)
+            except Exception as _gp_err:
+                # 安全网故障不得改变 RunEgress (IPR-0 反例), 但须可观测 (不静默)
+                _log.warning("GitProtect checkpoint failed (safety net degraded): %s", _gp_err)
 
         # 2. CheckpointManager (file-based, 不dependency git)
         self._maybe_checkpoint_file(tool_id, action_args)
 
-    # skipnoisedirectory (v0.0.6 fix H4, v0.1.1: 使用 os.walk 提前filter)
-    # v0.1.4: 统一为 _util/path.py 的 NOISE_DIRS + .zall (checkpoint directory)
-    _SKIP_DIRS: frozenset[str] = frozenset(NOISE_DIRS | {".zall"})
-    _TRACKED_EXTS: frozenset[str] = frozenset({
-        ".py", ".js", ".ts", ".md", ".toml", ".yaml", ".yml",
-        ".json", ".css", ".html", ".rs", ".go", ".java",
-    })
-    # v0.1.3: 排除敏感filepattern (secret leak防护)
-    _EXCLUDE_PATTERNS: tuple[str, ...] = (
-        ".env", ".env.*", "*.pem", "*.key", "*.cert",
-        "*secret*", "*password*", "*credential*",
-        "id_rsa", "id_ed25519", "*.pub",
-    )
-
-    # B1: cache全量扫描结果, 避免每次写operation都 os.walk
-    # instance级cache (非class级): 多个 AgentLoop instance不共享, 防 /clear 后新 loop 用旧cache
-    # O3: 写operation后cache失效, 下次访问重新扫描 (确保新file被trace)
+    # ── file-based checkpoint 追踪 ──
+    # 逻辑已抽取到 core/loop_checkpoint.py (loop.py 瘦身, 推荐 C / 架构评估 P0-item2)。
+    # 常量 (追踪扩展名 / 敏感排除模式) 与 os.walk 扫描均迁至该模块; 此处保留薄委托
+    # 方法, 兼容既有内部调用与既有测试 (test_plugin_safety 替换 _maybe_checkpoint)。
     def _get_or_init_tracked_cache(self) -> set[str] | None:
-        """获取或init化tracefilecache。"""
+        """获取或初始化追踪文件缓存 (instance 级, 防跨 loop 复用旧 cache)。"""
         if self._cached_tracked_files is None:
             self._cached_tracked_files = self._scan_tracked_files()
         return self._cached_tracked_files
 
     def _invalidate_tracked_cache(self) -> None:
-        """O3: 写operation后使tracefilecache失效, 下次访问重新扫描。"""
+        """O3: 写操作后使追踪文件缓存失效, 下次访问重新扫描。"""
         self._cached_tracked_files = None
 
     def _maybe_checkpoint_file(self, tool_id: str, action_args: dict[str, Any] | None = None) -> None:
-        """写operation后自动filesystemsnapshot (CheckpointManager, v0.1.0).
-
-        B1 优化:
-          - 首次调用: 全量 os.walk 扫描, 缓存结果到 _cached_tracked_files
-          - 后续调用: 从工具参数提取文件路径, 仅追踪本次修改的文件
-          - bash 等无法获知具体文件的工具: 使用缓存的全量列表
-
-        O3 增量 cache 策略:
-          - write_file/edit_file/batch_edit (已知路径): 直接加入 cache, 避免全量扫描
-          - bash (未知路径): 使 cache 失效, 下次全量扫描
-
-        静默失败: 安全网故障不得改变 RunEgress (IPR-0 反例).
-        """
-        if self._checkpoint_mgr is None:
-            return
-        try:
-            tracked = self._get_checkpoint_files(tool_id, action_args)
-            if not tracked:
-                return
-
-            self._checkpoint_mgr.save_checkpoint(
-                label=f"step_{self._step_count}_{tool_id}",
-                files=tracked,
-                tool_id=tool_id,
-                run_id=self._recorder.run_id,
-            )
-            # O3: 增量 cache 策略 — 已知路径直接加入, 未知路径才全量扫描
-            if tool_id in ("write_file", "edit_file", "batch_edit") and self._cached_tracked_files is not None:
-                # 已知路径: 增量加入 cache, 避免全量 os.walk
-                self._cached_tracked_files.update(tracked)
-            else:
-                # bash 等未知路径: 使 cache 失效, 下次重新扫描
-                self._cached_tracked_files = None
-        except Exception:
-            pass  # 安全网故障不得改变 RunEgress
+        """写操作后自动文件系统快照 (委托 loop_checkpoint, 逻辑见该模块)。"""
+        loop_checkpoint.maybe_checkpoint_file(self, tool_id, action_args)
 
     def _get_checkpoint_files(self, tool_id: str, action_args: dict[str, Any] | None = None) -> set[str]:
-        """获取本次 checkpoint 需要trace的filelist.
-
-        B1 优化:
-          - write_file/edit_file: 从工具参数提取路径, 增量追踪 (O(1))
-          - batch_edit: 从 edits 列表提取每个 path
-          - bash: 使用缓存的全量扫描结果 (O(n) 仅首次)
-        """
-        # 从toolparameter提取path (write_file/edit_file 等明确path的tool)
-        if action_args:
-            path = action_args.get("path") or action_args.get("file_path") or ""
-            if path:
-                return {path.replace("\\", "/")}
-            # batch_edit: edits list含多个 path
-            if tool_id == "batch_edit":
-                edits = action_args.get("edits", [])
-                if edits and isinstance(edits, list):
-                    paths = set()
-                    for ed in edits:
-                        p = ed.get("path", "") if isinstance(ed, dict) else ""
-                        if p:
-                            paths.add(p.replace("\\", "/"))
-                    if paths:
-                        return paths
-
-        # cache未init化 → 全量扫描 (仅首次)
-        if self._cached_tracked_files is None:
-            self._cached_tracked_files = self._scan_tracked_files()
-
-        return self._cached_tracked_files or set()
+        """获取本次 checkpoint 追踪文件列表 (委托 loop_checkpoint)。"""
+        return loop_checkpoint.get_checkpoint_files(self, tool_id, action_args)
 
     def _scan_tracked_files(self) -> set[str]:
-        """全量扫描项目directory, returntracefile集合 (仅首次调用, 结果cache到instance)."""
-        if self._checkpoint_mgr is None:
-            return set()
-        root = self._checkpoint_mgr.project_root
-        candidates: list[str] = []
-        if root.is_dir():
-            for dirpath, dirnames, filenames in os.walk(str(root), topdown=True):
-                # 提前filternoisedirectory (不遍历!)
-                skip_noise_dirs(dirnames)
-                rel_base = os.path.relpath(dirpath, str(root))
-                for fn in filenames:
-                    ext = os.path.splitext(fn)[1].lower()
-                    if ext in self.__class__._TRACKED_EXTS:
-                        rel = os.path.join(rel_base, fn) if rel_base != "." else fn
-                        rel_norm = rel.replace("\\", "/")
-                        # S1: 排除敏感文件模式 (fnmatch 同时匹配 .env 和 key.pem)
-                        if any(fnmatch.fnmatch(rel_norm, pat) for pat in self.__class__._EXCLUDE_PATTERNS):
-                            continue
-                        candidates.append(rel_norm)
-
-        # deterministic性sort后return完整集合 (不再硬限 100 个file, fix B9)
-        candidates.sort()
-        return set(candidates)
+        """全量扫描项目目录返回追踪文件集合 (委托 loop_checkpoint)。"""
+        return loop_checkpoint.scan_tracked_files(self)
 
     def _check_termination(self) -> RunEgress:
         """model STOP 后, check Goal termination。
 
         v0.0.10: 采集真实 git sha 作为 Evidence (替代占位 s0_baseline/s0_current)。
         v0.0.32: 每次终止检查前清除 git SHA 缓存, 确保捕获最新提交。
+        v0.6.x: 多 Judge 编排 (§12.1 Accountability 三态编排, MASTER.md §12.1 表)。
+
+        §5.4 consistency 规则 (MASTER.md §12.1):
+          - 主 undecidable → 辅 cannot override
+          - 主 not_met → 辅 cannot rescue
+          - 主 met + 辅 met → met
+          - 主 met + 辅 not_met/undecidable → met_with_caveat (main_aux_divergent)
         """
         # O1: 清除 git SHA cache, 确保 _resolve_git_sha return最新值
         self._cached_git_sha.clear()
-        if self._judge is None:
+        if self._judge is None and self._judges is None:
             self._emit(LoopEvent(
                 kind="judge_result",
                 step=self._step_count,
@@ -1382,7 +1637,7 @@ class AgentLoop:
             ))
             return self._make_egress(TerminationState.UNDECIDABLE)
 
-        from zall.core.accountability import Evidence
+        from zall.core.accountability import Evidence, base_judge
 
         # v0.0.10: 采集真实 git sha (v0.0.6 fix H1: baseline_sha ≠ current_sha)
         current_sha = self._resolve_git_sha("HEAD")
@@ -1391,27 +1646,68 @@ class AgentLoop:
             baseline_sha=baseline_sha or "no_git",
             current_sha=current_sha or "no_git",
         )
-        verdict = self._judge(evidence)
 
-        result = AccountabilityResult.from_verdicts(verdict)
+        # §12.1 多 Judge 编排: 查 base_judge 表得到 main/aux judge_type
+        goal_type = self._goal.statement.goal_type
+        main_type, aux_type = base_judge(goal_type)
+
+        # 从 config 解析 main_judge 和 aux_judge 实例
+        main_judge = self._resolve_judge(main_type)
+        aux_judge = self._resolve_judge(aux_type) if aux_type else None
+
+        # 若 main_judge 为 None -> 走原有 undecidable 路径
+        if main_judge is None:
+            self._emit(LoopEvent(
+                kind="judge_result",
+                step=self._step_count,
+                payload={
+                    "state": "undecidable",
+                    "reason": "no main judge",
+                    "main_type": main_type,
+                    "aux_type": aux_type,
+                },
+            ))
+            return self._make_egress(TerminationState.UNDECIDABLE)
+
+        main_verdict = main_judge(evidence)
+        aux_verdict = aux_judge(evidence) if aux_judge is not None else None
+
+        result = AccountabilityResult.from_verdicts(main_verdict, aux_verdict)
+
+        # timeline recorder 事件
+        recorder_payload: dict[str, Any] = {
+            "state": result.state.value,
+            "caveat": result.caveat.value if result.caveat else None,
+            "main_type": main_type,
+            "aux_type": aux_type,
+            "main_state": main_verdict.state.value,
+        }
+        if aux_verdict is not None:
+            recorder_payload["aux_state"] = aux_verdict.state.value
 
         self._recorder.append(
             event_id=f"judge_{self._step_count}",
             ts=int(time.time() * 1000),
             event_type=EventType.JUDGE_RESULT,
-            payload={
-                "state": result.state.value,
-                "caveat": result.caveat.value if result.caveat else None,
-            },
+            payload=recorder_payload,
         )
+
+        # LoopEvent (给 observer/event_bus)
+        event_payload: dict[str, Any] = {
+            "state": result.state.value,
+            "caveat": result.caveat.value if result.caveat else None,
+            "report": main_verdict.report,
+            "main_type": main_type,
+            "aux_type": aux_type,
+            "main_state": main_verdict.state.value,
+        }
+        if aux_verdict is not None:
+            event_payload["aux_state"] = aux_verdict.state.value
+
         self._emit(LoopEvent(
             kind="judge_result",
             step=self._step_count,
-            payload={
-                "state": result.state.value,
-                "caveat": result.caveat.value if result.caveat else None,
-                "report": verdict.report,
-            },
+            payload=event_payload,
         ))
 
         # M2: anchor run tail before returning
@@ -1419,6 +1715,26 @@ class AgentLoop:
             self._recorder.anchor_to(self._anchor, int(time.time() * 1000))
 
         return self._make_egress(result.state)
+
+    def _resolve_judge(self, judge_type: str) -> Any | None:
+        """从 config 解析指定 judge_type 的 Judge 实例 (§12.1 多 Judge 编排)。
+
+        优先查 self._judges dict, 若 judge_type 匹配则返回;
+        若 self._judges 为 None (向后兼容单 judge 模式), 直接返回 self._judge
+        (不检查类型 -- 保持旧行为, 单 judge 充当所有 type)。
+        P3 fix 仅在 _judges dict 模式下生效 (多 Judge 显式模式才查类型匹配)。
+        """
+        # 多 Judge 模式: 优先查 judges dict
+        if self._judges is not None:
+            if judge_type in self._judges:
+                return self._judges[judge_type]
+            # 多 Judge 模式下 fallback 到 judge (若类型匹配)
+            if self._judge is not None and hasattr(self._judge, 'judge_type'):
+                if self._judge.judge_type == judge_type:
+                    return self._judge
+            return None  # P3 fix: 多 Judge 模式下类型不匹配不返回
+        # 向后兼容: 无 judges dict, 直接返回 self._judge (不检查类型)
+        return self._judge
 
     def _resolve_git_sha(self, ref: str = "HEAD") -> str | None:
         """采集真实 git sha (v0.0.10), O6: cached to avoid repeated subprocess calls.
@@ -1434,7 +1750,7 @@ class AgentLoop:
         try:
             r = subprocess.run(
                 ["git", "rev-parse", ref],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
                 cwd=self._project_root,
             )
             result = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
@@ -1465,3 +1781,31 @@ class AgentLoop:
                 else f"run {self._run_id[:8]} completed with state={state.value}"
             ),
         )
+
+    # ── §12.1 Verifiability: 运行时链完整性自检 (MASTER.md §12.1 + §3.1.4) ──
+
+    def _check_chain_integrity(self) -> str | None:
+        """验证 timeline 链完整性, 返回警告字符串或 None (链完整)。
+
+        不阻止运行, 只标记 (IPR-0: 检测篡改, 不阻止运行)。
+        链断裂时记录 CHAIN_BROKEN 事件到 timeline 并返回警告描述。
+        IPR-3: stdlib only.
+        """
+        if not self._recorder.verify_chain():
+            _log.warning("timeline chain BROKEN — possible tampering detected (§12.1)")
+            self._recorder.append(
+                event_id=f"chain_broken_{self._run_id}",
+                ts=int(time.time() * 1000),
+                event_type=EventType.CHAIN_BROKEN,
+                payload={
+                    "step": self._step_count,
+                    "event_count": len(self._recorder.events),
+                },
+            )
+            return (
+                f"timeline chain integrity check FAILED: "
+                f"{len(self._recorder.events)} events, "
+                f"tail_hash={self._recorder.tail_hash[:16]}..."
+            )
+        _log.debug("timeline chain integrity verified (§12.1)")
+        return None

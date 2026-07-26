@@ -211,8 +211,10 @@ class TestOnboarding:
             saved["key"] = key
 
         monkeypatch.setattr("zall.safety.config.save_api_key", fake_save)
+        # v3.x: onboarding 现为 3 段引导 (base URL → model → key); 前两段回车跳过, 只填 key
+        seq = iter(["", "", "sk-entered"])
         out = _FakeTTY()
-        _onboarding(out, input_fn=lambda _p: "sk-entered")
+        _onboarding(out, input_fn=lambda _p: next(seq))
         assert saved.get("key") == "sk-entered"
         assert "saved" in out.getvalue()
 
@@ -276,11 +278,13 @@ class _FakeLoop:
         self._recorder = None
         self._step_count = n_msgs
 
+    def set_messages(self, msgs: list) -> None:
+        self._messages = list(msgs)
+
 
 class TestCompactPreservesConversation:
     def test_compact_no_clear_when_no_model(self) -> None:
         """Counterexample (Bug C): /compact 无 model 时不得 return "clear" 丢弃对话态."""
-        from zall.cli.commands import handle_slash as _handle_slash
 
         loop = _FakeLoop(n_msgs=5, model=None)
         out = io.StringIO()
@@ -291,7 +295,6 @@ class TestCompactPreservesConversation:
 
     def test_compact_no_clear_when_nothing_to_compact(self) -> None:
         """Counterexample (Bug C): /compact 无可压缩 (<=6 条) 时不得 "clear"."""
-        from zall.cli.commands import handle_slash as _handle_slash
 
         loop = _FakeLoop(n_msgs=5, model=_FakeModel())  # 5 <= 6 → 无需压缩
         out = io.StringIO()
@@ -303,7 +306,6 @@ class TestCompactPreservesConversation:
     def test_compact_success_keeps_loop_replaces_messages(self) -> None:
         """Happy path (Bug C): /compact 成功时原地replace _messages 且 return "handled"
         (不 "clear" 丢弃压缩后的上下文)."""
-        from zall.cli.commands import handle_slash as _handle_slash
 
         loop = _FakeLoop(n_msgs=8, model=_FakeModel())  # 8 > 6 → 真压缩
         out = io.StringIO()
@@ -382,8 +384,9 @@ class TestGoalConfirmUsesInputFn:
         """Counterexample (Bug D): confirm input n → reject, 不得调model."""
         calls = self._setup(monkeypatch)
         out = _FakeTTY()
+        # v0.5.1: strict=True 启用交互式 confirm gate (默认 strict=False auto-confirm)
         repl(input_fn=_make_input(["task", "n", "/exit"]),
-             out=out, stream=False, yes=False)
+             out=out, stream=False, yes=False, strict=True)
         assert "goal not confirmed" in out.getvalue()
         assert calls["n"] == 0  # 拒绝 → 不调模型
 
@@ -391,8 +394,9 @@ class TestGoalConfirmUsesInputFn:
         """Happy path (Bug D): confirm input y → accept, 调model (用injection的 input_fn)."""
         calls = self._setup(monkeypatch)
         out = _FakeTTY()
+        # v0.5.1: strict=True 启用交互式 confirm gate (默认 strict=False auto-confirm)
         repl(input_fn=_make_input(["task", "y", "/exit"]),
-             out=out, stream=False, yes=False)
+             out=out, stream=False, yes=False, strict=True)
         assert "REPLY" in out.getvalue()
         assert calls["n"] >= 1  # 接受 → 调模型
 

@@ -208,11 +208,12 @@ class JsonRpcTransport:
         self._send(msg)
 
     def _send(self, msg: dict[str, Any]) -> None:
-        """发送消息到 LSP 服务器 stdin。"""
+        """发送消息到 LSP 服务器 stdin (binary mode)。"""
         content = json.dumps(msg, ensure_ascii=False)
-        header = f"Content-Length: {len(content.encode('utf-8'))}\r\n\r\n"
+        content_bytes = content.encode("utf-8")
+        header = f"Content-Length: {len(content_bytes)}\r\n\r\n"
         if self._process.stdin is not None:
-            self._process.stdin.write(header + content)
+            self._process.stdin.write(header.encode("utf-8") + content_bytes)
             self._process.stdin.flush()
 
     def _receive_response(self, req_id: int, timeout: float = 10.0) -> dict[str, Any]:
@@ -226,11 +227,11 @@ class JsonRpcTransport:
                 if msg_id == req_id:
                     return result
 
-            # 从 stdout 读取更多数据
+            # 从 stdout 读取更多数据 (binary mode)
             if self._process.stdout is not None:
-                line = self._process.stdout.read(1)
-                if line:
-                    self._buffer += line
+                byte = self._process.stdout.read(1)
+                if byte:
+                    self._buffer += byte.decode("utf-8", errors="replace")
                 else:
                     time.sleep(0.01)
 

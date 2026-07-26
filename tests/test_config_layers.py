@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -251,3 +252,88 @@ class TestConfigLayersFileLoading:
         result = _deep_merge(result, env)
         assert result["model"] == "env-model"
         assert result["timeout"] == 120  # Preserved from defaults
+
+
+class TestConfigLoaderParity:
+    """I-CFG-PARITY: config_layers 与 safety.config 对同一文件/env 解析对齐.
+
+    背景 (漂移债): _config_to_dict 曾不读 [model].provider/api_key/采样参数,
+    两套加载器对同一份 config 给出不同结果。本类钉死对齐。
+    """
+
+    def _write_toml(self, body: str) -> Path:
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".toml", delete=False, encoding="utf-8")
+        tmp.write(body)
+        tmp.close()
+        return Path(tmp.name)
+
+    def test_model_section_provider_and_api_key(self) -> None:
+        """[model] 内直写 provider/api_key 参与层叠 (与 safety.config 对齐)。"""
+        from zall.cli.config_layers import _config_to_dict
+        p = self._write_toml(
+            '[model]\nname = "m1"\nprovider = "sensenova"\n'
+            'api_key = "k-in-model"\n')
+        try:
+            cfg = _config_to_dict(p)
+            assert cfg["provider"] == "sensenova"
+            assert cfg["api_key"] == "k-in-model"
+        finally:
+            os.unlink(p)
+
+    def test_model_section_sampling_params(self) -> None:
+        """采样参数 + window_size 参与层叠; 非法数值不崩不写 (反例)。"""
+        from zall.cli.config_layers import _config_to_dict
+        p = self._write_toml(
+            '[model]\nname = "m"\ntemperature = "0.4"\nmax_tokens = "2048"\n'
+            'top_p = "0.9"\nwindow_size = "64000"\nreasoning_effort = "HIGH"\n')
+        try:
+            cfg = _config_to_dict(p)
+            assert cfg["temperature"] == 0.4
+            assert cfg["max_tokens"] == 2048
+            assert cfg["top_p"] == 0.9
+            assert cfg["window_size"] == 64000
+            assert cfg["reasoning_effort"] == "high"  # 归一化小写
+        finally:
+            os.unlink(p)
+        # 反例: 非法数值不崩, 不污染结果
+        p2 = self._write_toml('[model]\nname = "m"\ntemperature = "hot"\n')
+        try:
+            cfg2 = _config_to_dict(p2)
+            assert "temperature" not in cfg2
+        finally:
+            os.unlink(p2)
+
+    def test_env_layer_parity_with_safety_config(self) -> None:
+        """env 层与 safety.config 对齐: ZALL_PROVIDER/采样参数/非法值不崩。"""
+        import subprocess
+        code = (
+            "from zall.cli.config_layers import load_config_layers\n"
+            "c = load_config_layers(include_system=False, include_user=False,"
+            " include_project=False, include_extensions=False, include_env=True)\n"
+            "print('provider=', c.get('provider'))\n"
+            "print('temperature=', c.get('temperature'))\n"
+            "print('window_size=', c.get('window_size'))\n"
+            "print('max_tokens=', c.get('max_tokens'))\n"
+        )
+        env = os.environ.copy()
+        env["ZALL_PROVIDER"] = "ollama"
+        env["ZALL_TEMPERATURE"] = "0.2"
+        env["ZALL_WINDOW_SIZE"] = "32000"
+        env["ZALL_MAX_TOKENS"] = "not-a-number"  # 反例: 非法值不崩不写
+        result = subprocess.run(
+            ["python", "-c", code], capture_output=True, text=True, env=env,
+        )
+        assert "provider= ollama" in result.stdout
+        assert "temperature= 0.2" in result.stdout
+        assert "window_size= 32000" in result.stdout
+        assert "max_tokens= None" in result.stdout  # 非法值回退默认 None
+
+    def test_defaults_expose_same_keys_as_safety_config(self) -> None:
+        """两套加载器的默认键集对齐 (反例: 任一方新增键另一方缺失即失败)。"""
+        from zall.cli.config_layers import DEFAULTS
+        from zall.safety.config import load_config as safety_load
+        safety_keys = set(safety_load().keys())
+        layer_keys = set(DEFAULTS.keys())
+        # k_overrides 是 config_layers 独有的扩展层键 (合法差异)
+        assert layer_keys - {"k_overrides"} == safety_keys

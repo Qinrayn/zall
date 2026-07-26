@@ -30,11 +30,12 @@ Corresponds to:
 from __future__ import annotations
 
 import json
-import logging
 import os
 import threading
 from collections import Counter, defaultdict
 from typing import Any
+
+from zall._util.logging import get_zall_logger as _get_zall_logger
 
 from zall.core.lifecycle import (
     SelfSuggestion,
@@ -42,7 +43,7 @@ from zall.core.lifecycle import (
     TurnDoneInput,
 )
 
-_logger = logging.getLogger(__name__)
+_log = _get_zall_logger(__name__)
 
 # Persistence directory: ~/.zall/learned/
 _LEARNED_DIR = "learned"
@@ -52,6 +53,27 @@ _CHAIN_MIN_REPEAT = 2       # Minimum times a chain must repeat to trigger sugge
 _FREQUENT_TOOL_MIN = 3      # Minimum uses for a tool to be considered "frequent"
 _ERROR_RATE_THRESHOLD = 0.3  # Error rate above this triggers K adjustment suggestion
 _SUGGESTION_CONFIDENCE = 0.7  # Default confidence for heuristics-based suggestions
+_MAX_ERROR_PATTERNS = 100   # Max stored error patterns (prevents unbounded growth)
+_MAX_PERSIST_BYTES = 512_000  # Max persisted JSON file size (~500KB)
+_MAX_PERSIST_RETRIES = 3     # Max write retries on failure
+
+# E2: Self-evolution persistence paths
+_SKILLS_DIR_NAME = "skills"
+_LEARN_OVERRIDES_FILE = "learn_overrides.json"
+
+
+def _get_skills_dir() -> str:
+    """Get the path to the skills directory (~/.zall/skills/)."""
+    from zall.safety.config import CONFIG_DIR
+    skills_dir = os.path.join(str(CONFIG_DIR), _SKILLS_DIR_NAME)
+    os.makedirs(skills_dir, exist_ok=True)
+    return skills_dir
+
+
+def _get_learn_overrides_path() -> str:
+    """Get the path to the learn overrides file (~/.zall/learn_overrides.json)."""
+    from zall.safety.config import CONFIG_DIR
+    return os.path.join(str(CONFIG_DIR), _LEARN_OVERRIDES_FILE)
 
 
 def _get_learned_path() -> str:
@@ -82,7 +104,12 @@ class AutoLearnExtension:
 
     name = "auto_learn"
 
-    def __init__(self, learned_path: str | None = None) -> None:
+    def __init__(
+        self,
+        learned_path: str | None = None,
+        skills_dir: str | None = None,
+        learn_overrides_path: str | None = None,
+    ) -> None:
         # Core tracking state
         self._tool_counts: dict[str, int] = defaultdict(int)
         self._tool_errors: dict[str, int] = defaultdict(int)
@@ -100,6 +127,14 @@ class AutoLearnExtension:
         if learned_path is None:
             self._learned_path = _get_learned_path()
         self._load_persisted()
+
+        # E2: Self-evolution persistence paths
+        self._skills_dir: str | None = skills_dir
+        if skills_dir is None:
+            self._skills_dir = _get_skills_dir()
+        self._learn_overrides_path: str | None = learn_overrides_path
+        if learn_overrides_path is None:
+            self._learn_overrides_path = _get_learn_overrides_path()
 
     # ── Legacy hooks dict (backward compatible) ──
 
@@ -163,9 +198,10 @@ class AutoLearnExtension:
 
         # E2: Immediate error burst detection (same tool error >= 3 in recent steps)
         if not input.success:
-            recent = [e for e in self._error_patterns
-                      if e["tool_id"] == input.tool_id
-                      and e["step"] >= input.step - 5]
+            with self._lock:
+                recent = [e for e in self._error_patterns
+                          if e["tool_id"] == input.tool_id
+                          and e["step"] >= input.step - 5]
             if len(recent) >= 3:
                 return [
                     SelfSuggestion(
@@ -200,6 +236,12 @@ class AutoLearnExtension:
             if self._current_chain:
                 self._tool_chains.append(list(self._current_chain))
                 self._current_chain.clear()
+
+            # Prune error patterns to prevent unbounded growth (E6: v0.5.2)
+            if len(self._error_patterns) > _MAX_ERROR_PATTERNS:
+                # Keep the most recent entries
+                self._error_patterns.sort(key=lambda e: e.get("step", 0), reverse=True)
+                self._error_patterns = self._error_patterns[:_MAX_ERROR_PATTERNS]
 
             # 1. Error rate analysis → adjust_k
             total = sum(self._tool_counts.values())
@@ -253,8 +295,8 @@ class AutoLearnExtension:
                     value=sorted(frequent),
                     confidence=_SUGGESTION_CONFIDENCE,
                     evidence=(
-                        f"Tools {', '.join(sorted(frequent))} used frequently "
-                        f"({count} time(s)). Consider registering an automation "
+                        f"Tools {', '.join(sorted(frequent))} used frequently. "
+                        f"Consider registering an automation "
                         f"GoalType to optimise their K and Judge defaults."
                     ),
                 ))
@@ -314,6 +356,10 @@ class AutoLearnExtension:
         This is the core self-evolution mechanism: when the user accepts
         a suggestion, this method applies it.
 
+        E2: Real persistence — writes files to disk instead of returning
+        no-op dicts. create_skill writes to .zall/skills/<name>.md and
+        adjust_judge writes to .zall/learn_overrides.json.
+
         Returns a dict describing what was changed.
         """
         with self._lock:
@@ -330,12 +376,44 @@ class AutoLearnExtension:
                 "message": f"K for '{suggestion.target}' will be adjusted to {suggestion.value}",
             }
         elif suggestion.kind == "create_skill":
+            # E2.1: Write skill file to ~/.zall/skills/<name>.md (atomic write)
+            skill_name = suggestion.target
+            skills_dir = self._skills_dir or _get_skills_dir()
+            os.makedirs(skills_dir, exist_ok=True)
+            filepath = os.path.join(skills_dir, f"{skill_name}.md")
+
+            skill_content = (
+                f"# {skill_name}\n\n"
+                f"A reusable skill created from detected tool chain pattern.\n\n"
+                f"## Description\n"
+                f"{suggestion.evidence}\n\n"
+                f"## Prompt\n"
+                f"{suggestion.value}\n"
+            )
+
+            # Atomic write: write to temp, then rename
+            tmp = filepath + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(skill_content)
+                os.replace(tmp, filepath)
+            except Exception:
+                # Clean up temp file on failure
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+                raise
+
             return {
                 "applied": True,
                 "kind": "create_skill",
                 "target": suggestion.target,
+                "file_path": filepath,
                 "message": (
-                    f"Skill '{suggestion.target}' created from chain: {suggestion.value}"
+                    f"Skill '{suggestion.target}' created from chain: {suggestion.value} "
+                    f"at {filepath}"
                 ),
             }
         elif suggestion.kind == "register_goaltype":
@@ -350,6 +428,35 @@ class AutoLearnExtension:
                 ),
             }
         elif suggestion.kind == "adjust_judge":
+            # E2.2: Persist judge override to ~/.zall/learn_overrides.json
+            overrides_path = self._learn_overrides_path or _get_learn_overrides_path()
+
+            # Load existing overrides
+            existing: dict[str, Any] = {}
+            if os.path.exists(overrides_path):
+                try:
+                    with open(overrides_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    existing = {}
+
+            # Merge new override
+            existing[f"judge_{suggestion.target}"] = suggestion.value
+
+            # Atomic write
+            tmp = overrides_path + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, ensure_ascii=False)
+                os.replace(tmp, overrides_path)
+            except Exception:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+                raise
+
             return {
                 "applied": True,
                 "kind": "adjust_judge",
@@ -357,7 +464,7 @@ class AutoLearnExtension:
                 "value": suggestion.value,
                 "message": (
                     f"Judge for GoalType '{suggestion.target}' adjusted "
-                    f"to {suggestion.value}"
+                    f"to {suggestion.value} (next run)"
                 ),
             }
         return {"applied": False, "message": f"Unknown suggestion kind: {suggestion.kind}"}
@@ -370,15 +477,53 @@ class AutoLearnExtension:
 
         Currently supports:
           - K value overrides for frequently error-prone tools
+          - Cross-session optimal K values (v0.5.0)
+          - Judge mode overrides based on GoalType performance (v0.5.2)
         """
         overrides: dict[str, Any] = {}
         with self._lock:
             total = sum(self._tool_counts.values())
             if total >= 3:
+                # 1. Error-prone tools → suggest higher K
                 for tid, err_count in self._tool_errors.items():
                     tool_total = self._tool_counts.get(tid, 0)
                     if tool_total >= 3 and err_count / tool_total >= _ERROR_RATE_THRESHOLD:
                         overrides[f"k_{tid}"] = 3
+
+                # 2. v0.5.0: Cross-session optimal K values
+                #   If a tool has high success rate across sessions, keep K low.
+                #   If consistently error-prone, keep K higher.
+                for tid, count in self._tool_counts.items():
+                    if count >= 10:  # Significant sample across sessions
+                        err_count = self._tool_errors.get(tid, 0)
+                        success_rate = 1.0 - (err_count / count)
+                        if success_rate >= 0.95 and f"k_{tid}" not in overrides:
+                            # High success → keep K at default (no override)
+                            pass
+                        elif success_rate < 0.7:
+                            # Low success → suggest higher K
+                            overrides[f"k_{tid}"] = 3
+
+                # 3. v0.5.2: Judge mode overrides from high-confidence suggestions
+                for s in self._suggestions:
+                    if s.kind == "adjust_judge" and s.confidence >= 0.8:
+                        overrides[f"judge_{s.target}"] = s.value
+
+            # 4. E2.3: Read persisted overrides from .zall/learn_overrides.json
+            # These were written by apply_suggestion(kind="adjust_judge") in a
+            # previous session, creating a real persistence loop.
+            overrides_path = self._learn_overrides_path or _get_learn_overrides_path()
+            if os.path.exists(overrides_path):
+                try:
+                    with open(overrides_path, "r", encoding="utf-8") as f:
+                        persisted = json.load(f)
+                    if isinstance(persisted, dict):
+                        for key, val in persisted.items():
+                            if key not in overrides:
+                                overrides[key] = val
+                except (OSError, json.JSONDecodeError):
+                    pass
+
         return {"k_overrides": overrides} if overrides else {}
 
     # ═══════════════════════════════════════════════════════════════
@@ -405,44 +550,64 @@ class AutoLearnExtension:
     def _persist(self) -> None:
         """Append current session data to learned JSONL file.
 
-        Runs in a background daemon thread to avoid blocking the main loop.
+        Runs synchronously to avoid threading issues.
+        The operation is fast (serialize + atomic rename) and called only
+        at session end and on significant state changes.
+
+        v0.5.2 (E6 fix): Removed background-thread approach to eliminate
+        lock-ordering risks. Now runs inline with proper error isolation.
         """
-        import threading as _th
-        _t = _th.Thread(target=self._do_persist, daemon=True)
-        _t.start()
+        self._do_persist()
 
     def _do_persist(self) -> None:
-        """Actual persistence work (runs in background thread)."""
+        """Serialize and persist learned data atomically."""
         path = self._learned_path or _get_learned_path()
         self._learned_path = path
 
-        try:
-            with self._lock:
-                record = {
-                    "tool_counts": dict(self._tool_counts),
-                    "tool_errors": dict(self._tool_errors),
-                    "tool_chains": [list(c) for c in self._tool_chains],
-                    "error_patterns": list(self._error_patterns),
-                    "goal_type_counts": dict(self._goal_type_counts),
-                    "suggestions": [
-                        {
-                            "kind": s.kind,
-                            "target": s.target,
-                            "value": self._serialize_value(s.value),
-                            "confidence": s.confidence,
-                            "evidence": s.evidence,
-                        }
-                        for s in self._suggestions
-                    ],
-                }
+        for attempt in range(_MAX_PERSIST_RETRIES):
+            try:
+                with self._lock:
+                    record = {
+                        "tool_counts": dict(self._tool_counts),
+                        "tool_errors": dict(self._tool_errors),
+                        "tool_chains": [list(c) for c in self._tool_chains],
+                        "error_patterns": list(self._error_patterns),
+                        "goal_type_counts": dict(self._goal_type_counts),
+                        "suggestions": [
+                            {
+                                "kind": s.kind,
+                                "target": s.target,
+                                "value": self._serialize_value(s.value),
+                                "confidence": s.confidence,
+                                "evidence": s.evidence,
+                            }
+                            for s in self._suggestions
+                        ],
+                    }
 
-            # Write atomically: write to temp, rename
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(record, f, ensure_ascii=False, default=str)
-            os.replace(tmp, path)
-        except Exception:
-            _logger.warning("auto_learn: failed to persist learned data", exc_info=True)
+                # Write atomically: write to temp, rename
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(record, f, ensure_ascii=False, default=str)
+                os.replace(tmp, path)
+                break  # Success
+
+            except OSError as _e:
+                if attempt < _MAX_PERSIST_RETRIES - 1:
+                    _log.warning(
+                        "auto_learn: persist attempt %d failed: %s, retrying...",
+                        attempt + 1, _e,
+                    )
+                    import time as _time
+                    _time.sleep(0.1 * (attempt + 1))
+                else:
+                    _log.warning(
+                        "auto_learn: failed to persist after %d attempts: %s",
+                        _MAX_PERSIST_RETRIES, _e,
+                    )
+            except Exception:
+                _log.warning("auto_learn: failed to persist learned data", exc_info=True)
+                break
 
     @staticmethod
     def _serialize_value(value: Any) -> Any:
@@ -483,14 +648,24 @@ class AutoLearnExtension:
                     if chain not in self._tool_chains:
                         self._tool_chains.append(chain)
 
-                # Merge error patterns
-                self._error_patterns.extend(data.get("error_patterns", []))
+                # Cluster similar chains: if a new chain shares a prefix with
+                # an existing chain of length >= 3, only merge if they differ
+                # significantly (E6: cross-session pattern clustering, v0.5.2)
+                self._cluster_similar_chains()
+
+                # Merge error patterns (cap at max to prevent unbounded growth)
+                new_errors = data.get("error_patterns", [])
+                self._error_patterns.extend(new_errors)
+                if len(self._error_patterns) > _MAX_ERROR_PATTERNS:
+                    self._error_patterns.sort(key=lambda e: e.get("step", 0), reverse=True)
+                    self._error_patterns = self._error_patterns[:_MAX_ERROR_PATTERNS]
 
                 # Merge goal type counts (cumulative across sessions)
                 for gt, count in data.get("goal_type_counts", {}).items():
                     self._goal_type_counts[gt] = self._goal_type_counts.get(gt, 0) + count
 
-                # Restore suggestions (from previous analysis)
+                # Restore suggestions (from previous analysis), dedup by kind+target
+                seen_suggestions: set[tuple[str, str]] = set()
                 for s_data in data.get("suggestions", []):
                     try:
                         suggestion = SelfSuggestion(
@@ -500,19 +675,58 @@ class AutoLearnExtension:
                             confidence=s_data.get("confidence", 0.5),
                             evidence=s_data.get("evidence", ""),
                         )
-                        if suggestion not in self._suggestions:
-                            self._suggestions.append(suggestion)
+                        dedup_key = (suggestion.kind, suggestion.target)
+                        if dedup_key not in seen_suggestions:
+                            seen_suggestions.add(dedup_key)
+                            if suggestion not in self._suggestions:
+                                self._suggestions.append(suggestion)
                     except (KeyError, ValueError, TypeError):
                         pass
 
-            _logger.info(
+                # Sort suggestions by confidence descending
+                self._suggestions.sort(key=lambda s: s.confidence, reverse=True)
+
+            _log.info(
                 "auto_learn: loaded %d chains, %d error patterns from %s",
                 len(data.get("tool_chains", [])),
                 len(data.get("error_patterns", [])),
                 path,
             )
         except Exception:
-            _logger.warning("auto_learn: failed to load persisted data", exc_info=True)
+            _log.warning("auto_learn: failed to load persisted data", exc_info=True)
+
+    def _cluster_similar_chains(self) -> None:
+        """Cluster similar tool chains to reduce redundancy.
+
+        Two chains are considered similar if they share the same first N tools
+        (N >= 2). Only the longest representative is kept.
+        """
+        if len(self._tool_chains) < 2:
+            return
+
+        # Group by prefix (first 2 tools)
+        prefix_groups: dict[str, list[list[str]]] = {}
+        for chain in self._tool_chains:
+            if len(chain) >= 2:
+                prefix = "|".join(chain[:2])
+                prefix_groups.setdefault(prefix, []).append(chain)
+
+        # Dedup: keep only the longest chain per prefix group
+        deduped: list[list[str]] = []
+        seen_prefixes: set[str] = set()
+        for chain in self._tool_chains:
+            if len(chain) >= 2:
+                prefix = "|".join(chain[:2])
+                if prefix in seen_prefixes:
+                    continue  # Already have a representative for this prefix
+                seen_prefixes.add(prefix)
+                # Keep the longest chain in this group
+                longest = max(prefix_groups[prefix], key=len)
+                deduped.append(longest)
+            else:
+                deduped.append(chain)
+
+        self._tool_chains = deduped
 
 
 # Factory function for easy registration

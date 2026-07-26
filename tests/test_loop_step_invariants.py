@@ -253,26 +253,26 @@ class TestChatMode:
         ])
         loop = _make_loop(adapter)
         # init化 (mock对话pattern启动)
-        loop._messages = [Message.user("hi")]
+        loop.set_messages([Message.user("hi")])
 
         # 轮 1
         r1 = loop.step()
         assert r1.kind == "awaiting_input"
         assert r1.content == "hello"
         # messages: [user "hi", assistant "hello"]
-        assert len(loop._messages) == 2
+        assert len(loop.messages) == 2
 
         # 用户回灌第二轮
         loop.add_user_message("bye")
         # messages: [user "hi", assistant "hello", user "bye"]
-        assert len(loop._messages) == 3
+        assert len(loop.messages) == 3
 
         # 轮 2
         r2 = loop.step()
         assert r2.kind == "awaiting_input"
         assert r2.content == "see you"
         # messages: [..., user "bye", assistant "see you"]
-        assert len(loop._messages) == 4
+        assert len(loop.messages) == 4
 
     def test_chat_finalize_undecidable(self) -> None:
         """Happy path: 对话结束 finalize → undecidable (不judgment met/not_met).

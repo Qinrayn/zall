@@ -90,3 +90,62 @@ class TestGrepInvariants:
         assert s["type"] == "function"
         assert "pattern" in s["function"]["parameters"]["properties"]
         assert "pattern" in s["function"]["parameters"]["required"]
+
+
+class TestGrepTimeoutNonBlocking:
+    """G14 回归守卫: 超时后主线程立即返回, 不被失控搜索线程阻塞。
+
+    旧实现 `with ThreadPoolExecutor` 退出时 shutdown(wait=True) 会阻塞到
+    失控线程自然结束 — timeout 保护形同虚设 (I-GREP-TO)。
+    """
+
+    def test_timeout_returns_promptly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """I-GREP-TO-1: 搜索耗时远超 timeout 时, 返回时长≈timeout 而非全量扫完。"""
+        import time
+
+        import zall.tools.grep as grep_mod
+
+        # 40 个文件 × 每次 is_binary 拖慢 0.1s ≈ 全量需 4s; timeout 钳到 0.3s
+        for i in range(40):
+            (tmp_path / f"f{i}.txt").write_text("hello\n", encoding="utf-8")
+        real_is_binary = grep_mod.is_binary
+
+        def _slow_is_binary(p: Path) -> bool:
+            time.sleep(0.1)
+            return real_is_binary(p)
+
+        monkeypatch.setattr(grep_mod, "is_binary", _slow_is_binary)
+        monkeypatch.setattr(grep_mod, "_MAX_REGEX_TIMEOUT", 0.3)
+
+        tool = GrepTool()
+        start = time.monotonic()
+        result = tool._grep_python("hello", tmp_path, False, False, 100)
+        elapsed = time.monotonic() - start
+
+        assert result.success is False
+        assert result.error == "regex timeout"
+        # 旧实现会阻塞 ~4s; 新实现 join(0.3) 后立即返回
+        assert elapsed < 2.0, f"timeout 后主线程被阻塞 {elapsed:.1f}s"
+
+    def test_fast_search_unaffected_counterexample(self, tmp_path: Path) -> None:
+        """反例: 正常速度搜索不受线程化影响, 结果完整正确。"""
+        (tmp_path / "x.py").write_text("needle_alpha\nother\n", encoding="utf-8")
+        tool = GrepTool()
+        result = tool._grep_python("needle_alpha", tmp_path, False, False, 100)
+        assert result.success is True
+        assert result.artifacts["match_count"] == 1
+
+    def test_no_executor_in_fallback_guard(self) -> None:
+        """I-GREP-TO-2 架构守卫: 退化路径不得回归 ThreadPoolExecutor(wait=True 陷阱),
+        必须是 daemon 线程 (不阻止进程退出)。"""
+        import inspect
+
+        import zall.tools.grep as grep_mod
+
+        src = inspect.getsource(grep_mod)
+        # 检查实际调用形态 (注释里提及不算): 无 executor 实例化 / 无 concurrent 导入
+        assert "ThreadPoolExecutor(" not in src
+        assert "import concurrent" not in src
+        assert "daemon=True" in src

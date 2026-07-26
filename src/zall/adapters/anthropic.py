@@ -67,6 +67,22 @@ class AnthropicAdapter:
         self._model = model or os.environ.get("ANTHROPIC_MODEL") or cfg.get("model", "claude-sonnet-4-20250514")
         self._max_tokens = max_tokens
         self._timeout = timeout
+        # Extended thinking (opt-in): 让 Claude 思考过程可见 (像 Claude Code)。
+        # 优先 ZALL_THINKING_BUDGET (token 预算, >=1024 生效); 便捷开关 ZALL_THINKING=1 用默认 2048。
+        # 默认关闭 (不改既有行为/成本)。
+        _tb = os.environ.get("ZALL_THINKING_BUDGET", "").strip()
+        try:
+            self._thinking_budget = int(_tb) if _tb else 0
+        except ValueError:
+            self._thinking_budget = 0
+        if not self._thinking_budget and cfg.get("thinking_budget"):
+            try:
+                self._thinking_budget = int(cfg.get("thinking_budget"))
+            except (TypeError, ValueError):
+                self._thinking_budget = 0
+        if (not self._thinking_budget
+                and os.environ.get("ZALL_THINKING", "").strip().lower() in ("1", "true", "yes", "on")):
+            self._thinking_budget = 2048
 
         if not self._api_key:
             raise ValueError(
@@ -84,7 +100,8 @@ class AnthropicAdapter:
 
     def close(self) -> None:
         """Close the persistent Anthropic client."""
-        self._client.close()
+        if self._client is not None:
+            self._client.close()
 
     @property
     def model_name(self) -> str:
@@ -174,14 +191,22 @@ class AnthropicAdapter:
             body["system"] = "\n".join(system_parts)
 
         # Convert zall tool schemas to Anthropic format
+        # v0.5.0 (B2 fix): zall tool schema uses OpenAI format:
+        #   {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+        # But also supports legacy format: {"tool_id": "...", "description": "...", "input_schema": {...}}
+        # Must handle both.
         if tools:
             anthropic_tools = []
             for t in tools:
-                # zall tool schema: {tool_id, description, input_schema}
+                # Try nested "function" dict first (OpenAI format), fallback to top-level
+                func = t.get("function", t)
+                name = func.get("name") or t.get("tool_id") or "unknown"
+                desc = func.get("description") or t.get("description") or ""
+                params = func.get("parameters") or t.get("input_schema") or t.get("parameters") or {}
                 anthropic_tools.append({
-                    "name": t.get("tool_id", t.get("name", "unknown")),
-                    "description": t.get("description", ""),
-                    "input_schema": t.get("input_schema", t.get("parameters", {})),
+                    "name": name,
+                    "description": desc,
+                    "input_schema": params,
                 })
             body["tools"] = anthropic_tools
 
@@ -193,10 +218,45 @@ class AnthropicAdapter:
             }
             body["tool_choice"] = tc_map.get(tool_choice, {"type": "auto"})
 
+        # G16: 发前钳制 max_tokens 到剩余窗口 (防 input+requested 超窗 400)。
+        # 在 tools 注入后估算 (含 schema 开销), thinking 逻辑之前 —
+        # 显式启用的 thinking 抬高 (budget+1024) 保留原语义。
+        from zall._util.model_registry import get_window_size
+        from zall._util.tokens import clamp_completion_tokens, estimate_body_tokens
+        body["max_tokens"] = clamp_completion_tokens(
+            int(body["max_tokens"]),
+            window=get_window_size(self._model),
+            input_tokens=estimate_body_tokens(body),
+        )
+
+        # Extended thinking (opt-in): 请求 Claude 输出思考过程 (thinking blocks), 像 Claude Code。
+        # 解析已在 _parse_response/_stream 就绪; 仅在启用 (thinking_budget>=1024) + 模型支持时开启。
+        budget = self._thinking_budget
+        if budget >= 1024 and self._supports_thinking():
+            # thinking 要求 max_tokens > budget_tokens
+            if int(body.get("max_tokens", 0)) <= budget:
+                body["max_tokens"] = budget + 1024
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            # 扩展思考与强制 tool_choice (any/none) 冲突 → 回落 auto
+            tc = body.get("tool_choice")
+            if isinstance(tc, dict) and tc.get("type") != "auto":
+                body["tool_choice"] = {"type": "auto"}
+
         if stream:
             body["stream"] = True
 
         return body
+
+    def _supports_thinking(self) -> bool:
+        """粗判模型是否支持 Anthropic 扩展思考 (claude-3-7 / *-4 系列)。"""
+        m = (self._model or "").lower()
+        return (
+            "claude-3-7" in m
+            or "sonnet-4" in m
+            or "opus-4" in m
+            or "haiku-4" in m
+            or "claude-4" in m
+        )
 
     def _call(
         self,
@@ -299,8 +359,8 @@ class AnthropicAdapter:
             yield ("", self._make_error_response(e.status_code, str(e)))
             return
         except GeneratorExit:
-            # Stream interrupted
-            pass
+            # Stream interrupted — must propagate (Ctrl-C cleanup)
+            raise
         except Exception as e:
             yield ("", ModelResponse(
                 content=f"[Anthropic stream error: {e}]",

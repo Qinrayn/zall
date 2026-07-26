@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from zall.cli.commands import (
-    cmd_undo, cmd_checkpoint, cmd_revert, cmd_commit, cmd_web,
+    cmd_undo, cmd_checkpoint, cmd_revert, cmd_commit,
 )
 from zall.core.model import Message
 from zall.core.verifiability import EventType
@@ -176,7 +176,8 @@ class TestCommit:
 
     def test_clean_repo(self, tmp_path: Path) -> None:
         """Counterexample: git 仓库但无changeprompt when."""
-        import os, subprocess
+        import os
+        import subprocess
         old = os.getcwd()
         try:
             os.chdir(str(tmp_path))
@@ -192,7 +193,8 @@ class TestCommit:
 
     def test_commit_with_message(self, tmp_path: Path, monkeypatch) -> None:
         """Happy path: 有change时可commit."""
-        import os, subprocess
+        import os
+        import subprocess
         old = os.getcwd()
         try:
             os.chdir(str(tmp_path))
@@ -219,20 +221,12 @@ class TestCommit:
 
 
 class TestWeb:
-    def test_no_url(self) -> None:
-        """Counterexample: 无 URL 时显示用法."""
-        buf = io.StringIO()
-        r = cmd_web("", buf, None, {})
-        assert r == "handled"
-        assert "usage: /web" in buf.getvalue()
+    """/web 已删除 (与 agent 的 web_fetch 工具重复)。"""
 
-    def test_invalid_url(self) -> None:
-        """Counterexample: URL 不可达时prompterror."""
-        buf = io.StringIO()
-        r = cmd_web("http://invalid.example.com/test", buf, None, {})
-        assert r == "handled"
-        # 即使networkfail也does not crash溃
-        assert "usage" not in buf.getvalue().lower()
+    def test_web_deleted(self) -> None:
+        from zall.cli.commands import get_known_commands
+        # 反例: 删除后 /web 不在命令注册表
+        assert "/web" not in get_known_commands()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -241,18 +235,7 @@ class TestWeb:
 
 
 class TestWebWithMock:
-    def test_web_with_fetch_result(self, monkeypatch) -> None:
-        """Happy path: WebFetchTool returns结果时显示."""
-        from zall.tools.web_fetch import WebFetchTool
-        from zall.core.tool import ToolResult
-
-        def fake_execute(self, args):
-            return ToolResult(
-                success=True, output="Hello World",
-                artifacts={"title": "Test Page", "chars": 11},
-            )
-        monkeypatch.setattr(WebFetchTool, "execute", fake_execute)
-        buf = io.StringIO()
-        r = cmd_web("https://example.com", buf, None, {})
-        assert r == "handled"
-        assert "Hello World" in buf.getvalue()
+    def test_web_with_fetch_result(self) -> None:
+        # WebFetchTool mock 测试已随 /web 命令删除; web_fetch 工具测试见 test_web_fetch_invariants.py。
+        from zall.cli.commands import get_known_commands
+        assert "/web" not in get_known_commands()

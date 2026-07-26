@@ -1,0 +1,5 @@
+# Reproducible artifacts (regenerate via: python science_campaign.py --n-max 50000)
+# Kept out of git; they are deterministic outputs verified by provenance hashes.
+results/
+__pycache__/
+*.pyc

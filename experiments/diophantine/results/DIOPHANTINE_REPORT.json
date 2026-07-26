@@ -1,0 +1,149 @@
+{
+  "title": "Diophantine m-tuples: machine-checked family certifier (Proof Gate)",
+  "honesty": "Polynomial D(1)-quadruples are all regular (Dujella-Fuchs). Certifying Euler's family validates known mathematics; the search re-derives regular families (independent exact corroboration), NOT a new theorem.",
+  "euler_quadruple_family": {
+    "entries": {
+      "a": [
+        0,
+        1
+      ],
+      "b": [
+        2,
+        1
+      ],
+      "c": [
+        4,
+        4
+      ],
+      "d": [
+        12,
+        44,
+        48,
+        16
+      ]
+    },
+    "n": 1,
+    "all_pairs_square": true,
+    "tier": "proven",
+    "pairs": [
+      {
+        "pair": "a*b+1",
+        "product_poly": [
+          1,
+          2,
+          1
+        ],
+        "tier": "proven",
+        "sqrt": [
+          1,
+          1
+        ]
+      },
+      {
+        "pair": "a*c+1",
+        "product_poly": [
+          1,
+          4,
+          4
+        ],
+        "tier": "proven",
+        "sqrt": [
+          1,
+          2
+        ]
+      },
+      {
+        "pair": "a*d+1",
+        "product_poly": [
+          1,
+          12,
+          44,
+          48,
+          16
+        ],
+        "tier": "proven",
+        "sqrt": [
+          1,
+          6,
+          4
+        ]
+      },
+      {
+        "pair": "b*c+1",
+        "product_poly": [
+          9,
+          12,
+          4
+        ],
+        "tier": "proven",
+        "sqrt": [
+          3,
+          2
+        ]
+      },
+      {
+        "pair": "b*d+1",
+        "product_poly": [
+          25,
+          100,
+          140,
+          80,
+          16
+        ],
+        "tier": "proven",
+        "sqrt": [
+          5,
+          10,
+          4
+        ]
+      },
+      {
+        "pair": "c*d+1",
+        "product_poly": [
+          49,
+          224,
+          368,
+          256,
+          64
+        ],
+        "tier": "proven",
+        "sqrt": [
+          7,
+          16,
+          8
+        ]
+      }
+    ]
+  },
+  "linear_triple_search": {
+    "coef_max": 6,
+    "n": 1,
+    "certified_families": [
+      {
+        "entries": [
+          [
+            0,
+            1
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            4,
+            4
+          ]
+        ]
+      }
+    ],
+    "count": 1
+  },
+  "provenance": {
+    "protocol_hash": "sha256:93646af43aea89eeb9cb2bc8beab6430faf6cd36512c937fecd810c0db6f5290",
+    "data_hash": "sha256:6a04da09f345e168bc080cf4542a9aaf499ec2bec05b69f4e52435a7f4616c74",
+    "analysis_code_hash": "sha256:bdb4d633bbc7f24f128e3b02bab94aad80eab42a2911838dba539b38baf0cd20",
+    "environment_hash": "sha256:632a79ec8f64a999c24e680f8fced3b04399f4a711073742e185b3dc8c4c2d7f",
+    "timeline_anchor": "anchor_ack_1784910913763_1",
+    "chain_verified": true
+  }
+}

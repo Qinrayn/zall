@@ -53,7 +53,7 @@ class CwdMeta:
             try:
                 r = subprocess.run(
                     ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                    capture_output=True, text=True, timeout=3,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
                 )
                 return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -63,7 +63,7 @@ class CwdMeta:
             try:
                 r = subprocess.run(
                     ["git", "config", "--get", "remote.origin.url"],
-                    capture_output=True, text=True, timeout=3,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
                 )
                 return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -111,7 +111,7 @@ def _validate_runtime_cmd(cmd: str) -> bool:
     try:
         r = subprocess.run(
             [cmd, "--version"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         return r.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -490,12 +490,21 @@ class PromptBuilder:
         env_lines.append(f"  platform: {sys.platform}")
         env_lines.extend(_detect_runtime_tools())
         if sys.platform == "win32":
-            env_lines.append(
-                "  NOTE: You are on Windows. The bash tool executes via PowerShell, so you can "
-                "use bash-compatible syntax: `mkdir -p a/b/c`, single-quoted strings, `&&`, `|`, "
-                "`echo`, `cat`, `ls` (as aliases). PowerShell cmdlets also work. "
-                "Use the python/python-path shown above to run scripts."
-            )
+            from zall.tools.bash import _detect_shell, _is_powershell
+            _shell = _detect_shell()
+            if _is_powershell(_shell):
+                env_lines.append(
+                    "  NOTE: You are on Windows. The bash tool executes via PowerShell, so you can "
+                    "use bash-compatible syntax: `mkdir -p a/b/c`, single-quoted strings, `&&`, `|`, "
+                    "`echo`, `cat`, `ls` (as aliases). PowerShell cmdlets also work. "
+                    "Use the python/python-path shown above to run scripts."
+                )
+            else:
+                env_lines.append(
+                    "  NOTE: You are on Windows. The bash tool executes via Git Bash, providing full "
+                    "bash-compatible syntax: `mkdir -p a/b/c`, pipes, redirects, and standard Unix "
+                    "commands. Use the python/python-path shown above to run scripts."
+                )
         env_lines.append(
             "  You share context across turns in this REPL. Use tools to inspect "
             "the environment; do not guess paths."
@@ -582,6 +591,23 @@ class PromptBuilder:
                 self._parts.append("\n" + learned_memo)
         except Exception:
             pass  # Memory loading failure does not block
+        return self
+
+    def add_experience_recall(self) -> PromptBuilder:
+        """PARADIGM Step 1: 召回过往**已验证**技能 (跨会话复利)。
+
+        从 ExperienceStore 按当前任务 (context.user_raw) 的关键词相关性召回
+        相关技能, 注入 prompt — 同类任务第 2 次 (新会话) 能用上上次的经验。
+        IPR-0: 任何失败静默降级, 不阻塞。
+        """
+        try:
+            from zall.core.experience_store import get_experience_store
+            task = getattr(self._context, "user_raw", "") or ""
+            memo = get_experience_store().build_recall_context(task)
+            if memo:
+                self._parts.append("\n" + memo)
+        except Exception:
+            pass  # 经验召回失败不影响主流程
         return self
 
     def add_lsp_diagnostics(
@@ -681,7 +707,7 @@ _SYSTEM_PROMPT_CACHE: dict[str, tuple[str, str]] = {}
 
 def _prompt_cache_key(
     context: Context, mcp_tools: tuple[MCPTool, ...], plan_mode: bool,
-    enable_repo_map: bool, skills: list[Any] | None,
+    enable_repo_map: bool, skills: list[Any] | None, lean: bool = False,
 ) -> str:
     """构造缓存 key。"""
     parts = [
@@ -690,6 +716,9 @@ def _prompt_cache_key(
         str(enable_repo_map),
         str(mcp_tools),
         str([s.name for s in skills]) if skills else '',
+        # PARADIGM Step 1: recall 依赖当前任务, 故 key 含 user_raw (防同 cwd 不同任务用错缓存)
+        (getattr(context, 'user_raw', '') or '')[:200],
+        str(lean),  # PARADIGM Step 0: lean 与 full 缓存分开
     ]
     return "|".join(parts)
 
@@ -700,6 +729,7 @@ def build_system_prompt(
     skills: list[Any] | None = None,
     lsp_manager: Any | None = None,
     codegraph: Any | None = None,
+    lean: bool = False,
 ) -> str:
     """Build the system prompt: base rules + runtime env + project memory + repo map.
 
@@ -717,22 +747,28 @@ def build_system_prompt(
     O9: 缓存结果 (参数不变时复用), 避免 REPL 每轮都重建 system prompt。
     """
     global _SYSTEM_PROMPT_CACHE
-    cache_key = _prompt_cache_key(context, mcp_tools, plan_mode, enable_repo_map, skills)
+    cache_key = _prompt_cache_key(context, mcp_tools, plan_mode, enable_repo_map, skills, lean)
     cached = _SYSTEM_PROMPT_CACHE.get(cache_key)
     if cached is not None:
         return cached[0]
 
-    result = (PromptBuilder(context)
-              .add_env()
-              .add_plan_mode(plan_mode)
-              .add_project_memory()
-              .add_repo_map(enable=enable_repo_map)
-              .add_mcp_tools(mcp_tools)
-              .add_skills(skills)
-              .add_session_memory()
-              .add_lsp_diagnostics(lsp_manager)
-              .add_codegraph_context(codegraph)
-              .build())
+    if lean:
+        # PARADIGM Step 0 (Bitter Lesson): 极简系统提示 — 仅 base + env,
+        # 跳过 repo_map/项目记忆/MCP列表/skills/session记忆/lsp/codegraph 重型段, 省 token。
+        result = PromptBuilder(context).add_env().build()
+    else:
+        result = (PromptBuilder(context)
+                  .add_env()
+                  .add_plan_mode(plan_mode)
+                  .add_project_memory()
+                  .add_repo_map(enable=enable_repo_map)
+                  .add_mcp_tools(mcp_tools)
+                  .add_skills(skills)
+                  .add_session_memory()
+                  .add_experience_recall()
+                  .add_lsp_diagnostics(lsp_manager)
+                  .add_codegraph_context(codegraph)
+                  .build())
 
     # O9: 缓存, 上限 8 条防内存泄漏
     _SYSTEM_PROMPT_CACHE[cache_key] = (result, "")

@@ -57,14 +57,14 @@ class OllamaAdapter:
         self._client = None
         try:
             import ollama
-            self._client = ollama.Client(host=self._host)
+            self._client = ollama.Client(host=self._host, timeout=self._timeout)
         except ImportError:
             pass  # ollama SDK not available; will fail on _call with clear message
 
     def close(self) -> None:
         """Close the persistent Ollama client (if it has a close method)."""
         if hasattr(self._client, "close"):
-            self._client.close()  # type: ignore[no-untyped-call]
+            self._client.close()
 
     @property
     def model_name(self) -> str:
@@ -136,7 +136,7 @@ class OllamaAdapter:
                     finish_reason = chunk.get("done_reason", "stop")
                     break
         except GeneratorExit:
-            pass
+            return
         except ollama.ResponseError as e:
             yield ("", self._make_error_response(e.status_code, str(e)))
             return
@@ -211,15 +211,24 @@ class OllamaAdapter:
         # ToolChoice.AUTO: 不设 (Ollama default行为)
 
         # Convert tool schemas to Ollama format
+        # v0.5.0 (B2 fix): zall tool schema uses OpenAI format:
+        #   {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+        # But also supports legacy format: {"tool_id": "...", "description": "...", "input_schema": {...}}
+        # Must handle both.
         if tools:
             ollama_tools = []
             for t in tools:
+                # Try nested "function" dict first (OpenAI format), fallback to top-level
+                func = t.get("function", t)
+                name = func.get("name") or t.get("tool_id") or "unknown"
+                desc = func.get("description") or t.get("description") or ""
+                params = func.get("parameters") or t.get("input_schema") or t.get("parameters") or {}
                 ollama_tools.append({
                     "type": "function",
                     "function": {
-                        "name": t.get("tool_id", t.get("name", "unknown")),
-                        "description": t.get("description", ""),
-                        "parameters": t.get("input_schema", t.get("parameters", {})),
+                        "name": name,
+                        "description": desc,
+                        "parameters": params,
                     },
                 })
             body["tools"] = ollama_tools

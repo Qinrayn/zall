@@ -48,12 +48,39 @@ def get_current_version() -> str:
         return "0.0.0"
 
 
+def _is_dev_install() -> bool:
+    """检测是否为开发/本地安装 (非 PyPI 正式分发)。
+
+    安全关键 (2026-07-26): PyPI 上存在**同名陌生包** `zall`。本地私有
+    项目 (未发布) 若跑 `pip install --upgrade zall` 会被第三方包顶掉
+    import 名 — 依赖混淆式自毁。判定为 dev 安装时禁用更新检查与升级。
+
+    dev 判定 (任一命中, 未知情况保守归 dev):
+      - 未经 pip 安装 (直接源码运行, PackageNotFoundError)
+      - editable 安装 (pip install -e)
+      - 本地路径安装 (direct_url.json 的 file:// 来源)
+    """
+    try:
+        from importlib import metadata
+        dist = metadata.distribution("zall")
+        direct = dist.read_text("direct_url.json")
+        if direct:
+            info = json.loads(direct)
+            url = str(info.get("url", ""))
+            if url.startswith("file://") or info.get("dir_info", {}).get("editable"):
+                return True
+        return False
+    except Exception:
+        # PackageNotFoundError (源码运行) 或元数据异常 → 保守视为 dev
+        return True
+
+
 def _get_installed_version_pip() -> str:
     """通过 pip show 获取已安装version (备用)。"""
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "show", "zall"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         if result.returncode == 0:
             for line in result.stdout.split("\n"):
@@ -152,6 +179,9 @@ def check_for_update(*, force: bool = False) -> dict[str, Any]:
     if current == "0.0.0":
         # 开发pattern (未通过 pip 安装), skipcheck
         return {"has_update": False, "current": current, "latest": None, "checked_at": 0}
+    if _is_dev_install():
+        # 依赖混淆防护: dev/本地安装不提示更新 (PyPI 同名包非本项目)
+        return {"has_update": False, "current": current, "latest": None, "checked_at": 0}
 
     cache = _load_cache()
     now = time.time()
@@ -194,12 +224,19 @@ def perform_update(out: Any = None) -> bool:
     Returns: True 表示升级成功
     """
     stream = out or sys.stderr
+    if _is_dev_install():
+        # 依赖混淆防护: 绝不在 dev/本地安装上跑 pip upgrade —
+        # PyPI 的 `zall` 是同名陌生包, 升级会顶掉本地项目
+        stream.write("  update disabled: local/dev install detected "
+                     "(PyPI 'zall' is not this project)\n")
+        stream.flush()
+        return False
     stream.write("  upgrading zall...\n")
     stream.flush()
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade", "zall"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
         )
         if result.returncode == 0:
             new_version = get_current_version_pip()

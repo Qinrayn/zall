@@ -14,14 +14,16 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from zall.cli.environment import build_system_prompt as _build_system_prompt_context
-from zall.core.context import Context
-from zall.core.goal import TerminationState
-from zall.core.loop_events import RunEgress
-from zall.mcp.tool import MCPTool
 from zall._util.win32 import ensure_utf8_stdio as _ensure_utf8_stdio, set_console_title as _set_console_title
+
+# B-启动提速: 重型核心依赖仅作类型注解 (from __future__ import annotations 下不求值),
+# 运行时用到处再懒加载 — 让 --version/--help/--init 不拖整个 core 链 (~0.4s)。
+if TYPE_CHECKING:
+    from zall.core.context import Context
+    from zall.core.loop_events import RunEgress
+    from zall.mcp.tool import MCPTool
 
 
 # ── System prompt (delegated to environment.py) ──
@@ -29,6 +31,7 @@ from zall._util.win32 import ensure_utf8_stdio as _ensure_utf8_stdio, set_consol
 
 def _build_system_prompt(context: Context, mcp_tools: tuple[MCPTool, ...] = ()) -> str:
     """Build the system prompt. Delegates to environment.py."""
+    from zall.cli.environment import build_system_prompt as _build_system_prompt_context
     return _build_system_prompt_context(context, mcp_tools=mcp_tools)
 
 
@@ -45,6 +48,7 @@ def run(
     stream: bool = True,
     verbose: bool = False,
     out: Any = None,
+    strict: bool = False,
 ) -> RunEgress:
     """Wire up AgentLoop and execute (thin wiring layer, delegates to orchestrator.py)."""
     from zall.cli.orchestrator import run as _orchestrator_run
@@ -58,6 +62,7 @@ def run(
         stream=stream,
         verbose=verbose,
         out=out,
+        strict=strict,
     )
 
 
@@ -67,26 +72,69 @@ def run(
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="zall",
-        description="zall — model-agnostic, falsifiable, reproducible coding agent",
+        description="zall - model-agnostic, falsifiable, reproducible coding agent",
+        epilog=(
+            "run modes:\n"
+            "  zall              interactive UI (inline TUI; type while the model runs) [default]\n"
+            "  zall '<task>'     one-shot: run the task once and exit (scriptable, has exit code)\n"
+            "  zall --no-tui     plain REPL (no Textual; for SSH / dumb terminals / pipes)\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("task", nargs="*", help="the task to perform (empty → enter REPL)")
-    p.add_argument("--model", default=None, help="model name (overrides config)")
+    p.add_argument("task", nargs="*",
+                   help="task to run once and exit (non-interactive); omit to start the interactive UI")
+    # v1.4: 所有选项提供短标志 (学 kimi/opencode: 不必每次输 --)
+    p.add_argument("--model", "-m", default=None, help="model name (overrides config)")
     p.add_argument("--yes", "-y", action="store_true",
                    help="auto-accept greylist actions (NEVER overrides blacklist)")
     p.add_argument("--judge", choices=["none", "system"], default="none",
                    help="judge mode: none=undecidable(default), system=run pytest")
-    p.add_argument("--json", action="store_true",
+    p.add_argument("--json", "-j", action="store_true",
                    help="output events as NDJSON")
     p.add_argument("--no-stream", action="store_true",
                    help="disable token streaming")
-    p.add_argument("--max-steps", type=int, default=None, help="max steps")
+    p.add_argument("--max-steps", "-n", type=int, default=None, help="max steps")
     p.add_argument("--init", action="store_true",
                    help="initialize zall project config (.zall/) in current directory")
-    p.add_argument("--verbose", action="store_true",
+    p.add_argument("--verbose", "-v", action="store_true",
                    help="show full tool output (default: compact summary)")
+    p.add_argument("--strict", "-S", action="store_true",
+                   help="strict mode: enable full confirm/downgrade gates")
     p.add_argument("--version", "-V", action="store_true",
                    help="show version and exit")
+    # 交互界面: 默认 inline TUI; --no-tui 强制纯同步 REPL (SSH / dumb 终端 / 管道)
+    p.add_argument("--no-tui", dest="tui_mode", action="store_false", default=None,
+                   help="plain synchronous REPL (no Textual; for SSH / dumb terminals / pipes)")
+    # 会话续接 (kimi -C/-r parity)
+    p.add_argument("--continue", "-C", dest="continue_", action="store_true",
+                   help="continue the most recent session in this directory")
+    p.add_argument("--resume", "-r", dest="resume", nargs="?", const="", default=None,
+                   help="resume a session by ID; without ID opens an interactive picker")
     return p
+
+
+def _resolve_resume_target(args: argparse.Namespace) -> str | None:
+    """解析 --continue/--resume 的目标会话 id (无 → None)。-r 无 id → 启动期选择器。"""
+    from zall.cli.session import _get_cached_sessions
+    if getattr(args, "continue_", False):
+        entries = _get_cached_sessions()
+        return entries[0][0].name if entries else None
+    resume = getattr(args, "resume", None)
+    if resume is None:
+        return None
+    if resume:  # 显式 id
+        return resume
+    entries = _get_cached_sessions()  # -r 无 id → 交互式选择器
+    if not entries:
+        print("  (no sessions to resume)", file=sys.stderr)
+        return None
+    from zall.cli.select import select_prompt
+    choices = [
+        (d.name, d.name[:8],
+         f"{data.get('final_state', '?')} \u00b7 {str(data.get('saved_at', ''))[:16]}")
+        for d, data in entries[:9]
+    ]
+    return select_prompt(sys.stderr, "resume session", choices) or None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,21 +157,52 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not task:
+        # 交互界面 (仅两种):
+        #   默认      → Textual inline TUI (停靠输入框 + 边跑边输入, 对齐 Claude/Pi)
+        #   --no-tui  → 纯同步 REPL (SSH / dumb 终端 / 管道)
+        #   textual 缺失 / 终端不支持 → 自动回退同步 REPL
+        resume_session = _resolve_resume_target(args)  # --continue / -r
+        tui_mode = getattr(args, "tui_mode", None)
+        if tui_mode is not False:  # 非 --no-tui: 尝试 inline TUI
+            from zall.cli.config import _onboarding
+            _onboarding(sys.stderr, input)  # 进任何交互界面前先配置 API key (idempotent)
+            rc = 2
+            try:
+                from zall.cli.tui import run_tui
+                rc = run_tui(
+                    model=args.model, yes=args.yes,
+                    verbose=args.verbose, strict=args.strict,
+                    inline=True, resume_session=resume_session,
+                )
+            except ImportError:
+                rc = 2  # textual 未安装 → 回退同步 REPL
+            if rc != 2:
+                return rc
+            # rc == 2: 终端不支持 TUI (dumb/CI/textual 缺失) → 回退同步 REPL
         from zall.cli.repl_ui import repl
         return repl(
             model=args.model, yes=args.yes, judge_mode=args.judge,
             json_mode=args.json, stream=not args.no_stream, verbose=args.verbose,
+            strict=args.strict, resume_session=resume_session,
         )
 
     egress = run(
         task, model=args.model, yes=args.yes, judge_mode=args.judge,
         json_mode=args.json, max_steps=args.max_steps,
         stream=not args.no_stream, verbose=args.verbose,
+        strict=args.strict,
     )
+    from zall.core.goal import TerminationState
     if egress.final_state == TerminationState.MET:
         return 0
     if egress.final_state == TerminationState.NOT_MET:
         return 1
+    # UNDECIDABLE: 区分两种语义 (Bug fix 2026-07-26) —
+    #   未开 judge (--judge none, 默认): UNDECIDABLE 是必然终态, 任务本身
+    #   正常跑完 → 0 (否则 `zall -y "..." && next` 永远断链, 脚本化不可用);
+    #   开了 judge 但裁决不了 / 执行出错 → 2 (诚实的不确定, PR-0)。
+    if args.judge == "none" and not egress.error:
+        return 0
     return 2
 
 

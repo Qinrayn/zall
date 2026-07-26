@@ -63,6 +63,11 @@ class ProjectAnalysisTool:
     @property
     def tool_id(self) -> str:
         return "project_analysis"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=True, tool_scope=ToolScope.Read)
+
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -163,12 +168,12 @@ class ProjectAnalysisTool:
 
         # Summary
         parts.append(f"[Project Analysis: {root.name}]")
-        parts.append("\n  📊 Overview:")
+        parts.append("\n  Overview:")
         parts.append(f"    Total files: {total_files}")
         parts.append(f"    Total lines:  ~{total_lines:,}")
 
         # Language breakdown
-        parts.append("\n  🔤 Languages:")
+        parts.append("\n  Languages:")
         for lang in sorted(lang_counts.keys(), key=lambda x: -lang_counts[x]):
             files = lang_counts[lang]
             lines = lang_lines.get(lang, 0)
@@ -177,7 +182,7 @@ class ProjectAnalysisTool:
 
         # Directory tree
         if dir_structure:
-            parts.append("\n  📁 Structure:")
+            parts.append("\n  Structure:")
             parts.extend(dir_structure[:40])  # Limit output
             if len(dir_structure) > 40:
                 parts.append(f"    ... ({len(dir_structure) - 40} more entries)")
@@ -187,7 +192,7 @@ class ProjectAnalysisTool:
             try:
                 stats = self._cg.get_stats()
                 if stats.get("status") == "indexed":
-                    parts.append("\n  🔍 CodeGraph:")
+                    parts.append("\n  CodeGraph:")
                     parts.append(f"    Symbols: {stats.get('symbol_count', 0)}")
                     parts.append(f"    Files:   {stats.get('file_count', 0)}")
                     parts.append(f"    Errors:  {stats.get('error_count', 0)}")

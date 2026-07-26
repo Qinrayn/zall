@@ -93,7 +93,10 @@ class EventBus:
                 self._listeners[kind] = tuple(h for h in existing if h is not handler)
                 # O1b: 使缓存失效
                 self._resolved.pop(kind, None)
-                if kind != "*":
+                if kind == "*":
+                    # 移除通配符: 所有已缓存的 kind 都包含该 handler, 须全部失效
+                    self._resolved.clear()
+                else:
                     self._resolved.pop("*", None)
 
     def clear(self, kind: str | None = None) -> None:
@@ -104,7 +107,11 @@ class EventBus:
                 self._resolved.clear()
             else:
                 self._listeners.pop(kind, None)
-                self._resolved.pop(kind, None)
+                if kind == "*":
+                    # 清除通配符: 所有缓存都包含通配符 handler, 须全部失效
+                    self._resolved.clear()
+                else:
+                    self._resolved.pop(kind, None)
 
     def emit(self, kind: str, payload: dict[str, Any] | None = None) -> None:
         """broadcastevent给所有订阅者。
@@ -133,7 +140,10 @@ class EventBus:
             try:
                 handler(kind, payload)
             except Exception:
-                pass
+                import logging
+                logging.getLogger("zall.core.events").warning(
+                    "EventBus handler for kind=%s failed", kind, exc_info=True,
+                )
 
     @property
     def listener_count(self) -> int:

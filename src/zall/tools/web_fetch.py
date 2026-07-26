@@ -24,6 +24,7 @@ from __future__ import annotations
 import atexit
 import ipaddress
 import socket
+import threading
 from typing import Any
 from urllib.parse import urlparse
 
@@ -40,22 +41,26 @@ DEFAULT_TIMEOUT = 30.0
 
 # O5: shared httpx.Client for connection pooling across _fetch calls
 _HTTP_CLIENT: httpx.Client | None = None
+_HTTP_CLIENT_LOCK = threading.Lock()
 
 
 def _get_http_client() -> httpx.Client:
-    """Lazily create and return the shared httpx.Client (connection pooling)."""
+    """Lazily create and return the shared httpx.Client (thread-safe, connection pooling)."""
     global _HTTP_CLIENT
-    if _HTTP_CLIENT is None:
-        import httpx
-        _HTTP_CLIENT = httpx.Client(
-            timeout=DEFAULT_TIMEOUT,
-            follow_redirects=False,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; zall/1.0; +https://github.com/zall)"
-                ),
-            },
-        )
+    if _HTTP_CLIENT is not None:
+        return _HTTP_CLIENT
+    with _HTTP_CLIENT_LOCK:
+        if _HTTP_CLIENT is None:
+            import httpx
+            _HTTP_CLIENT = httpx.Client(
+                timeout=DEFAULT_TIMEOUT,
+                follow_redirects=False,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (compatible; zall/1.0; +https://github.com/zall)"
+                    ),
+                },
+            )
     return _HTTP_CLIENT
 
 
@@ -170,6 +175,11 @@ class WebFetchTool:
     @property
     def tool_id(self) -> str:
         return "web_fetch"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=True, tool_scope=ToolScope.Read)
+
 
     @property
     def schema(self) -> dict[str, Any]:

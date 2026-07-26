@@ -20,8 +20,6 @@ from rich.syntax import Syntax
 
 from zall.cli.commands._common import _CATEGORY_CONTEXT, _CATEGORY_TOOLS, slash_command
 from zall.cli.render import _shared_console
-from zall.tools.search import SearchTool
-from zall.tools.web_fetch import WebFetchTool
 
 # Extracted from _legacy.py lines 381-521
 # ──────────────────────────────────────────────────────────────────────
@@ -167,72 +165,7 @@ def cmd_drop(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] 
 
 
 
-# Extracted from _legacy.py lines 1097-1162
-@slash_command("/search", description="search the web", category=_CATEGORY_TOOLS)
-def cmd_search(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
-    if not arg:
-        out.write("  usage: /search <query>\n")
-        out.write("  example: /search python argparse tutorial\n")
-        return "handled"
-
-    out.write(f"  searching: {arg}\n")
-    tool = SearchTool()
-    result = tool.execute({"query": arg, "max_results": 5})
-
-    if not result.success:
-        out.write(f"  \u2717 search failed: {result.output}\n")
-        return "handled"
-
-    artifacts = result.artifacts or {}
-    results_list = artifacts.get("results", [])
-    results_count = artifacts.get("results_count", 0)
-
-    if hasattr(out, "isatty") and out.isatty():
-        c = _shared_console(out)
-        c.print(f"  [cyan]Search:[/] {arg}")
-        c.print(f"  [dim]{results_count} results[/]")
-        c.print()
-        for i, r in enumerate(results_list, 1):
-            title = r.get("title", "(no title)")
-            snippet = r.get("snippet", "")
-            url = r.get("url", "")
-            c.print(f"  [bold]{i}. {title}[/]")
-            if snippet:
-                c.print(f"     {snippet}")
-            c.print(f"     [dim]{url}[/]")
-            c.print()
-    else:
-        out.write(f"  Search results for: {arg}\n")
-        out.write(f"  ({results_count} results)\n")
-        for i, r in enumerate(results_list, 1):
-            out.write(f"  {i}. {r.get('title', '')}\n")
-            out.write(f"     {r.get('url', '')}\n")
-            out.write(f"     {r.get('snippet', '')}\n")
-    return "handled"
-
-
-@slash_command("/web", description="fetch a web page", category=_CATEGORY_TOOLS)
-def cmd_web(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
-    if not arg:
-        out.write("  usage: /web <url>\n")
-        return "handled"
-    tool = WebFetchTool()
-    result = tool.execute({"url": arg, "max_chars": 5000})
-    if not result.success:
-        out.write(f"  {result.output}\n")
-        return "handled"
-    title = (result.artifacts or {}).get("title", "")
-    chars = (result.artifacts or {}).get("chars", 0)
-    if hasattr(out, "isatty") and out.isatty():
-        c = _shared_console(out)
-        if title:
-            c.print(f"  [cyan]Title:[/] {title}")
-        c.print(f"  [dim]{chars} chars[/]")
-        c.print(Panel(result.output[:2000], border_style="dim", padding=(0, 1), expand=False))
-    else:
-        out.write(f"  Web: {arg}\n")
-        out.write(result.output[:2000] + "\n")
-    return "handled"
+# /web /search 已删除: 与 agent 的 web_fetch / web_search 工具重复 (直接叫 agent 去取即可)。
 
 
 
@@ -284,7 +217,7 @@ def cmd_diff(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] 
     try:
         files_out = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         diff_files = [f for f in files_out.stdout.split("\n") if f.strip()]
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -298,7 +231,7 @@ def cmd_diff(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] 
                 try:
                     fd = subprocess.run(
                         ["git", "diff", "HEAD", "--", fname],
-                        capture_output=True, text=True, timeout=10,
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
                     )
                     if fd.stdout.strip():
                         diff_text = fd.stdout

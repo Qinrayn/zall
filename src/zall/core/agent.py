@@ -21,6 +21,41 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict
 
 
+# ---------------------------------------------------------------------------
+# §0  AgentIdentity — 六维本体论 ① Identity (MASTER.md §1.2 + §4.2.1)
+# ---------------------------------------------------------------------------
+
+
+class AgentIdentity(BaseModel):
+    """§4.2.1 Identity — agent 的本体身份 (身份 + 能力声明)。
+
+    六维本体论 ① Identity 维度的运行时投影, 回答"它是谁":
+      - agent_id: 全局唯一身份, 用于多 agent 场景归因/追责 (§1.2 缺①)
+      - capabilities: 能力声明 (可用工具/特殊能力)
+
+    对应 MASTER.md §1.2 (缺 ① 无法归因) + §4.2.1 (Identity Manager)。
+    frozen: Identity 一旦构造不可变 (身份不能中途篡改)。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    agent_id: str
+    name: str = "zall-agent"
+    version: str = ""
+    capabilities: tuple[str, ...] = ()
+
+    @classmethod
+    def default(cls, agent_id: Optional[str] = None) -> "AgentIdentity":
+        """构造默认身份 (未显式提供 Identity 时的兜底, 保证 I-0 六维完整)。"""
+        import uuid as _uuid
+
+        try:
+            from zall import __version__ as _v
+        except Exception:
+            _v = ""
+        return cls(agent_id=agent_id or _uuid.uuid4().hex, version=_v)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # §1  ToolsetPreset — 工具集预设
 # ═══════════════════════════════════════════════════════════════════

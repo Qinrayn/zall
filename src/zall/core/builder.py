@@ -74,6 +74,7 @@ class AgentBuilder:
       - checkpoint_mgr: None
       - allow_downgrade: True
       - plan_mode: False
+      - strict: False
       - compactor: None
       - anchor: None
       - ext_registry: None
@@ -98,10 +99,13 @@ class AgentBuilder:
         self._checkpoint_mgr: Any = None
         self._allow_downgrade: bool = True
         self._plan_mode: bool = False
+        self._strict: bool = False
         self._compactor: Any = None
         self._anchor: Any = None
         self._ext_registry: Any = None
         self._agent_definition: Any = None
+        self._planner: Any = None
+        self._perception_engine: Any = None
 
     # ═══════════════════════════════════════════════════════════════
     # Required fields
@@ -206,6 +210,20 @@ class AgentBuilder:
         self._plan_mode = plan_mode
         return self
 
+    def with_strict(self, strict: bool) -> AgentBuilder:
+        """Enable strict mode (full confirm/downgrade gates).
+
+        When False (default): goals auto-confirm, downgrades auto-skip.
+        When True: full interactive confirm + downgrade gates.
+        """
+        self._strict = strict
+        return self
+
+    def with_planner(self, planner: Any) -> AgentBuilder:
+        """Set the PlanModeTracker instance."""
+        self._planner = planner
+        return self
+
     def with_compactor(self, compactor: Any) -> AgentBuilder:
         """Set the Compactor (e.g., ModelCompactor)."""
         self._compactor = compactor
@@ -219,6 +237,21 @@ class AgentBuilder:
     def with_extensions(self, ext_registry: Any) -> AgentBuilder:
         """Set the ExtensionRegistry."""
         self._ext_registry = ext_registry
+        return self
+
+    def with_perception(self, perception_engine: Any) -> AgentBuilder:
+        """Set the PerceptionEngine (MASTER.md §4.2.3).
+
+        Args:
+            perception_engine: A PerceptionEngine instance.
+
+        The Perception Engine provides:
+          - Multi-sensor observation fusion
+          - World model prediction
+          - Anomaly detection
+          - State estimation with confidence
+        """
+        self._perception_engine = perception_engine
         return self
 
     # ═══════════════════════════════════════════════════════════════
@@ -252,9 +285,12 @@ class AgentBuilder:
             checkpoint_mgr=self._checkpoint_mgr,
             allow_downgrade=self._allow_downgrade,
             plan_mode=self._plan_mode,
+            strict=self._strict,
             compactor=self._compactor,
             anchor=self._anchor,
             ext_registry=self._ext_registry,
+            planner=self._planner,
+            perception_engine=self._perception_engine,
         )
 
         return AgentLoop(

@@ -45,13 +45,45 @@ def _get_sessions_dir() -> Path:
 _SESSIONS_CACHE: dict[str, Any] = {"mtime": 0.0, "entries": []}
 
 
+def reset_sessions_cache() -> None:
+    """v0.5.0: 重置会话缓存, 用于测试隔离。"""
+    _SESSIONS_CACHE["mtime"] = 0.0
+    _SESSIONS_CACHE["entries"] = []
+
+
 # ── Autosave (crash recovery) ──
 
-_REPL_AUTOSAVE = _home_dir() / ".zall" / f".repl_autosave_{os.getpid()}.json"
+_REPL_AUTOSAVE = _home_dir() / ".zall" / ".repl_autosave.json"
+_AUTOSAVE_FRESH_SECONDS = 60
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a PID is still running (cross-platform)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
 
 def _save_repl_state(loop: Any, state: dict[str, Any]) -> None:
-    """Auto-save REPL conversation state for crash recovery."""
+    """Auto-save REPL conversation state for crash recovery.
+
+    E4: Fixed filename (no PID), atomic write via tmp + os.replace,
+    soft lock via PID field in JSON content.
+    """
     try:
         _REPL_AUTOSAVE.parent.mkdir(parents=True, exist_ok=True)
         msgs = loop.messages
@@ -64,6 +96,7 @@ def _save_repl_state(loop: Any, state: dict[str, Any]) -> None:
                     "role": m.role,
                     "content": m.content,
                     "tool_call_id": m.tool_call_id,
+                    "tool_id": getattr(m, "tool_id", None),
                     "tool_calls": [
                         {"id": tc.id, "tool_id": tc.tool_id, "args": dict(tc.args)}
                         for tc in m.tool_calls
@@ -72,11 +105,15 @@ def _save_repl_state(loop: Any, state: dict[str, Any]) -> None:
                 for m in msgs
             ],
             "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "pid": os.getpid(),
         }
-        _REPL_AUTOSAVE.write_text(
+        # Atomic write: write to .tmp then os.replace
+        tmp_path = _REPL_AUTOSAVE.with_suffix(".json.tmp")
+        tmp_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        os.replace(str(tmp_path), str(_REPL_AUTOSAVE))
     except Exception:
         pass
 
@@ -86,12 +123,48 @@ def _clear_repl_autosave() -> None:
     try:
         if _REPL_AUTOSAVE.exists():
             _REPL_AUTOSAVE.unlink()
+        # Clean up any residual .tmp file
+        tmp_path = _REPL_AUTOSAVE.with_suffix(".json.tmp")
+        if tmp_path.exists():
+            tmp_path.unlink()
     except Exception:
         pass
 
 
+def _sweep_legacy_autosaves() -> int:
+    """一次性清扫旧版 PID 命名的 autosave 残留 (.repl_autosave_<pid>.json)。
+
+    E4 前的版本每个进程写一个 PID 命名文件, 崩溃/强杀后无人回收,
+    磁盘垃圾无限累积。仅删 PID 已死的文件 — 若旧版本进程仍在运行,
+    其 autosave 不动 (与 E4 软锁同一保护语义)。返回删除数。
+    """
+    removed = 0
+    try:
+        for f in _REPL_AUTOSAVE.parent.glob(".repl_autosave_*.json"):
+            suffix = f.name[len(".repl_autosave_"):-len(".json")]
+            if not suffix.isdigit():
+                continue
+            if _is_pid_alive(int(suffix)):
+                continue
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return removed
+
+
 def _check_repl_autosave(out: Any, state: dict[str, Any]) -> bool:
-    """Check for crash-recovery session and prompt user to restore."""
+    """Check for crash-recovery session and prompt user to restore.
+
+    E4: Uses fixed filename `.repl_autosave.json`. Reads PID from JSON
+    to determine if the autosave belongs to a currently running process.
+    If the owning process is still alive and different from current, the
+    autosave is left untouched (another zall is running).
+    """
+    _sweep_legacy_autosaves()  # 顺手回收旧版 PID 命名残留 (仅死进程)
     if not _REPL_AUTOSAVE.exists():
         return False
     try:
@@ -104,10 +177,33 @@ def _check_repl_autosave(out: Any, state: dict[str, Any]) -> bool:
     saved_at = data.get("saved_at", "unknown")
     msg_count = len(msgs_raw)
     model_label = data.get("model", "?")
-    if not hasattr(out, "isatty") or not out.isatty():
+    saved_pid = data.get("pid", 0)
+
+    # E4: soft lock — if PID belongs to another alive process, skip
+    if saved_pid and saved_pid != os.getpid() and _is_pid_alive(saved_pid):
+        # Another zall process is running; leave its autosave alone
         return False
+
+    if not hasattr(out, "isatty") or not out.isatty():
+        # Non-TTY: auto-clean old autosaves from dead processes
+        if saved_pid and not _is_pid_alive(saved_pid):
+            _clear_repl_autosave()
+        return False
+    # Build a rich recovery message with count, time, and last message summary
+    last_message = msgs_raw[-1] if msgs_raw else {}
+    last_role = last_message.get("role", "")
+    last_content = last_message.get("content", "")
+    last_summary = ""
+    if last_content:
+        trimmed = last_content[:50]
+        if len(last_content) > 50:
+            trimmed += "..."
+        last_summary = f"  last: [{last_role}] {trimmed}"
+
     out.write(f"  ! previous REPL session saved at {saved_at[:16]} "
               f"({msg_count} messages, model: {model_label})\n")
+    if last_summary:
+        out.write(f"  {last_summary}\n")
     out.flush()
     ask = state.get("_input_fn") or input
     try:
@@ -121,13 +217,14 @@ def _check_repl_autosave(out: Any, state: dict[str, Any]) -> bool:
     msgs = []
     for m in msgs_raw:
         tool_calls = tuple(
-            _ToolCall(id=tc["id"], tool_id=tc["tool_id"], args=tc.get("args", {}))
+            _ToolCall(id=tc.get("id", ""), tool_id=tc.get("tool_id", ""), args=tc.get("args", {}))
             for tc in m.get("tool_calls", [])
         )
         msgs.append(_Msg(
-            role=m["role"],
+            role=m.get("role", "user"),
             content=m.get("content", ""),
             tool_call_id=m.get("tool_call_id"),
+            tool_id=m.get("tool_id") or "",
             tool_calls=tool_calls,
         ))
     state["resume_messages"] = msgs
@@ -161,6 +258,12 @@ def _save_session(run_id: str, loop: Any, egress: Any, anchor: Any = None) -> Pa
 
     events = loop.recorder.events
     with open(timeline_path, "w", encoding="utf-8") as f_tl:
+        # G12: 首行版本头 (无头旧文件视为 legacy, 读取端向后兼容)
+        from zall._util.jsonl import make_metadata
+        f_tl.write(json.dumps(
+            make_metadata(run_id=run_id, saved_at=datetime.now().isoformat(timespec="seconds")),
+            ensure_ascii=False,
+        ) + "\n")
         for ev in events:
             f_tl.write(json.dumps({
                 "event_id": ev.event_id,
@@ -424,6 +527,8 @@ def _tag_session(session_id: str, tag: str, out: Any) -> None:
         tags.append(tag)
     meta["tags"] = tags
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 失效缓存 (修复: 子目录文件变更不改变父目录 mtime, 缓存不会自动失效)
+    _SESSIONS_CACHE.pop("mtime", None)
     out.write(f"  + tagged {target.name[:8]} with '{tag}'\n")
 
 

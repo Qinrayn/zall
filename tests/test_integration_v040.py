@@ -134,11 +134,12 @@ class TestChatStateAgentLoopIntegration:
             user_responder=MockResponder(),
         )
 
-        assert loop.chat_state is None
+        # v0.5.1: ChatState 始终初始化, 不再是惰性创建
+        assert loop.chat_state is not None
+        assert loop.chat_state.message_count == 0
         cs = loop.get_chat_state()
         assert cs is not None
-        assert cs.message_count == 0  # Lazy: starts empty
-        assert loop.chat_state is cs  # Same instance cached
+        assert cs is loop.chat_state  # Same instance
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -414,11 +415,14 @@ class TestFullPipelineIntegration:
 
     def test_sandbox_timeout(self):
         """沙箱超时处理。"""
+        import sys
         limits = ResourceLimits(timeout_seconds=0.05)
         sandbox = ProcessSandbox(limits=limits)
         try:
             sandbox.create_workspace()
-            result = sandbox.execute_command("sleep 10")
+            # 跨平台长命令: Windows 无 sleep, 用 ping 占位 (~10s, 无需 stdin)
+            long_cmd = "ping -n 11 127.0.0.1" if sys.platform == "win32" else "sleep 10"
+            result = sandbox.execute_command(long_cmd)
             assert not result.success
             assert "Timeout" in result.error
         finally:

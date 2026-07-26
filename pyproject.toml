@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zall"
-version = "0.4.10"
+version = "0.1.0"
 description = "A falsifiable, reproducible coding agent CLI — model-agnostic, chain-hashed, replayable. Features LSP integration, CodeGraph code intelligence, sandbox isolation, plugin system, and MCP support."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "zall contributors" }]
+authors = [{ name = "qinrayn (Yuhan Zhang)" }]
 keywords = [
     "coding-agent", "cli", "ai", "llm", "developer-tools", "reproducible",
     "code-assistant", "agent", "automation", "lsp", "code-intelligence",
     "sandbox", "mcp", "plugin-system", "chain-hash",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
@@ -52,8 +52,11 @@ bs4 = [
 images = [
     "pillow>=10.0",
 ]
+tui = [
+    "textual>=8.0.0",
+]
 all = [
-    "zall[dev,bs4,images]",
+    "zall[dev,bs4,images,tui]",
 ]
 
 [project.urls]
@@ -84,7 +87,15 @@ target-version = "py310"
 
 [tool.ruff.lint]
 # CI 将加自定义规则禁止 core/ 出现 openai / anthropic 等 import (IPR-3)
-# 见 scripts/check_ipr3.py (实现层下轮)
+# 见 scripts/check_ipr3.py
+ignore = [
+    "E702",  # multiple-statements-on-one-line-semicolon: TUI 键处理 `event.stop(); event.prevent_default()` 惯用
+    "E741",  # ambiguous-variable-name: 少量 l/I/O 命名, 不阻断
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]  # __init__ 常做 re-export, 不删"未用" import
+"tests/**" = ["F401", "F841", "E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -96,8 +107,42 @@ omit = ["*/tests/*", "*/__pycache__/*"]
 
 [tool.coverage.report]
 exclude_lines = [
-    "pragma: no cover",
-    "if __name__ == .__main__.:",
-    "raise AssertionError",
-    "raise NotImplementedError",
-]
+	    "pragma: no cover",
+	    "if __name__ == .__main__.:",
+	    "raise AssertionError",
+	    "raise NotImplementedError",
+	]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Plugin entry-point discovery (MASTER.md §12.1 + §8 生态建设)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Third-party packages can register tools and extensions for automatic discovery
+# by declaring entry-points in their pyproject.toml:
+#
+#   [project.entry-points."zall.tools"]
+#   my_tool = "my_package.module:tool_factory"
+#
+#   [project.entry-points."zall.extensions"]
+#   my_extension = "my_package.module:extension_factory"
+#
+# Entry-point semantics:
+#   - group "zall.tools":     factory() -> Tool instance (zall.core.tool.Tool protocol)
+#   - group "zall.extensions": factory() -> Extension instance (zall.core.extension.Extension protocol)
+#   - factory is a callable (typically a class constructor or function).
+#   - factory receives no arguments; parameterless construction only.
+#
+# Discovery:
+#   - zall scans these groups at startup via importlib.metadata.entry_points().
+#   - Each factory is called in isolation: a failing factory is logged and skipped.
+#   - Plugin tools are auto-assigned ToolNamespace.PLUGIN unless they declare otherwise.
+#   - Built-in tools with the same tool_id take priority over plugin tools.
+#   - Plugin tool versions are recorded in the registry (reuses §12 versioning).
+#
+# Local plugins (non-entry-point):
+#   - A manifest.toml file in a plugin directory can declare tools manually.
+#   - See src/zall/core/plugin_loader.py for manifest format.
+#
+# Note: zall itself does NOT register its built-in tools via entry-points.
+# Built-in tools are registered directly in cli/orchestrator.py. The entry-point
+# mechanism is exclusively for third-party plugins.

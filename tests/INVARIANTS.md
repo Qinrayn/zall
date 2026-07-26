@@ -46,6 +46,8 @@ tests/test_<primitive>.py  ←→  DESIGN.md §<节号>
 | `tests/test_checkpoint_invariants.py` | §4.2 工具扩展 | 8 条反例:无文件无标签返回 None / 恢复不存在 ID 返回 False / 删除不存在 ID 返回 False / 删除后恢复返回 False / clear_all 后恢复返回 False / clear_all 返回计数 / 恢复不影响其他文件; 10 条正向:保存返回 entry / 保存恢复文件一致 / 多文件恢复 / 链式 prev_id / chain_ids 排序 / get_latest / get_checkpoint / meta.json 写入 / list 排序 / label+tool_id+run_id 存入 | §1.2 ② Authority (工具手段) |
 | `tests/test_refiner_invariants.py` | §3.3 (minimal) + §3.5 + §5.2 | 16 条:R1 added_intent 必空(两层) / R2 questions≤budget / confidence 范围 / 分类命中 BUGFIX·FEATURE·REFACTOR / UNKNOWN 分类 + 0.5 置信 / system 强制 BUGFIX+0.9 / §5.2 驱动 exposed(令→(),user→None) / 切分可回指 / fallback 不崩 / 不 Decline | §1.2 ① Goal |
 | `tests/test_project_memory_invariants.py` | §9.4 (项目记忆注入) | 5 条:AGENTS.md 存在则读 / 缺失返回 None / 读取异常静默(反例) / system prompt 注入 PROJECT MEMORY / 缺失不注入仍正常 | §1.2 ② Authority (项目级) |
+| `tests/test_select_typeahead_guard.py` | §4.5 (确认门交互面, I-SELECT-GRACE) | 6 条:宽限期内决策键必吞 / 宽限期后必可达(反例孪生) / 导航与Esc永不吞 / opened_at未记录不吞 / open_select接线 / 宽限常量人道范围 | §1.2 ② Authority (确认门) |
+| `tests/test_sensitive_file_invariants.py` | §4.2 工具层 (I-SENSITIVE) | 9 条:敏感模式命中(.env/私钥/credentials/trust_anchor_key) / 豁免与普通文件不误拦(反例孪生) / read_file拒读且内容不外泄 / @引用跳过注入 / Windows反斜杠 | §1.2 ② Authority (信息泄漏面) |
 
 ## 元规则验定测试
 

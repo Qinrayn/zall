@@ -34,7 +34,7 @@ def cmd_git(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] |
     try:
         check = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         if check.returncode != 0:
             out.write("  (not a git repository)\n")
@@ -45,7 +45,7 @@ def cmd_git(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] |
             if msg:
                 result = subprocess.run(
                     ["git", "commit", "-m", msg],
-                    capture_output=True, text=True, timeout=30,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
                 )
             else:
                 out.write("  usage: /git commit <message>  (or use /git add first)\n")
@@ -57,22 +57,22 @@ def cmd_git(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] |
                 return "handled"
             result = subprocess.run(
                 ["git", "log", "--oneline", f"-{n}"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             )
         elif subcmd in ("push", "pull", "fetch"):
             result = subprocess.run(
                 ["git", subcmd, *parts[1:]],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
             )
         elif subcmd == "diff":
             result = subprocess.run(
                 ["git", "diff", *parts[1:]],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             )
         else:
             result = subprocess.run(
                 ["git", *parts],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
 
         stdout = result.stdout.strip()
@@ -97,7 +97,7 @@ def cmd_commit(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
     try:
         check = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         if check.returncode != 0:
             out.write("  (not a git repository)\n")
@@ -117,19 +117,19 @@ def cmd_commit(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
         # 显示未暂存和已暂存的change
         files_result = subprocess.run(
             ["git", "diff", "--name-only"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         modified_files = [f.strip() for f in files_result.stdout.split("\n") if f.strip()]
 
         staged_result = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         staged_files = [f.strip() for f in staged_result.stdout.split("\n") if f.strip()]
 
         branch_result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         branch = branch_result.stdout.strip()
 
@@ -159,7 +159,7 @@ def cmd_commit(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
         if modified_files:
             diff_result = subprocess.run(
                 ["git", "diff", "--stat"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             )
             if diff_result.stdout.strip():
                 for line in diff_result.stdout.strip().split("\n"):
@@ -192,7 +192,7 @@ def cmd_commit(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
 
         result = subprocess.run(
             ["git", "commit", "-m", message],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
         if result.returncode == 0:
             out.write(f"  \u2713 committed: {message}\n")

@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import random
 import time
-from typing import Any, Callable, cast, ClassVar
+from typing import Any, Callable, ClassVar
 
 import httpx
 
@@ -37,12 +37,21 @@ _ERROR_MAP: dict[int, str] = {
         "  - Edit ~/.zall/config.toml and add your key under [auth]\n"
         "  - Run /doctor to check current config"
     ),
+    402: (
+        "API quota exhausted (HTTP 402 payment required). "
+        "Top up your account balance, or switch provider/model with /model."
+    ),
     403: (
         "API access denied. Your API key may not have permission "
         "for this model or endpoint. Try /model to switch models."
     ),
     404: (
         "API endpoint not found. Check your api_base setting."
+    ),
+    422: (
+        "API request was rejected as invalid (HTTP 422). "
+        "This usually means a tool schema issue — check your tool definitions "
+        "and try again. Run /doctor for config diagnostics."
     ),
     429: (
         "API rate limit exceeded. Wait a moment and try again, "
@@ -61,6 +70,172 @@ _ERROR_MAP: dict[int, str] = {
         "Try again later."
     ),
 }
+
+
+# 重试原因标签 (单一真相源, REPL/TUI 共用) — "retrying (n/N) in Xs: <原因>"
+RETRY_REASON: dict[str, str] = {
+    "transport": "network error",
+    "api": "rate limited / server error",
+    "semantic": "empty response",
+    # 流式零产出失败 → 降级非流式重试 (core/loop.py 发出, 2026-07-26)
+    "stream_fallback": "stream failed, retrying non-streaming",
+}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# RetryBudget — 区分预算的重试策略 (v0.5.0, Grok Build 启发)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class RetryBudget:
+    """区分预算的 API 重试策略。
+
+    三种预算独立计数:
+      - transport: 网络层错误 (连接断开、超时、协议错误)
+      - api:       API 层错误 (429 限流、5xx 服务器错误)
+      - semantic:  语义层错误 (模型空回复、截断、无效内容)
+
+    Grok Build 启发: 不同错误类型需要不同的重试策略。
+    网络抖动可以多试几次, 但持续 429 需要更长的退避。
+    """
+
+    __test__ = False
+
+    # 错误分类常量 (v0.6.0: 借鉴 Claude Code 错误分类)
+    RATE_LIMIT = "rate_limit"        # 429
+    SERVER_ERROR = "server_error"    # 500/502/503/529
+    TIMEOUT = "timeout"              # 连接超时/读取超时
+    AUTH_FAILED = "auth_failed"      # 401/403 — 不重试
+    INVALID_REQUEST = "invalid_request"  # 400/422 — 不重试
+    CONTENT_FILTER = "content_filter"    # 内容被截断 — 不重试
+    TRANSPORT = "transport"          # 网络层错误
+    SEMANTIC = "semantic"            # 语义层错误
+
+    def __init__(
+        self,
+        max_transport: int = 3,
+        max_api: int = 5,
+        max_semantic: int = 2,
+        base_delay: float = 1.0,
+        max_delay: float = 60.0,
+        jitter: float = 0.25,
+        # v0.6.0: 用户可见的重试回调 (借鉴 Claude Code)
+        on_retry: Callable[[str, float, int, int], None] | None = None,
+    ) -> None:
+        self.max_transport = max_transport
+        self.max_api = max_api
+        self.max_semantic = max_semantic
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+        self.jitter = jitter
+        self._counts: dict[str, int] = {"transport": 0, "api": 0, "semantic": 0}
+        self._on_retry = on_retry
+
+    @property
+    def total(self) -> int:
+        return sum(self._counts.values())
+
+    def reset(self) -> None:
+        """重置所有预算计数器 (会话开始/恢复时调用)。"""
+        self._counts = {"transport": 0, "api": 0, "semantic": 0}
+
+    def set_callback(self, on_retry: Callable[[str, float, int, int], None] | None) -> None:
+        """运行期挂接重试通知回调 (构造后由 CLI/loop 注入)。"""
+        self._on_retry = on_retry
+
+    def can_retry(self, category: str = "transport") -> bool:
+        """检查指定类别是否还有重试预算。"""
+        max_budget = {
+            "transport": self.max_transport,
+            "api": self.max_api,
+            "semantic": self.max_semantic,
+        }
+        return self._counts.get(category, 0) < max_budget.get(category, 0)
+
+    def record_attempt(
+        self, category: str = "transport", delay_override: float | None = None,
+    ) -> float:
+        """记录一次重试, 返回退避延迟秒数 (带 jitter)。
+
+        delay_override: 服务器指定的延迟 (如 Retry-After 头), 优先于指数退避。
+        无论是否 override, 预算计数都必须消耗 (2026-07-26 bugfix: 此前
+        Retry-After 路径跳过 record_attempt 导致持续 429 时无限重试)。
+        """
+        self._counts[category] = self._counts.get(category, 0) + 1
+        if delay_override is not None:
+            delay = min(max(delay_override, 0.0), self.max_delay)
+        else:
+            delay = min(
+                self.base_delay * (2 ** (self._counts[category] - 1)),
+                self.max_delay,
+            )
+            if self.jitter > 0:
+                delay *= 1.0 + random.uniform(-self.jitter, self.jitter)
+        self._notify_retry(category, delay, self._counts[category],
+                           self.max_transport if category == "transport" else
+                           self.max_api if category == "api" else
+                           self.max_semantic)
+        return delay
+
+    def get_summary(self) -> dict[str, int]:
+        """返回当前预算使用情况摘要。"""
+        return dict(self._counts)
+
+    @staticmethod
+    def classify_error(error: Exception) -> str:
+        """将异常分类为 transport / api / semantic。"""
+        if isinstance(error, (httpx.ConnectError, httpx.TimeoutException,
+                              httpx.RemoteProtocolError, httpx.ReadError,
+                              ConnectionError, TimeoutError, OSError)):
+            return "transport"
+        # httpx.HTTPStatusError wraps non-2xx responses
+        if isinstance(error, httpx.HTTPStatusError):
+            status = error.response.status_code if hasattr(error, 'response') else 0
+            if status in (429,) or (500 <= status < 600):
+                return "api"
+            return "api"  # 400-level errors are also "api" but not retryable
+        return "semantic"
+
+    @staticmethod
+    def is_retryable_http(status_code: int) -> bool:
+        """判断 HTTP 状态码是否可重试。"""
+        return status_code == 429 or (500 <= status_code < 600)
+
+    @staticmethod
+    def classify_http_status(status_code: int) -> str:
+        """将 HTTP 状态码分类为错误类型 (v0.6.0)。
+
+        Returns:
+            One of RATE_LIMIT, SERVER_ERROR, AUTH_FAILED, INVALID_REQUEST, TRANSPORT
+        """
+        if status_code == 429:
+            return RetryBudget.RATE_LIMIT
+        if status_code == 529:
+            return RetryBudget.SERVER_ERROR
+        if 500 <= status_code < 600:
+            return RetryBudget.SERVER_ERROR
+        if status_code in (401, 403):
+            return RetryBudget.AUTH_FAILED
+        if status_code in (400, 402, 422):
+            return RetryBudget.INVALID_REQUEST
+        return RetryBudget.TRANSPORT
+
+    @staticmethod
+    def is_retryable_status(status_code: int) -> bool:
+        """判断 HTTP 状态码是否可重试 (v0.6.0)。
+
+        不重试: 401/403/400/422 (客户端错误, 重试也无效)
+        重试: 429, 5xx, 529 (临时错误)
+        """
+        return status_code == 429 or (500 <= status_code < 600)
+
+    def _notify_retry(self, category: str, delay: float, attempt: int, max_retries: int) -> None:
+        """通知重试回调 (如果设置了)。"""
+        if self._on_retry is not None:
+            try:
+                self._on_retry(category, delay, attempt, max_retries)
+            except Exception:
+                pass
 
 
 class BaseAdapter:
@@ -97,6 +272,8 @@ class BaseAdapter:
         self._api_base = api_base or cfg["api_base"]
         self._model = model or cfg["model"]
         self._timeout = timeout
+        # 重试可见性: CLI/loop 经 set_retry_callback 注入, 静默退避期间通知 UI。
+        self._retry_callback: Callable[[str, float, int, int], None] | None = None
         # Warn on non-HTTPS API base URLs.
         if self._api_base and not self._api_base.startswith("https://"):
             import sys
@@ -107,6 +284,26 @@ class BaseAdapter:
     def close(self) -> None:
         """Close the HTTP client. Subclasses should override."""
         pass
+
+    def set_retry_callback(
+        self, cb: Callable[[str, float, int, int], None] | None,
+    ) -> None:
+        """注入重试通知回调 (category, delay, attempt, max_attempts)。
+
+        loop 层 duck-typed 调用 (core 不 import adapters, IPR-3)。
+        """
+        self._retry_callback = cb
+
+    def _dispatch_retry(
+        self, category: str, delay: float, attempt: int, max_attempts: int,
+    ) -> None:
+        """转发重试通知; 回调异常吞掉, 不阻断重试路径。"""
+        cb = self._retry_callback
+        if cb is not None:
+            try:
+                cb(category, delay, attempt, max_attempts)
+            except Exception:
+                pass
 
     @property
     def model_name(self) -> str:
@@ -188,7 +385,7 @@ class BaseAdapter:
                         delay = self._backoff_delay(attempt, base_delay, max_delay)
                         time.sleep(delay)
                         continue
-                return cast(ModelResponse, resp)
+                return resp
             except _NON_RETRYABLE_EXC:
                 raise
             except _RETRYABLE_EXC as e:

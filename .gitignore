@@ -35,11 +35,12 @@ _v*.txt
 .ruff_cache/
 
 # Project-local zall config (may contain API keys / rules)
-.zall/config.toml
-.zall/trust_anchor_key
-.zall/trust_anchor.log
-.zall/trust_anchor_init.txt
-.zall/checkpoints/
+**/.zall/config.toml
+**/.zall/trust_anchor_key
+**/.zall/trust_anchor.log
+**/.zall/trust_anchor_init.txt
+**/.zall/checkpoints/
+**/.zall/checkpoints.json
 
 # Agent platform traces (never commit these)
 .zcode/
@@ -52,6 +53,9 @@ Desktop.ini
 
 # Misc project sprawl
 nul
+tmp/
+.e2e_playground/
+minecraft_*.txt
 
 # Agent artifacts
 .codebuddy/

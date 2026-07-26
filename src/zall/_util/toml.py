@@ -28,8 +28,13 @@ def load_toml_simple(path: Path) -> dict[str, Any]:
             import tomllib
             with open(path, "rb") as f:
                 return dict(tomllib.load(f))
-        except (ImportError, Exception):
+        except ImportError:
             pass
+        except Exception:
+            # Strict parsers reject duplicate tables/keys (TOML spec). zall's
+            # config writers can produce recoverable-but-invalid files, so fall
+            # back to the lenient parser (last-value-wins) instead of crashing.
+            return _load_toml_fallback(path)
 
     # Try tomli backport (optional dependency for Python 3.10)
     try:
@@ -38,6 +43,9 @@ def load_toml_simple(path: Path) -> dict[str, Any]:
             return dict(tomli.load(f))
     except ImportError:
         pass
+    except Exception:
+        # Same rationale as tomllib above: recover from duplicate sections.
+        return _load_toml_fallback(path)
 
     # Fallback: custom minimal parser
     return _load_toml_fallback(path)

@@ -109,7 +109,10 @@ def _default_api_base_for_model(model_name: str) -> str:
 
 
 def _onboarding(out: Any, input_fn: Any) -> None:
-    """First-run onboarding: interactively configure when API key is missing."""
+    """First-run onboarding: guided 3-field setup (base URL + model id + key).
+
+    任意 OpenAI-兼容来源只需这 3 项即可接入。均可回车跳过 (保留当前值)。
+    """
     status = _config_status()
     if status["ready"]:
         return
@@ -124,20 +127,33 @@ def _onboarding(out: Any, input_fn: Any) -> None:
     # Infer provider from api_base to show the correct key URL
     provider = _infer_provider_from_api_base(status.get("api_base", ""))
     key_url = _PROVIDER_GET_KEY_URL.get(provider, _PROVIDER_GET_KEY_URL["agnes"])
-    out.write("  Welcome to zall — no API key configured yet.\n")
-    out.write(f"  Get one at {key_url} (or set ZALL_API_KEY)\n")
+    cur_base = (status.get("api_base") or "").strip()
+    cur_model = (status.get("model") or "").strip()
+    out.write("  Welcome to zall — connect a model (works with any OpenAI-compatible API).\n")
+    out.write("  Three things: base URL, model id, API key. Press Enter to keep the default.\n")
+    out.write(f"  (Get a key at {key_url}, or set ZALL_API_KEY.)\n")
     try:
-        key = (input_fn("  API key (Enter to skip): ") or "").strip()
+        base = (input_fn(f"  1) base URL [{cur_base or 'default'}]: ") or "").strip()
+        model = (input_fn(f"  2) model id [{cur_model or 'default'}]: ") or "").strip()
+        key = (input_fn("  3) API key (Enter to skip): ") or "").strip()
     except (EOFError, KeyboardInterrupt):
         out.write("\n")
         return
+    # 持久化顺序: model (写 name + 推断 base) → base (用户显式 base 覆盖) → key
+    if model:
+        _persist_model_to_config(model)
+        out.write(f"  \u2713 model = {model}\n")
+    if base:
+        from zall.cli.commands.config import _persist_config_key
+        _persist_config_key("api_base", base)
+        out.write(f"  \u2713 api_base = {base}\n")
     if key:
         from zall.safety.config import save_api_key
 
         save_api_key(key)
-        out.write("  ✓ saved to ~/.zall/config.toml\n")
-    else:
-        out.write("  (skipped — edit ~/.zall/config.toml later, or run /doctor)\n")
+        out.write("  \u2713 API key saved to ~/.zall/config.toml\n")
+    elif not (model or base):
+        out.write("  (skipped — edit ~/.zall/config.toml later, or run /config guide)\n")
     out.flush()
 
 
@@ -173,9 +189,21 @@ def _detect_provider(model_name: str | None = None) -> str:
     if provider in registry:
         return provider
 
+    # 显式 [model].provider (通用接入: 强制 provider/adapter, 绕过前缀推断。
+    # 使任意来源只需 provider + api_base + api_key 即可接入, 不依赖模型名前缀匹配。)
+    try:
+        from zall.safety.config import load_config as _lc
+        cp = (_lc().get("provider") or "").strip().lower()
+        if cp in registry:
+            return cp
+    except Exception:
+        pass
+
     mn = model_name or ""
     if mn:
-        p = get_model_provider(mn)
+        # A1 fix: 传入合并表 (含自定义 provider), 使自定义 provider 的 prefix
+        # 也参与推断。否则 "deepseek-v4-flash" 会因内置 deepseek prefix 错路由。
+        p = get_model_provider(mn, registry=registry)
         if p in registry:
             return p
 
@@ -192,8 +220,27 @@ def _build_adapter(provider: str, model: str | None = None, timeout: float | Non
 
     provider 未知时 fallback 到 OpenAICompatAdapter。
     timeout: API 请求超时秒数, None 表示使用 adapter 默认值 (120s)。
+    F2b: 从 load_config() 取采样参数 (temperature/max_tokens/top_p/reasoning_effort)
+    经 **extra_kwargs 传给 adapter (该通路本就存在, 此前没人填)。调用方显式传入的
+    extra_kwargs 优先于 config 中的值。
+
+    G15 (E2E 设施):
+      - model "scripted:<path.json>" 或 env ZALL_SCRIPT → ScriptedAdapter 回放 (不走网络);
+      - env ZALL_CHAOS=<0..1> → ChaosAdapter 包装构建结果 (故障注入,
+        ZALL_CHAOS_MODES=429,500,transport 可选)。
     """
     import importlib
+
+    # G15: 脚本回放 provider (确定性回归/无 key 冒烟), 优先于一切
+    script_path = None
+    if model and model.startswith("scripted:"):
+        script_path = model.split(":", 1)[1]
+    elif os.environ.get("ZALL_SCRIPT"):
+        script_path = os.environ["ZALL_SCRIPT"]
+    if script_path:
+        from zall.adapters.scripted import ScriptedAdapter
+        return ScriptedAdapter.from_file(script_path)
+
     registry = _get_provider_registry()
     entry = registry.get(provider)
     if entry is not None:
@@ -202,15 +249,42 @@ def _build_adapter(provider: str, model: str | None = None, timeout: float | Non
         module = importlib.import_module(module_path)
         cls = getattr(module, class_name)
     else:
-        # 未知 provider → fallback 到 OpenAI compatible
+        # 未知 provider -> fallback 到 OpenAI compatible
         from zall.adapters import OpenAICompatAdapter
         cls = OpenAICompatAdapter
     kwargs: dict[str, Any] = {"model": model}
     if timeout is not None:
         kwargs["timeout"] = timeout
-    # Merge any extra kwargs passed by caller (e.g., temperature, max_tokens)
+    # F2b: 从 config 注入采样参数 (调用方显式传入的 extra_kwargs 优先)
+    try:
+        from zall.safety.config import load_config as _load_cfg
+        cfg = _load_cfg()
+        for k in ("temperature", "max_tokens", "top_p", "reasoning_effort"):
+            if k not in extra_kwargs:  # 调用方显式值优先
+                v = cfg.get(k)
+                if v is not None:
+                    extra_kwargs[k] = v
+    except Exception:
+        pass  # config 读取失败不阻塞 adapter 构建
     kwargs.update(extra_kwargs)
-    return cls(**kwargs)
+    adapter = cls(**kwargs)
+
+    # G15: 故障注入包装 (错误恢复链路的真实会话检验)
+    chaos_p = os.environ.get("ZALL_CHAOS", "").strip()
+    if chaos_p:
+        try:
+            from zall.adapters.chaos import ChaosAdapter
+            modes_env = os.environ.get("ZALL_CHAOS_MODES", "").strip()
+            chaos_kwargs: dict[str, Any] = {"probability": float(chaos_p)}
+            if modes_env:
+                chaos_kwargs["modes"] = tuple(
+                    m.strip() for m in modes_env.split(",") if m.strip()
+                )
+            adapter = ChaosAdapter(adapter, **chaos_kwargs)
+        except (ValueError, TypeError) as e:
+            import sys
+            print(f"  ⚠ ZALL_CHAOS 无效, 已忽略: {e}", file=sys.stderr)
+    return adapter
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -230,10 +304,19 @@ def _merge_custom_providers() -> dict[str, Any]:
         api_base = "https://my-llm.example.com/v1"
         key_url = "https://my-llm.example.com/keys"
         model_prefixes = ["my-", "myllm-"]
+        # A2: 可选元数据 (provider 一等化) - 不填则用默认 window/价格
+        window_size = 128000
+        price_in = 0.14            # $/1M input tokens
+        price_out = 0.28           # $/1M output tokens
 
     返回合并后的完整注册表 dict (不修改原 _PROVIDER_REGISTRY)。
+
+    A2: 同时把 window_size/price_in/price_out 注入 model_registry 的运行时覆盖表,
+    使自定义模型的 get_window_size()/get_price() 返回真实值而非默认 32000/$3+$15。
     """
     registry = dict(_PROVIDER_REGISTRY)  # 浅拷贝内置注册表
+    custom_windows: dict[str, int] = {}
+    custom_prices: dict[str, tuple[float, float]] = {}
     try:
         config_path = Path.home() / ".zall" / "config.toml"
         if not config_path.exists():
@@ -259,8 +342,40 @@ def _merge_custom_providers() -> dict[str, Any]:
             key_url = entry.get("key_url", "")
             prefixes = tuple(entry.get("model_prefixes", [name]))
             registry[name] = (display, env_key, api_base, key_url, prefixes, import_path)
+            # A2: 收集可选 window/price 元数据, 按 prefix 注册 (前缀匹配)
+            ws = entry.get("window_size")
+            if isinstance(ws, (int, float)) and ws > 0:
+                for pfx in prefixes:
+                    custom_windows[pfx] = int(ws)
+            pi = entry.get("price_in")
+            po = entry.get("price_out")
+            if isinstance(pi, (int, float)) and isinstance(po, (int, float)):
+                for pfx in prefixes:
+                    custom_prices[pfx] = (float(pi), float(po))
     except Exception:
         pass  # 自定义 provider 加载失败不应阻塞启动
+    # A2: 注入运行时覆盖表 (即使 custom_* 为空也清空旧值, 保持与配置一致)
+    try:
+        from zall._util.model_registry import set_custom_prices, set_custom_windows
+        set_custom_windows(custom_windows)
+        set_custom_prices(custom_prices)
+        # F2c: [model].window_size 覆盖 -- 按当前模型名精确匹配注入,
+        # 使 compactor 的 get_window_size(model_name) 返回用户设置的真实值
+        # (而非硬编码 _KNOWN_WINDOWS 的猜测或默认 32000)。
+        try:
+            from zall.safety.config import load_config as _load_cfg
+            _cfg = _load_cfg()
+            _ws = _cfg.get("window_size")
+            _mdl = (_cfg.get("model") or "").strip()
+            if isinstance(_ws, (int, float)) and _ws > 0 and _mdl:
+                # 精确匹配当前模型名 (优先级最高, 因 get_window_size 先查 _CUSTOM_WINDOWS)
+                _merged = dict(custom_windows)
+                _merged[_mdl] = int(_ws)
+                set_custom_windows(_merged)
+        except Exception:
+            pass
+    except Exception:
+        pass
     return registry
 
 
@@ -324,70 +439,44 @@ def _persist_model_to_config(model_name: str) -> None:
             new_lines: list[str] = []
             has_auth = has_model = False
 
-            # B10 fix: preserve原段内所有 key, 只更新特定 key
-            def _update_key_in_lines(lines: list[str], key: str, value: str) -> list[str]:
-                """在 section 行list中更新指定 key 的值, preserve注释和sequential。"""
-                updated = []
-                found = False
-                for line in lines:
-                    stripped = line.strip()
-                    # skip注释行和空行
-                    if stripped.startswith("#") or not stripped:
-                        updated.append(line)
-                        continue
-                    # check是否是 key = value 行 (ignore行内注释)
-                    eq_pos = stripped.find("=")
-                    if eq_pos > 0:
-                        k = stripped[:eq_pos].strip()
-                        if k == key:
-                            # preserve行内注释
-                            comment = ""
-                            # 找到值结束后的 # 注释
-                            # handle引号
-                            in_quote = False
-                            for ci in range(eq_pos + 1, len(stripped)):
-                                ch = stripped[ci]
-                                if ch in ('"', "'"):
-                                    in_quote = not in_quote
-                                elif ch == "#" and not in_quote:
-                                    comment = stripped[ci:]
-                                    break
-                            indent = line[:len(line) - len(line.lstrip())]
-                            updated.append(f'{indent}{key} = "{value}"{comment}\n')
-                            found = True
-                            continue
-                    updated.append(line)
-                if not found:
-                    # key 不存在, 追加到 section 末尾
-                    indent = " " * 4
-                    updated.append(f'{indent}{key} = "{value}"\n')
-                return updated
+            def _emit_kv(k: str, v: Any) -> str:
+                """渲染一行 key = value (字符串加引号, 其他原样)。"""
+                if isinstance(v, str):
+                    return f'{k} = "{v}"\n'
+                return f'{k} = {v}\n'
 
+            # 修复根因: 旧版 _update_key_in_lines(lines, ...) 收到含段头的 lines 并
+            # 重新吐出段头, 而调用方又单独 append 了段头 → 每次 /model -p 都使
+            # [auth]/[model] 段头翻倍 (model 还因两次调用而三倍) → config 不断膨胀。
+            # 现改为规范化输出: 段头只写一次, 已知 key 从解析后的 data (last-wins)
+            # 取, 额外 key (如 timeout) 保留; 同名段去重 (自愈历史损坏)。
             for name, lines in sections:
                 # B4: 只匹配顶级段名 (auth/model), 不匹配 nested.table
                 _top = name.split(".")[0].strip() if "." in name else name.strip()
                 if _top == "auth":
-                    # Fix: 只在 api_key 非空时写入 [auth] 段，防止空 key 覆盖有效 key
+                    if has_auth:
+                        continue  # 去重: 丢弃多余的 [auth] 段 (自愈历史损坏)
+                    new_lines.append("[auth]\n")
+                    # 只在 api_key 非空时写入, 防空 key 覆盖有效 key
                     if api_key:
-                        new_lines.append("[auth]\n")
-                        new_lines.extend(_update_key_in_lines(lines, "api_key", api_key))
-                        has_auth = True
-                    else:
-                        # 保留原 [auth] 段内容不变（不更新 api_key）
-                        new_lines.append("[auth]\n")
-                        for _line in lines:
-                            if _line.strip() and not _line.strip().startswith("#") and "=" in _line.strip():
-                                k = _line.strip().split("=", 1)[0].strip()
-                                if k == "api_key":
-                                    continue  # 跳过空 api_key 行
-                            new_lines.append(_line)
-                        has_auth = True
+                        new_lines.append(_emit_kv("api_key", api_key))
+                    # 保留 [auth] 内其他 key (非 api_key)
+                    for k, v in auth.items():
+                        if k != "api_key":
+                            new_lines.append(_emit_kv(k, v))
+                    has_auth = True
                 elif _top == "model":
+                    if has_model:
+                        continue  # 去重: 丢弃多余的 [model] 段 (自愈历史损坏)
                     model_cfg = data.get("model", {})
                     api_base = model_cfg.get("api_base", default_api_base)
                     new_lines.append("[model]\n")
-                    new_lines.extend(_update_key_in_lines(lines, "name", model_name))
-                    new_lines.extend(_update_key_in_lines(lines, "api_base", api_base))
+                    new_lines.append(_emit_kv("name", model_name))
+                    new_lines.append(_emit_kv("api_base", api_base))
+                    # 保留 [model] 内其他 key (如 timeout / max_tokens)
+                    for k, v in model_cfg.items():
+                        if k not in ("name", "api_base"):
+                            new_lines.append(_emit_kv(k, v))
                     has_model = True
                 else:
                     new_lines.extend(lines)

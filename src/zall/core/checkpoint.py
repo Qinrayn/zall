@@ -27,19 +27,17 @@ from typing import Any
 
 import hashlib
 import json
-import logging
 import shutil
 import time
 from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
+from zall._util.logging import get_zall_logger as _get_zall_logger
 
-# B10: 去重log — 同条message只打一次
-_log_spoken: set[str] = set()
-def _log_once(msg: str) -> None:
-    if msg not in _log_spoken:
-        _log_spoken.add(msg)
-        logger.warning("checkpoint: %s", msg)
+_log = _get_zall_logger(__name__)
+
+# B10: 去重 log — 同条 message 只打一次。
+# M3 fix: 原为模块级全局 set (跨实例共享且只增不减 → 内存泄漏), 已改为
+# CheckpointManager 实例级 (见 __init__ 的 self._log_spoken + self._log_once)。
 
 
 # .zall 下 checkpoint 存储directory名
@@ -85,6 +83,16 @@ class CheckpointManager:
             self._cp_dir = None
         self._loaded: list[CheckpointEntry] = []
         self._dirty = False
+        # Bug4 fix: 独立 load 标志 (原 `if self._loaded` 在空列表时 falsy → 每次重扫盘)
+        self._load_done: bool = False
+        # M3 fix: 去重日志集合改为实例级 (避免模块级全局 set 跨实例共享 + 泄漏)
+        self._log_spoken: set[str] = set()
+
+    def _log_once(self, msg: str) -> None:
+        """同一条告警只打一次 (实例级去重, 避免刷屏, 且不跨实例泄漏)。"""
+        if msg not in self._log_spoken:
+            self._log_spoken.add(msg)
+            _log.warning("checkpoint: %s", msg)
 
     # ── 公共property ──────────────────────────────────────────────
 
@@ -153,7 +161,7 @@ class CheckpointManager:
             except OSError as _cp_err:
                 # B10: 记录不可复制的file, 不静默skip
                 # 但 checkpoint 链不受损: skip单个file不影响其他file
-                _log_once(f"checkpoint: cannot copy {rel}: {_cp_err}")
+                self._log_once(f"checkpoint: cannot copy {rel}: {_cp_err}")
 
         if not file_entries:
             # 没有实际file被trace → 不要创建空的 checkpoint directory
@@ -219,7 +227,13 @@ class CheckpointManager:
         if not files_dir.is_dir():
             return False
 
-        return self._restore_tree(files_dir, self._project_root)
+        # Bug3 fix: _restore_tree 在 OSError 时会 raise 以触发回滚; 此处兑现 bool 契约
+        # (磁盘满/只读时 /revert 返回 False 而非崩溃)。
+        try:
+            return self._restore_tree(files_dir, self._project_root)
+        except OSError as e:
+            self._log_once(f"restore failed (rolled back): {e}")
+            return False
 
     def list_checkpoints(self) -> list[CheckpointEntry]:
         """列出所有 checkpoint (从最新到最旧)。"""
@@ -311,12 +325,13 @@ class CheckpointManager:
 
     def _ensure_loaded(self) -> None:
         """从diskload已存在的 checkpoint。"""
-        if self._loaded and not self._dirty:
+        if self._load_done and not self._dirty:
             return
 
         if self._cp_dir is None:
             self._loaded = []
             self._dirty = False
+            self._load_done = True
             return
 
         if not self._cp_dir.is_dir():
@@ -350,6 +365,7 @@ class CheckpointManager:
         entries.sort(key=lambda e: e.ts)
         self._loaded = entries
         self._dirty = False
+        self._load_done = True
 
     def _restore_tree(self, src_dir: Path, dst_dir: Path) -> bool:
             """recursiveresumefile树, 含error回滚 (M9)。
@@ -402,7 +418,9 @@ class _BackupRestore:
                     target = self._dst_dir / rel
                     shutil.copy2(bf, target)
                 except OSError:
-                    pass
+                    _log.warning(
+                        "checkpoint rollback: failed to restore %s", bf, exc_info=True,
+                    )
         # Cleanup backup dir regardless
         shutil.rmtree(self._backup_dir, ignore_errors=True)
         # Implicit None return — does not suppress exception (same as False)

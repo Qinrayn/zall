@@ -208,6 +208,59 @@ def _make_loop(
 # ──────────────────────────────────────────────────────────────────────────
 
 
+class TestNoDualWriteInconsistency:
+    """C3 fix: _messages 影子属性必须与 ChatState 同步 (MASTER.md §7.3.2).
+
+    旧 bug: 若 _config.chat_state 预填消息, loop.__init__ 设 _messages=[] 导致
+    _messages 与 _chat_state 不同步。C3 修复: 初始化时从 ChatState 同步。
+    """
+
+    def test_prepopulated_chat_state_syncs_messages(self) -> None:
+        """用预填消息的 ChatState 构造 loop, _messages 必须立即同步。
+
+        Counterexample: 旧代码 _messages=[] 而 _chat_state 有消息 -> 不一致。
+        """
+        from zall.core.chat_state import ChatState
+
+        pre_msgs = [Message.user("prior turn")]
+        chat_state = ChatState(messages=pre_msgs)
+        adapter = _ScriptedAdapter([
+            ModelResponse(content="done", stop_reason=StopReason.STOP),
+        ])
+        loop = AgentLoop(
+            model=adapter,
+            tools=ToolRegistry(tools=(_EchoTool(),)),
+            rules=RuleSet(),
+            goal=_make_goal(),
+            context=_make_context(),
+            user_responder=_AutoAcceptResponder(),
+            config=AgentConfig(judge=_AlwaysMetJudge(), chat_state=chat_state),
+        )
+        # 构造后 (未 run), _messages 必须等于 chat_state 的消息。
+        assert loop._messages == loop._chat_state.messages
+        assert len(loop._messages) == len(pre_msgs)
+
+    def test_messages_property_equals_chat_state(self) -> None:
+        """公开 messages 属性与 _chat_state.messages 一致 (单一真相源)."""
+        from zall.core.chat_state import ChatState
+
+        chat_state = ChatState(messages=[Message.user("hello")])
+        adapter = _ScriptedAdapter([
+            ModelResponse(content="done", stop_reason=StopReason.STOP),
+        ])
+        loop = AgentLoop(
+            model=adapter,
+            tools=ToolRegistry(tools=(_EchoTool(),)),
+            rules=RuleSet(),
+            goal=_make_goal(),
+            context=_make_context(),
+            user_responder=_AutoAcceptResponder(),
+            config=AgentConfig(judge=_AlwaysMetJudge(), chat_state=chat_state),
+        )
+        assert loop.messages == loop._chat_state.messages
+        assert loop.messages == loop._messages
+
+
 class TestHelloWorld:
     """S0 capped at: fake adapter + fake tool 跑通完整循环."""
 

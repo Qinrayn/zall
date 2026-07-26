@@ -50,7 +50,7 @@ class GitProtect:
                 ["git", *args],
                 cwd=self._cwd,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=10,
             )
             return result.stdout.strip()
@@ -68,7 +68,7 @@ class GitProtect:
                 ["git", "diff", "--quiet"],
                 cwd=self._cwd,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=10,
             )
             # git diff --quiet: returncode 0 = 无改动, 1 = 有改动
@@ -167,7 +167,7 @@ class GitProtect:
                 ["git", "stash", "apply", ref],
                 cwd=self._cwd,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=10,
             )
             success = apply_result.returncode == 0

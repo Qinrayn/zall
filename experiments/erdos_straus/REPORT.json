@@ -1,0 +1,30 @@
+{
+  "n_max": 50000,
+  "H1": {
+    "id": "8b5e9ffc-0753-488d-95f6-63da145521d4",
+    "status": "confirmed",
+    "supported_within_interval": true
+  },
+  "H2": {
+    "id": "d84854dd-4666-40dc-8183-1d3f3091470b",
+    "status": "falsified",
+    "counterexamples_found": 0
+  },
+  "search_summary": {
+    "n_max": 50000,
+    "total": 49999,
+    "found": 49999,
+    "verified": 49999,
+    "none_within_bounds": 0,
+    "elapsed_sec": 145.97,
+    "support_rate": 1.0
+  },
+  "provenance": {
+    "protocol_hash": "sha256:33ad87904607640eec86b942c73001c3d8f400f8e18eaee3ce146dcc9e41144b",
+    "data_hash": "sha256:70dcb50696faae29a9e4381435c47e080ad51dfe40a224c044c4d8886c71bd86",
+    "analysis_code_hash": "sha256:0924a259dfb1834fcd06d4b4589b3253808dcc3327bb0b0a98dacb20735a3f47",
+    "environment_hash": "sha256:6a20c69e6adf23661882d4d2c41f70fed610314e5a2ab1bde49ec6b191f04830",
+    "timeline_anchor": "anchor_ack_1784821974105_1"
+  },
+  "experiment_id": "58f6da17-43a3-4034-bb66-a95a3c4d544c"
+}

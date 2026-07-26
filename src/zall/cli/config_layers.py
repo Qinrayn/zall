@@ -77,12 +77,18 @@ def _load_toml_safe(path: Path | None) -> dict[str, Any]:
 
 
 def _env_to_config() -> dict[str, Any]:
-    """Build config dict from ZALL_* environment variables."""
+    """Build config dict from ZALL_* environment variables.
+
+    与 safety.config.load_config 的 env 层对齐 (含采样参数/window_size/provider),
+    防止两套加载器对同一 env 给出不同结果 (漂移债)。
+    """
     config: dict[str, Any] = {}
     if os.environ.get("ZALL_API_KEY"):
         config["api_key"] = os.environ["ZALL_API_KEY"]
     if os.environ.get("ZALL_MODEL"):
         config["model"] = os.environ["ZALL_MODEL"]
+    if os.environ.get("ZALL_PROVIDER"):
+        config["provider"] = os.environ["ZALL_PROVIDER"].strip()
     if os.environ.get("ZALL_API_BASE"):
         config["api_base"] = os.environ["ZALL_API_BASE"]
     if os.environ.get("ZALL_TIMEOUT"):
@@ -90,6 +96,22 @@ def _env_to_config() -> dict[str, Any]:
             config["timeout"] = float(os.environ["ZALL_TIMEOUT"])
         except (ValueError, TypeError):
             pass
+    for env_key, key, cast in (
+        ("ZALL_TEMPERATURE", "temperature", float),
+        ("ZALL_MAX_TOKENS", "max_tokens", int),
+        ("ZALL_TOP_P", "top_p", float),
+        ("ZALL_WINDOW_SIZE", "window_size", int),
+    ):
+        raw = os.environ.get(env_key)
+        if raw:
+            try:
+                config[key] = cast(raw)
+            except (ValueError, TypeError):
+                pass
+    if os.environ.get("ZALL_REASONING_EFFORT"):
+        val = os.environ["ZALL_REASONING_EFFORT"].strip().lower()
+        if val:
+            config["reasoning_effort"] = val
     return config
 
 
@@ -97,15 +119,34 @@ def _config_to_dict(cfg_path: Path) -> dict[str, Any]:
     """Convert TOML config sections to flat dict.
 
     Handles the [auth], [model] section structure used by zall config files.
+    与 safety.config.load_config 的段解析对齐: [model] 内可直写
+    provider/api_key (一处配齐), 采样参数 + window_size 也参与层叠。
     """
     data = _load_toml_safe(cfg_path)
     result: dict[str, Any] = {}
     if "auth" in data:
         result["api_key"] = data["auth"].get("api_key", "")
     if "model" in data:
-        result["model"] = data["model"].get("name", "")
-        result["api_base"] = data["model"].get("api_base", "")
-        result["timeout"] = float(data["model"].get("timeout", 120.0))
+        m = data["model"]
+        result["model"] = m.get("name", "")
+        result["api_base"] = m.get("api_base", "")
+        result["timeout"] = float(m.get("timeout", 120.0))
+        if m.get("provider"):
+            result["provider"] = str(m["provider"]).strip()
+        if m.get("api_key"):
+            result["api_key"] = m["api_key"]
+        for key, cast in (("temperature", float), ("top_p", float),
+                          ("max_tokens", int), ("window_size", int)):
+            v = m.get(key)
+            if v is not None:
+                try:
+                    result[key] = cast(v)
+                except (ValueError, TypeError):
+                    pass
+        if m.get("reasoning_effort") is not None:
+            val = str(m["reasoning_effort"]).strip().lower()
+            if val:
+                result["reasoning_effort"] = val
     if "providers" in data:
         result["providers"] = data["providers"]
     return result
@@ -157,6 +198,10 @@ DEFAULTS: dict[str, Any] = {
     "api_base": "https://apihub.agnes-ai.com/v1",
     "timeout": 120.0,
     "providers": [],
+    "provider": "",
+    # F2a 对齐 safety.config: 采样参数 + 窗口 (None = 未设置, 不发送给 API)
+    "temperature": None, "max_tokens": None, "top_p": None,
+    "reasoning_effort": None, "window_size": None,
     "k_overrides": {},
 }
 

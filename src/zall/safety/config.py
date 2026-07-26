@@ -54,8 +54,34 @@ def load_config() -> dict[str, Any]:
     """Load config from files + env, return merged dict."""
     config: dict[str, Any] = {
         "api_key": "", "model": DEFAULT_MODEL, "api_base": DEFAULT_API_BASE,
-        "timeout": 120.0, "providers": [],
+        "timeout": 120.0, "providers": [], "provider": "",
+        # F2a: 采样参数 + 上下文窗口 (None = 未设置, 不发送给 API)
+        "temperature": None, "max_tokens": None, "top_p": None,
+        "reasoning_effort": None, "window_size": None,
     }
+
+    def _merge_model_section(data: dict[str, Any]) -> None:
+        """从 [model] 段读取采样参数 + window_size (F2a)."""
+        if "model" not in data:
+            return
+        m = data["model"]
+        for k in ("temperature", "max_tokens", "top_p",
+                  "reasoning_effort", "window_size"):
+            v = m.get(k)
+            if v is not None:
+                # 数值字段转类型; 字符串字段原样
+                if k in ("temperature", "top_p"):
+                    try:
+                        config[k] = float(v)
+                    except (ValueError, TypeError):
+                        pass
+                elif k in ("max_tokens", "window_size"):
+                    try:
+                        config[k] = int(v)
+                    except (ValueError, TypeError):
+                        pass
+                else:  # reasoning_effort
+                    config[k] = str(v).strip().lower() or None
 
     # 1. User-level config (lower priority, loaded first)
     user_cfg = CONFIG_DIR / "config.toml"
@@ -67,6 +93,12 @@ def load_config() -> dict[str, Any]:
             config["model"] = data["model"].get("name", config["model"])
             config["api_base"] = data["model"].get("api_base", config["api_base"])
             config["timeout"] = float(data["model"].get("timeout", config["timeout"]))
+            # 通用接入: [model] 内可直写 provider (显式路由) + api_key (一处配齐 apikey+baseurl+id)
+            if data["model"].get("provider"):
+                config["provider"] = str(data["model"]["provider"]).strip()
+            if data["model"].get("api_key"):
+                config["api_key"] = data["model"]["api_key"]
+        _merge_model_section(data)
         if "providers" in data:
             config["providers"] = data["providers"]
 
@@ -80,6 +112,12 @@ def load_config() -> dict[str, Any]:
             config["model"] = data["model"].get("name", config["model"])
             config["api_base"] = data["model"].get("api_base", config["api_base"])
             config["timeout"] = float(data["model"].get("timeout", config["timeout"]))
+            # 通用接入: [model] 内可直写 provider (显式路由) + api_key (一处配齐 apikey+baseurl+id)
+            if data["model"].get("provider"):
+                config["provider"] = str(data["model"]["provider"]).strip()
+            if data["model"].get("api_key"):
+                config["api_key"] = data["model"]["api_key"]
+        _merge_model_section(data)
         if "providers" in data:
             config["providers"] = data["providers"]
 
@@ -93,6 +131,30 @@ def load_config() -> dict[str, Any]:
     if os.environ.get("ZALL_TIMEOUT"):
         try:
             config["timeout"] = float(os.environ["ZALL_TIMEOUT"])
+        except (ValueError, TypeError):
+            pass
+    # F2a: 采样参数 env 覆盖
+    if os.environ.get("ZALL_TEMPERATURE"):
+        try:
+            config["temperature"] = float(os.environ["ZALL_TEMPERATURE"])
+        except (ValueError, TypeError):
+            pass
+    if os.environ.get("ZALL_MAX_TOKENS"):
+        try:
+            config["max_tokens"] = int(os.environ["ZALL_MAX_TOKENS"])
+        except (ValueError, TypeError):
+            pass
+    if os.environ.get("ZALL_TOP_P"):
+        try:
+            config["top_p"] = float(os.environ["ZALL_TOP_P"])
+        except (ValueError, TypeError):
+            pass
+    if os.environ.get("ZALL_REASONING_EFFORT"):
+        val = os.environ["ZALL_REASONING_EFFORT"].strip().lower()
+        config["reasoning_effort"] = val or None
+    if os.environ.get("ZALL_WINDOW_SIZE"):
+        try:
+            config["window_size"] = int(os.environ["ZALL_WINDOW_SIZE"])
         except (ValueError, TypeError):
             pass
 
@@ -123,16 +185,22 @@ def save_api_key(key: str) -> Path:
     if current_section_lines:
         sections.append((current_section_name, current_section_lines))
 
-    # Rebuild: update [auth] and [model], keep everything else
+    # Rebuild: update [auth] and [model], keep everything else.
+    # 自愈: 只保留第一个 [auth]/[model], 丢弃重复段 (历史 bug 曾产生重复段 →
+    # 文件不断膨胀; 见 _persist_model_to_config 同款去重)。
     new_lines: list[str] = []
     has_auth = False
     has_model = False
     for name, lines in sections:
         if name == "auth":
+            if has_auth:
+                continue  # 去重: 丢弃多余的 [auth] 段
             new_lines.append("[auth]\n")
             new_lines.append(f'api_key = "{key}"\n')
             has_auth = True
         elif name == "model":
+            if has_model:
+                continue  # 去重: 丢弃多余的 [model] 段
             new_lines.append("[model]\n")
             new_lines.append(f'name = "{data.get("model", {}).get("name", DEFAULT_MODEL)}"\n')
             new_lines.append(f'api_base = "{data.get("model", {}).get("api_base", DEFAULT_API_BASE)}"\n')

@@ -10,6 +10,8 @@ Design:
 from __future__ import annotations
 
 import json
+import random
+import time
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -22,7 +24,7 @@ from zall.core.model import (
     ToolCall,
     ToolChoice,
 )
-from zall.adapters.base import BaseAdapter
+from zall.adapters.base import BaseAdapter, RetryBudget
 
 
 @dataclass
@@ -50,17 +52,36 @@ class OpenAICompatAdapter(BaseAdapter):
         model: str | None = None,
         timeout: float = 120.0,
         stream_usage: bool = False,
+        # F2b: 采样参数 (None = 不发送, 避免给不支持的 provider 发导致 400)
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         super().__init__(api_key, api_base, model, timeout)
         if not self._api_key:
-            raise ValueError("API key required — set ZALL_API_KEY or add to ~/.zall/config.toml")
+            raise ValueError("API key required - set ZALL_API_KEY or add to ~/.zall/config.toml")
         if not self._model:
-            raise ValueError("Model required — set ZALL_MODEL or add to ~/.zall/config.toml")
+            raise ValueError("Model required - set ZALL_MODEL or add to ~/.zall/config.toml")
         # Reuse persistent HTTP client (connection pool) across REPL turns.
         self._client = httpx.Client(timeout=self._timeout)
         # stream_usage: request token usage in streaming responses.
         # Some providers (DeepSeek, Qwen, etc.) may not support this parameter.
         self._stream_usage = stream_usage
+        # F2b: 采样参数 (仅非 None 时注入 body)
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._top_p = top_p
+        self._reasoning_effort = (
+            reasoning_effort.strip().lower() if reasoning_effort else None
+        )
+        # RetryBudget: 区分预算 API 重试策略 (v0.5.1)
+        # on_retry 接 _dispatch_retry: set_retry_callback 注入后退避对用户可见。
+        self._retry_budget = RetryBudget(
+            max_transport=3, max_api=5, max_semantic=2,
+            base_delay=1.0, max_delay=60.0,
+            on_retry=self._dispatch_retry,
+        )
 
     def close(self) -> None:
         """Close the persistent HTTP client."""
@@ -111,6 +132,24 @@ class OpenAICompatAdapter(BaseAdapter):
         if tools:
             body["tools"] = tools
             body["tool_choice"] = tool_choice.value
+        # F2b: 采样参数仅非 None 时注入 (避免给不支持的 provider 发送导致 400)。
+        if self._temperature is not None:
+            body["temperature"] = self._temperature
+        if self._max_tokens is not None:
+            # G16: 发前钳制 max_tokens 到剩余窗口 (防 input+requested 超窗 400)
+            from zall._util.model_registry import get_window_size
+            from zall._util.tokens import clamp_completion_tokens, estimate_body_tokens
+            body["max_tokens"] = clamp_completion_tokens(
+                self._max_tokens,
+                window=get_window_size(self._model),
+                input_tokens=estimate_body_tokens(body),
+            )
+        if self._top_p is not None:
+            body["top_p"] = self._top_p
+        if self._reasoning_effort is not None:
+            # reasoning_effort: OpenAI o-series / 部分兼容 provider 支持。
+            # 不支持的 provider 若返回 400, adapter 错误处理会提示 (不崩)。
+            body["reasoning_effort"] = self._reasoning_effort
         if stream:
             body["stream"] = True
             # stream_usage (include_usage) is not supported by all providers.
@@ -131,13 +170,19 @@ class OpenAICompatAdapter(BaseAdapter):
         url = f"{base}/chat/completions"
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
-        # Reuse persistent client with exponential backoff retry.
-        # Retries on network jitter / 429 / 5xx (max 5); 400/401/403/404 not retried.
-        def _do_post() -> ModelResponse:
+        # v0.5.1: 使用 RetryBudget 替代 old with_retry
+        # C5 (perf): time/random 已提为模块级 import (原为方法内重复 lazy import)。
+
+        self._retry_budget.reset()
+        while True:
             try:
                 resp = self._client.post(url, json=body, headers=headers,
                                          timeout=self._timeout)
             except httpx.ConnectError as e:
+                if self._retry_budget.can_retry("transport"):
+                    delay = self._retry_budget.record_attempt("transport")
+                    time.sleep(delay)
+                    continue
                 return ModelResponse(
                     content=f"[API connection error: cannot reach {self._api_base}. "
                             f"Check your network or api_base setting. /doctor for details.]",
@@ -145,6 +190,10 @@ class OpenAICompatAdapter(BaseAdapter):
                     raw={"error": str(e)},
                 )
             except httpx.TimeoutException as e:
+                if self._retry_budget.can_retry("transport"):
+                    delay = self._retry_budget.record_attempt("transport")
+                    time.sleep(delay)
+                    continue
                 return ModelResponse(
                     content=f"[API timeout: {self._api_base} did not respond within "
                             f"{self._timeout}s. Try /model to switch to a faster model.]",
@@ -152,13 +201,25 @@ class OpenAICompatAdapter(BaseAdapter):
                     raw={"error": str(e)},
                 )
             if resp.status_code != 200:
-                # Capture retry_after header for rate-limit handling in with_retry.
+                # RetryBudget: retryable errors (429 / 5xx)
+                if RetryBudget.is_retryable_http(resp.status_code) and self._retry_budget.can_retry("api"):
+                    # 2026-07-26 bugfix: Retry-After 头只覆盖延迟, 预算必须消耗。
+                    # 此前合法 Retry-After 路径跳过 record_attempt — 持续 429 时无限重试。
+                    override: float | None = None
+                    retry_after = resp.headers.get("retry-after", None)
+                    if retry_after:
+                        try:
+                            override = float(retry_after)
+                        except (ValueError, TypeError):
+                            override = None
+                    delay = self._retry_budget.record_attempt("api", delay_override=override)
+                    time.sleep(min(delay, 60.0))
+                    continue
+                # Non-retryable or budget exhausted
                 retry_after = resp.headers.get("retry-after", "0") if hasattr(resp, "headers") else "0"
                 raw = {"status": resp.status_code, "retry_after": retry_after}
                 return self.make_error_response(resp.status_code, resp.text, raw=raw)
             return self._parse_response(resp.json())
-
-        return self.with_retry(_do_post, max_retries=5, base_delay=1.0, max_delay=60.0)
 
     def _stream(self, messages: list[Message], tools: list[dict[str, Any]], tool_choice: ToolChoice) -> Any:
         """Stream the response, yielding (token_delta, accumulated_response).
@@ -175,8 +236,7 @@ class OpenAICompatAdapter(BaseAdapter):
           Once streaming has started, mid-stream errors are reported as partial responses
           (the server state is lost, so retrying mid-stream would repeat tool calls).
         """
-        import random as _random
-        import time as _time
+        # C5 (perf): time/random 已提为模块级 import (原为方法内重复 lazy import)。
 
         body = self._build_body(messages, tools, tool_choice, stream=True)
         base = self._api_base.rstrip("/")
@@ -208,8 +268,9 @@ class OpenAICompatAdapter(BaseAdapter):
                     stream_ctx.__exit__(type(e), e, e.__traceback__)
                     stream_ctx = None
                 if conn_attempt < max_conn_retries - 1:
-                    delay = min(1.0 * (2 ** conn_attempt), 30.0) * _random.uniform(0.75, 1.25)
-                    _time.sleep(delay)
+                    delay = min(1.0 * (2 ** conn_attempt), 30.0) * random.uniform(0.75, 1.25)
+                    self._dispatch_retry("transport", delay, conn_attempt + 1, max_conn_retries)
+                    time.sleep(delay)
                     continue
                 yield ("", self._make_stream_error(
                     f"cannot reach {self._api_base} after {max_conn_retries} attempts. "
@@ -220,8 +281,9 @@ class OpenAICompatAdapter(BaseAdapter):
                     stream_ctx.__exit__(type(e), e, e.__traceback__)
                     stream_ctx = None
                 if conn_attempt < max_conn_retries - 1:
-                    delay = min(1.0 * (2 ** conn_attempt), 30.0) * _random.uniform(0.75, 1.25)
-                    _time.sleep(delay)
+                    delay = min(1.0 * (2 ** conn_attempt), 30.0) * random.uniform(0.75, 1.25)
+                    self._dispatch_retry("transport", delay, conn_attempt + 1, max_conn_retries)
+                    time.sleep(delay)
                     continue
                 yield ("", self._make_stream_error(
                     f"cannot connect to {self._api_base}. /doctor for details.", e))
@@ -461,6 +523,9 @@ class OpenAICompatAdapter(BaseAdapter):
         reasoning = msg.get("reasoning_content") or msg.get("reasoning", "") or ""
         finish_reason = choice.get("finish_reason", "stop")
         stop_reason = self._map_finish_reason(finish_reason)
+        # content_filter 映射为 STOP 但附加截断警告，避免掩盖安全策略截断事实
+        if finish_reason == "content_filter":
+            content += "\n\n[Warning: Response truncated by content filter]"
         tool_calls = []
         for rtc in msg.get("tool_calls") or []:
             tc_id = rtc.get("id", "")

@@ -22,6 +22,7 @@ IPR constraints:
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
     from zall.core.loop import AgentLoop
 
 
+from zall.core.prompt_template import render as _render_template
+
+
 def _loop_event(*args: Any, **kwargs: Any) -> Any:
     """Lazy import LoopEvent to avoid circular import with loop.py."""
     from zall.core.loop_events import LoopEvent
@@ -40,9 +44,8 @@ def _loop_event(*args: Any, **kwargs: Any) -> Any:
 
 
 def _empty_stop_nudge() -> str:
-    """Lazy import _EMPTY_STOP_NUDGE to avoid circular import."""
-    from zall.core.loop_events import _EMPTY_STOP_NUDGE
-    return _EMPTY_STOP_NUDGE
+    """Return the empty-stop nudge text via template system."""
+    return _render_template("empty_stop_nudge")
 
 
 class ContextManager:
@@ -52,8 +55,10 @@ class ContextManager:
       - Watermark monitoring (preemptive compaction before LENGTH)
       - Reactive compaction (on LENGTH stop_reason)
       - Empty STOP nudge injection
+      - Mid-turn interjection buffer (v0.5.0, Grok Build 启发)
 
-    Thread-safety: not required (called from single-threaded AgentLoop).
+    Thread-safety: thread-safe for interjection buffer (locked),
+    single-threaded for the rest.
     """
 
     def __init__(self, loop: AgentLoop, compactor: Compactor | None = None) -> None:
@@ -68,6 +73,10 @@ class ContextManager:
         self._check_counter: int = 0
         # Compaction attempt counter (for event_id uniqueness)
         self._compaction_count: int = 0
+
+        # v0.5.0: Mid-turn interjection buffer (thread-safe)
+        self._interjection_buffer: list[str] = []
+        self._interjection_lock = threading.Lock()
 
     # ── Public API ──
 
@@ -88,8 +97,37 @@ class ContextManager:
         if self._wm is not None and hasattr(self._wm, "mark_dirty"):
             self._wm.mark_dirty()
 
+    # ── Mid-turn interjection buffer (v0.5.0, Grok Build 启发) ──
+
+    def push_interjection(self, text: str) -> None:
+        """Push a user interjection message (thread-safe).
+
+        Called from CLI/repl thread when user sends a message
+        while the agent is executing a step.
+        """
+        with self._interjection_lock:
+            self._interjection_buffer.append(text)
+
+    def drain_interjections(self) -> list[str]:
+        """Drain all pending interjections (thread-safe).
+
+        Returns list of interjection texts, or empty list if none.
+        Called at the start of each step to inject user messages.
+        """
+        with self._interjection_lock:
+            result = list(self._interjection_buffer)
+            self._interjection_buffer.clear()
+        return result
+
+    @property
+    def has_interjections(self) -> bool:
+        """Check if there are pending interjections (thread-safe)."""
+        with self._interjection_lock:
+            return len(self._interjection_buffer) > 0
+
     def check_watermark_before_call(
         self, messages: list[Message], model_name: str, step_count: int,
+        real_tokens: int | None = None,
     ) -> None:
         """§9.2.9 Preemptive watermark check before model call.
 
@@ -97,6 +135,7 @@ class ContextManager:
         O2: small context (< 20 messages) skips check.
         O4: checks every 3 steps to reduce overhead.
         v2 fix: first check triggers immediately at 20 messages (no gate).
+        PARADIGM Step 0: real_tokens (上次响应真实 prompt tokens) 传入水位判定。
         """
         self._check_counter += 1
         should_check = (
@@ -111,7 +150,7 @@ class ContextManager:
 
         assert self._wm is not None
         watermark_action = self._wm.check_watermark(
-            messages, model_name, step_count,
+            messages, model_name, step_count, real_tokens=real_tokens,
         )
         if watermark_action == "force":
             if self._auto_compact(reason="watermark_force"):
@@ -158,13 +197,18 @@ class ContextManager:
         on self._loop._messages directly, eliminating the fragile invariant
         where the caller's list reference had to match self._loop._messages.
 
+        v0.5.0 (B3 fix): Record timeline event BEFORE applying compressed
+        messages. If timeline recording fails, messages are not corrupted.
+        Previously messages were mutated before recording, violating the
+        invariant "timeline is the source of truth".
+
         Returns True if compaction actually happened.
         """
         if self._compactor is None:
             return False
 
         try:
-            result = self._compactor.compact(self._loop._messages, self._loop.model_adapter)
+            result = self._compactor.compact(self._loop.messages, self._loop.model_adapter)
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:
@@ -178,16 +222,11 @@ class ContextManager:
         if result.compacted_count <= 0:
             return False
 
-        # ★ Apply compressed messages back to the loop
-        self._loop._messages = list(result.compressed_messages)
-
-        # ★ Sync ChatState, 保证 _messages 和 ChatState 一致
-        if self._loop._chat_state is not None:
-            self._loop._chat_state.replace_messages(self._loop._messages)
-
         self._compaction_count += 1
 
-        # Record CONTEXT_COMPACTION in timeline (§6.1 fidelity)
+        # ★ Record CONTEXT_COMPACTION in timeline FIRST (§6.1 fidelity)
+        #    Do this BEFORE mutating messages to preserve the invariant
+        #    that timeline is the source of truth.
         self._loop.recorder.append(
             event_id=f"compact_{self._compaction_count}",
             ts=int(time.time() * 1000),
@@ -201,7 +240,10 @@ class ContextManager:
             },
         )
 
-        # Emit observer event
+        # ★ 通过 AgentLoop.set_messages() 替换消息 (v0.5.1: ChatState 是唯一来源)
+        self._loop.set_messages(list(result.compressed_messages))
+
+        # Emit observer event (non-critical, after mutation is safe)
         self._loop._emit(_loop_event(
             kind="context_compaction",
             step=self._loop.step_count,

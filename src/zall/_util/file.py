@@ -29,6 +29,7 @@ def detect_text_encoding(path: Path) -> str:
     replacement characters (U+FFFD) cannot be encoded in the target encoding
     (e.g., GBK) when the content is sent to the API pipeline.
     """
+    raw = b""  # 预初始化: 防 open 失败(如文件不存在)时下方 GBK 回退分支引用未绑定的 raw
     try:
         with open(path, "rb") as f:
             raw = f.read(8192)
@@ -75,9 +76,11 @@ def read_text_file(path: Path, encoding: str | None = None) -> str:
     抛出 OSError 时调用方自行处理。
     编码默认自动检测: 先尝试 UTF-8, 失败回退系统编码。
     """
+    # 始终解析相对路径 (修复: 原仅在 encoding=None 时解析, 导致不一致行为)
+    if not path.is_absolute():
+        path = Path.cwd() / path
     if encoding is None:
         encoding = detect_text_encoding(path)
-        path = Path.cwd() / path
     if not path.exists():
         raise FileNotFoundError(f"file not found: {path}")
     if not path.is_file():

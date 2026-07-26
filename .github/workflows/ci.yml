@@ -40,6 +40,9 @@ jobs:
           pip install ruff
           ruff check src/
 
+      - name: IPR-3 — core is model-agnostic (no model SDK imports)
+        run: python scripts/check_ipr3.py
+
       - name: Type check with mypy
         run: |
           pip install mypy
@@ -49,14 +52,14 @@ jobs:
         shell: bash
         run: |
           python -m pytest tests/ -q --tb=line \
-            -k 'not (test_file_not_found or test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)'
+            -k 'not (test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)'
 
       - name: Test with coverage
         shell: bash
         run: |
           pip install pytest-cov
           python -m pytest tests/ -q --tb=line --cov=zall --cov-report=term-missing \
-            -k 'not (test_file_not_found or test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)'
+            -k 'not (test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)'
 
   publish:
     needs: [test]

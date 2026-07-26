@@ -7,6 +7,9 @@ Protected invariants:
      terminal handler — it is NOT silently downgraded to a STOP response.
   2. loop._last_stream_error is set after the failure.
   3. A warning log message is emitted (observable via caplog).
+  4. Zero-output stream failure falls back to non-streaming complete()
+     (which owns the _with_retry chain) — partial-output failure does NOT
+     (would double-render half + full content). (2026-07-26 chaos e2e fix)
 """
 
 from __future__ import annotations
@@ -120,7 +123,7 @@ def _make_goal() -> GoalTriple:
     )
 
 
-def _make_loop(*, adapter: Any | None = None) -> AgentLoop:
+def _make_loop(*, adapter: Any | None = None, observer: Any | None = None) -> AgentLoop:
     """Minimal AgentLoop with streaming enabled."""
     if adapter is None:
         adapter = _CrashedStreamAdapter()
@@ -130,6 +133,7 @@ def _make_loop(*, adapter: Any | None = None) -> AgentLoop:
         judge=_NoopJudge(),
         max_steps=5,
         stream=True,  # enable streaming so complete_stream is called
+        observer=observer,
     )
     _ctx = Context(
         user_raw="test",
@@ -233,3 +237,127 @@ def test_stream_error_does_not_affect_healthy_stream() -> None:
     assert result.kind in ("awaiting_input", "tool_used"), (
         f"healthy stream should produce awaiting_input or tool_used, got kind={result.kind}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Zero-output stream fallback (2026-07-26 chaos e2e fix)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _ZeroOutputCrashAdapter:
+    """complete_stream crashes before yielding any token (e.g. ConnectError
+    on connection setup). complete() succeeds — tracks call count so tests
+    can assert whether the fallback fired.
+    """
+
+    __test__ = False
+
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
+    @property
+    def model_name(self) -> str:
+        return "zero-output-crash"
+
+    def complete(self, messages, tools, tool_choice=ToolChoice.AUTO) -> ModelResponse:
+        self.complete_calls += 1
+        return ModelResponse(content="fallback ok", stop_reason=StopReason.STOP)
+
+    def complete_stream(self, messages, tools, tool_choice=ToolChoice.AUTO) -> Iterator[tuple[str, ModelResponse]]:
+        raise ConnectionError("simulated connect failure before first token")
+        yield  # pragma: no cover  (makes this a generator function)
+
+
+class _PartialCrashCountingAdapter(_CrashedStreamAdapter):
+    """Partial-output crash + complete() call counter (counterexample)."""
+
+    __test__ = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.complete_calls = 0
+
+    def complete(self, messages, tools, tool_choice=ToolChoice.AUTO) -> ModelResponse:
+        self.complete_calls += 1
+        return super().complete(messages, tools, tool_choice)
+
+
+def test_zero_output_stream_failure_falls_back_to_complete() -> None:
+    """Zero-output stream crash → non-streaming complete() fallback, step survives."""
+    adapter = _ZeroOutputCrashAdapter()
+    loop = _make_loop(adapter=adapter)
+    loop.add_user_message("Hello")
+
+    result = loop.step()
+
+    # NOT a terminal error — the fallback rescued the step
+    assert not result.is_terminal or (
+        result.egress is not None and result.egress.error is None
+    ), f"fallback should rescue the step, got terminal error: {result.egress}"
+    assert adapter.complete_calls == 1, (
+        f"expected exactly one fallback complete() call, got {adapter.complete_calls}"
+    )
+    # honesty: the original stream error is still recorded for introspection
+    assert loop._last_stream_error is not None
+    assert isinstance(loop._last_stream_error, ConnectionError)
+
+
+def test_zero_output_fallback_emits_stream_fallback_retry_event() -> None:
+    """Fallback visibility: a retry event with category=stream_fallback is emitted."""
+    events: list[Any] = []
+    adapter = _ZeroOutputCrashAdapter()
+    loop = _make_loop(adapter=adapter, observer=events.append)
+    loop.add_user_message("Hello")
+
+    loop.step()
+
+    retries = [e for e in events if e.kind == "retry"]
+    assert retries, "expected a retry event for the stream fallback"
+    assert retries[0].payload.get("category") == "stream_fallback", (
+        f"expected category=stream_fallback, got {retries[0].payload}"
+    )
+
+
+def test_zero_output_fallback_response_enters_timeline() -> None:
+    """The fallback ModelResponse is recorded like any model_call (replay-safe)."""
+    adapter = _ZeroOutputCrashAdapter()
+    loop = _make_loop(adapter=adapter)
+    loop.add_user_message("Hello")
+
+    loop.step()
+
+    model_calls = [
+        e for e in loop._recorder.events
+        if e.event_id.startswith("model_call_")
+    ]
+    assert model_calls, "expected a model_call event in the timeline"
+    assert model_calls[-1].payload["content"] == "fallback ok", (
+        f"timeline should carry the fallback response, got {model_calls[-1].payload}"
+    )
+
+
+def test_partial_output_stream_failure_still_raises_no_fallback() -> None:
+    """Counterexample (IPR-0): partial output → honest propagation, NO fallback.
+
+    Falling back after tokens were already broadcast would double-render
+    (half content + full content) — the A1 honesty semantic must hold.
+    """
+    adapter = _PartialCrashCountingAdapter()
+    loop = _make_loop(adapter=adapter)
+    loop.add_user_message("Hello, crash!")
+
+    result = loop.step()
+
+    assert result.is_terminal, "partial-output crash must still be terminal"
+    assert result.egress is not None and result.egress.error is not None
+    assert "simulated stream failure" in result.egress.error
+    assert adapter.complete_calls == 0, (
+        f"fallback must NOT fire after partial output, got {adapter.complete_calls} complete() calls"
+    )
+
+
+def test_retry_reason_has_stream_fallback_label() -> None:
+    """Render 单一真相源: RETRY_REASON 必须注册 stream_fallback 文案。"""
+    from zall.adapters.base import RETRY_REASON
+    assert "stream_fallback" in RETRY_REASON
+    assert RETRY_REASON["stream_fallback"], "label must be non-empty"

@@ -18,6 +18,7 @@ from __future__ import annotations
 import locale
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -29,6 +30,50 @@ from zall.core.tool import ToolResult
 from zall.core.tool_kind import ToolKind
 
 MAX_OUTPUT_BYTES = 50_000  # Maximum output (50KB, prevents context pollution)
+
+
+# ── Platform shell detection (cross-platform fix) ──
+
+def _detect_shell() -> str:
+    """Detect the best available shell for the current platform.
+
+    Returns a shell command string suitable for subprocess calls.
+
+    Windows:
+      1. Git Bash (C:\\Program Files\\Git\\bin\\bash.exe) — preferred
+      2. PowerShell (powershell.exe) — fallback
+    macOS/Linux:
+      /bin/bash, or /bin/sh as fallback
+    """
+    if sys.platform == "win32":
+        # Try Git Bash first (provides native bash experience)
+        git_bash_paths = [
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+        ]
+        for path in git_bash_paths:
+            if os.path.isfile(path):
+                return path
+        # Also try via shutil.which (in case Git is in PATH)
+        which_bash = shutil.which("bash")
+        if which_bash:
+            return which_bash
+        # Fallback to PowerShell
+        return "powershell"
+    else:
+        # macOS / Linux: use /bin/bash, fallback to /bin/sh
+        for candidate in ("/bin/bash", "/bin/sh"):
+            if os.path.isfile(candidate):
+                return candidate
+        which_bash = shutil.which("bash") or shutil.which("sh")
+        if which_bash:
+            return which_bash
+        return "/bin/sh"  # last resort
+
+
+def _is_powershell(shell_cmd: str) -> bool:
+    """Check if the detected shell is PowerShell (not Git Bash)."""
+    return "powershell" in shell_cmd.lower()
 
 
 # ── BashExecutor Protocol (v0.3.0: extractable strategy) ──
@@ -143,50 +188,41 @@ _OR_CHAIN_RE = re.compile(r'\s\|\|\s')
 def _split_operator_aware(command: str, pattern: re.Pattern[str]) -> list[str]:
     """Quote-aware operator splitting: only split && / || outside quotes.
 
-    Scans character by character, tracks single/double quote state,
-    skips matches inside quotes.
+    Uses re.finditer to locate pattern matches, then checks if each match
+    falls inside quotes by scanning the text before it. This avoids the
+    bug of comparing raw regex pattern strings against command text.
+
+    B8 fix: use re.finditer instead of character-by-character pattern matching.
     """
     parts: list[str] = []
-    buf: list[str] = []
-    in_single_quote = False
-    in_double_quote = False
-    # Pre-compiled pattern: match operator (e.g., && / ||) with surrounding whitespace
-    op_str = pattern.pattern.strip()
-    op_len = len(op_str)
+    prev_end = 0
 
-    i = 0
-    while i < len(command):
-        ch = command[i]
-        # Track quote state
-        if ch == "'" and not in_double_quote:
-            in_single_quote = not in_single_quote
-            buf.append(ch)
-            i += 1
-            continue
-        if ch == '"' and not in_single_quote:
-            in_double_quote = not in_double_quote
-            buf.append(ch)
-            i += 1
-            continue
+    for m in pattern.finditer(command):
+        start, end = m.start(), m.end()
 
-        # Outside quotes and matches operator
-        if not in_single_quote and not in_double_quote:
-            if command[i:i+op_len] == op_str:
-                # Check surrounding whitespace (preserve semantic consistency)
-                before = command[i-1:i] if i > 0 else " "
-                after = command[i+op_len:i+op_len+1] if i+op_len < len(command) else " "
-                if before.isspace() and after.isspace():
-                    parts.append("".join(buf).strip())
-                    buf = []
-                    i += op_len
-                    continue
-        buf.append(ch)
-        i += 1
+        # Check if this match is inside quotes by scanning text before it
+        text_before = command[:start]
+        in_single = False
+        in_double = False
+        for ch in text_before:
+            if ch == "'" and not in_double:
+                in_single = not in_single
+            elif ch == '"' and not in_single:
+                in_double = not in_double
 
-    if buf:
-        remaining = "".join(buf).strip()
-        if remaining:
-            parts.append(remaining)
+        if in_single or in_double:
+            continue  # Skip matches inside quotes
+
+        # Add text before this match
+        segment = command[prev_end:start].strip()
+        if segment:
+            parts.append(segment)
+        prev_end = end
+
+    remaining = command[prev_end:].strip()
+    if remaining:
+        parts.append(remaining)
+
     return parts if parts else [command]
 
 
@@ -211,7 +247,8 @@ def _translate_chain_for_ps5(command: str) -> str:
             result += f'; if (-not $?) {{ {part} }}'
         return result
 
-    result = parts[0]
+    # 递归翻译首段 (修复: 首段可能包含 || 未被翻译)
+    result = _translate_chain_for_ps5(parts[0])
     for part in parts[1:]:
         # Recursively process || inside the part (mixed chains: a && b || c)
         part_translated = _translate_chain_for_ps5(part)
@@ -224,6 +261,12 @@ def _translate_chain_for_ps5(command: str) -> str:
 # v0.1.2: thread lock protection; B2: unified build inside single lock, eliminates race window.
 _ENV_CACHE: dict[str, str] | None = None
 _ENV_CACHE_LOCK = threading.Lock()
+
+
+def reset_env_cache() -> None:
+    """v0.5.0: 重置环境变量缓存, 用于测试隔离。"""
+    global _ENV_CACHE
+    _ENV_CACHE = None
 
 
 def clear_env_cache() -> None:
@@ -266,64 +309,51 @@ def _sanitize_env() -> dict[str, str]:
 # accidentally killing itself.
 # Even if context_judge rules are bypassed (e.g., custom rules.toml), this check acts as the
 # last line of defense.
-_SELF_PID = os.getpid()
+# v0.5.0: _SELF_PID is lazily computed to avoid stale PID after fork.
+_SELF_PID: int | None = None
 # v0.1.2: process names (including python executables, prevents taskkill /IM name-based kill)
 _SELF_PROCESS_NAMES = frozenset({"zall", "python", "python3", "py"})
 
-# Matches "taskkill /PID 12345" or "kill -9 12345" where PID equals _SELF_PID
-_SELF_PID_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # taskkill /PID <pid> or taskkill /F /PID <pid>
-    re.compile(rf"taskkill\s+.*?(?:/PID|/pid)\s+{_SELF_PID}\b", re.IGNORECASE),
-    # taskkill /IM <name> (Windows kill by process name)
-    *tuple(
-        re.compile(rf"taskkill\s+.*?/IM\s+{re.escape(name)}\b", re.IGNORECASE)
-        for name in _SELF_PROCESS_NAMES
-    ),
-    # tskill <pid>
-    re.compile(rf"tskill\s+{_SELF_PID}\b", re.IGNORECASE),
-    # tskill <name> (Windows kill by process name)
-    *tuple(
-        re.compile(rf"tskill\s+{re.escape(name)}\b", re.IGNORECASE)
-        for name in _SELF_PROCESS_NAMES
-    ),
-    # kill -9 <pid> / kill <pid>
-    re.compile(rf"kill\s+(?:-9\s+)?{_SELF_PID}\b"),
-    # pkill -P <pid>
-    re.compile(rf"pkill\s+.*?-P\s+{_SELF_PID}\b"),
-    # Stop-Process -Id <pid> (PowerShell)
-    re.compile(rf"Stop-Process\s+.*?-Id\s+{_SELF_PID}\b", re.IGNORECASE),
-    # Stop-Process -Name <name> (PowerShell kill by process name)
-    *tuple(
-        re.compile(rf"Stop-Process\s+.*?-Name\s+{re.escape(name)}\b", re.IGNORECASE)
-        for name in _SELF_PROCESS_NAMES
-    ),
-    # wmic process where processid=<pid> delete
-    re.compile(rf"wmic\s+process\s+.*?processid\s*=\s*{_SELF_PID}\b", re.IGNORECASE),
-    # wmic process where name=<name> delete (kill by process name)
-    *tuple(
-        re.compile(
-            r"wmic\s+process\s+.*?name\s*=\s*['\"]?" + re.escape(name) + r"['\"]?\b",
-            re.IGNORECASE,
+# v0.5.0: 惰性计算 _SELF_PID, 每次访问时根据当前进程 ID 构建
+# 避免 import 时固定 PID, 导致 fork 后子进程使用父进程 PID
+_SELF_PID_PATTERNS_CACHE: tuple[re.Pattern[str], ...] | None = None
+_SELF_PID_PATTERNS_LOCK = threading.Lock()
+
+
+def _get_self_pid_patterns() -> tuple[re.Pattern[str], ...]:
+    """获取匹配当前进程 PID 的正则表达式列表 (惰性 + 缓存)。"""
+    global _SELF_PID, _SELF_PID_PATTERNS_CACHE
+    pid = os.getpid()
+    if _SELF_PID == pid and _SELF_PID_PATTERNS_CACHE is not None:
+        return _SELF_PID_PATTERNS_CACHE
+    with _SELF_PID_PATTERNS_LOCK:
+        # Double-check after acquiring lock
+        if _SELF_PID == pid and _SELF_PID_PATTERNS_CACHE is not None:
+            return _SELF_PID_PATTERNS_CACHE
+        _SELF_PID = pid
+        _SELF_PID_PATTERNS_CACHE = (
+            # taskkill /PID <pid> or taskkill /F /PID <pid>
+            re.compile(rf"taskkill\s+.*?(?:/PID|/pid)\s+{_SELF_PID}\b", re.IGNORECASE),
+            # taskkill /IM <name> (Windows kill by process name)
+            *tuple(
+                re.compile(rf"taskkill\s+.*?/IM\s+{re.escape(name)}\b", re.IGNORECASE)
+                for name in _SELF_PROCESS_NAMES
+            ),
+            # tskill <pid>
+            re.compile(rf"tskill\s+{_SELF_PID}\b", re.IGNORECASE),
+            # tskill <name> (Windows kill by process name)
+            *tuple(
+                re.compile(rf"tskill\s+{re.escape(name)}\b", re.IGNORECASE)
+                for name in _SELF_PROCESS_NAMES
+            ),
+            # kill -9 <pid> / kill <pid>
+            re.compile(rf"kill\s+(?:-9\s+)?{_SELF_PID}\b"),
+            # pkill -P <pid>
+            re.compile(rf"pkill\s+.*?-P\s+{_SELF_PID}\b"),
+            # Stop-Process -Id <pid> (PowerShell)
+            re.compile(rf"Stop-Process\s+.*?-Id\s+{_SELF_PID}\b", re.IGNORECASE),
         )
-        for name in _SELF_PROCESS_NAMES
-    ),
-    # sc stop <service> (service 控制)
-    re.compile(r"sc\s+stop\s+\S+", re.IGNORECASE),
-    # net stop <service>
-    re.compile(r"net\s+stop\s+\S+", re.IGNORECASE),
-    # shutdown /r /s etc.
-    re.compile(r"shutdown\s+/(?:s|r|l|h|p)", re.IGNORECASE),
-    # format (disk)
-    re.compile(r"format\s+\S:", re.IGNORECASE),
-    # del /f /s /q (recursive force delete)
-    re.compile(r"del\s+/[fF].*?/[sS]", re.IGNORECASE),
-    # rm -rf / (Unix recursive root delete)
-    re.compile(r"rm\s+-rf?\s+/"),
-    # dd if= of= (disk overwrite)
-    re.compile(r"dd\s+if="),
-    # mkfs (format filesystem)
-    re.compile(r"mkfs\."),
-)
+        return _SELF_PID_PATTERNS_CACHE
 
 
 def _check_self_protection(command: str) -> str | None:
@@ -339,7 +369,7 @@ def _check_self_protection(command: str) -> str | None:
     cmd_lower = command.lower().strip()
 
     # 1. Self-termination detection: command references the current zall process PID
-    for pattern in _SELF_PID_PATTERNS:
+    for pattern in _get_self_pid_patterns():
         if pattern.search(command):
             return (
                 f"BLOCKED: command targets the current zall process (PID {_SELF_PID}). "
@@ -417,6 +447,72 @@ def _truncate_at_bytes_enc(text: str, max_bytes: int, encoding: str = "utf-8") -
     return truncated.decode(encoding, errors="replace")
 
 
+# ── CLIXML decoder (Windows PowerShell error output) ──
+
+_CLIXML_HEADER = "#< CLIXML"
+
+
+def _is_clixml(text: str) -> bool:
+    """Check if text is CLIXML-encoded PowerShell output."""
+    return text.lstrip().startswith(_CLIXML_HEADER)
+
+
+def _decode_clixml(text: str) -> str:
+    """Decode CLIXML-encoded PowerShell output to plain text.
+
+    CLIXML is an XML format PowerShell uses for structured output.
+    The format is:
+      #< CLIXML
+      <Objs ...><S S="Error">message</S><S S="Warning">...</S></Objs>
+
+    Also decodes _xHHHH_ escape sequences used by PowerShell in CLIXML.
+
+    Uses regex-based extraction (more robust than XML parsing when
+    encoding is mismatched or characters are garbled).
+
+    B8 fix: safety net — if PowerShell outputs CLIXML (e.g., parse errors
+    on Windows), decode it so the agent can read the actual error message.
+    """
+    if not _is_clixml(text):
+        return text
+
+    # Use regex-based extraction (robust against encoding issues)
+    return _extract_clixml_text_fallback(text)
+
+
+_CLIXML_ESCAPE_RE = re.compile(r"_x([0-9A-Fa-f]{4})_")
+
+
+def _decode_clixml_escapes(text: str) -> str:
+    """Decode _xHHHH_ escape sequences in CLIXML text.
+
+    PowerShell uses _xHHHH_ to encode characters that can't appear
+    literally in XML (e.g., _x000D_ for CR, _x000A_ for LF).
+    """
+    def _replace(m: re.Match[str]) -> str:
+        return chr(int(m.group(1), 16))
+    return _CLIXML_ESCAPE_RE.sub(_replace, text)
+
+
+def _extract_clixml_text_fallback(text: str) -> str:
+    """Fallback: extract readable text from a CLIXML blob via regex.
+
+    Used when XML parsing fails (malformed CLIXML).
+    """
+    lines: list[str] = []
+    for m in re.finditer(r'<S[^>]*>(.*?)</S>', text, re.DOTALL):
+        content = m.group(1)
+        content = _decode_clixml_escapes(content)
+        lines.append(content)
+    if lines:
+        return "\n".join(lines)
+    # Last resort: strip XML tags, keep only text
+    cleaned = re.sub(r'<[^>]+>', '', text)
+    cleaned = re.sub(r'#< CLIXML\s*', '', cleaned)
+    cleaned = _decode_clixml_escapes(cleaned.strip())
+    return cleaned or text
+
+
 class BashTool:
     """Execute shell command tool (ACI design).
 
@@ -453,18 +549,31 @@ class BashTool:
         return ToolKind.EXECUTE
 
     @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=False, tool_scope=ToolScope.Write)
+
+    @property
     def schema(self) -> dict[str, Any]:
-        # v0.0.22: On Windows, the bash tool actually executes through PowerShell (EncodedCommand),
-        # supporting bash-compatible syntax (mkdir -p, single-quoted strings, &&, |, etc.),
-        # no longer falling back to cmd.exe.
+        # Cross-platform: detect shell per platform (Git Bash preferred on Windows)
+        _shell = _detect_shell()
+        _using_ps = _is_powershell(_shell)
         if sys.platform == "win32":
-            shell_hint = "bash-compatible (PowerShell)"
-            cmd_hint = (
-                "On Windows the bash tool runs via PowerShell, so you can use "
-                "bash-compatible syntax: mkdir -p, single/double quoted strings, "
-                "&& / || / |, echo, cat, ls (as aliases). PowerShell cmdlets "
-                "(Get-ChildItem, Get-Content) also work."
-            )
+            if _using_ps:
+                shell_hint = "bash-compatible (PowerShell)"
+                cmd_hint = (
+                    "On Windows the bash tool runs via PowerShell, so you can use "
+                    "bash-compatible syntax: mkdir -p, single/double quoted strings, "
+                    "&& / || / |, echo, cat, ls (as aliases). PowerShell cmdlets "
+                    "(Get-ChildItem, Get-Content) also work."
+                )
+            else:
+                shell_hint = "bash (Git Bash)"
+                cmd_hint = (
+                    "On Windows the bash tool runs via Git Bash, providing full "
+                    "bash-compatible syntax: mkdir -p, single/double quoted strings, "
+                    "&& / || / |, pipes, redirects, and standard Unix commands."
+                )
         else:
             shell_hint = "bash"
             cmd_hint = "Use standard bash syntax (ls, cat, grep)."
@@ -546,13 +655,20 @@ class PopenExecutor:
         timeout: int,
         cwd: str | None = None,
     ) -> ToolResult:
-        """Execute a command via subprocess, return ToolResult."""
-        # Windows: translate bash chains for PowerShell 5.1
+        """Execute a command via subprocess, return ToolResult.
+
+        Cross-platform: detects the best available shell per platform.
+        Windows: Git Bash preferred (schema hint), PowerShell (execution).
+        macOS/Linux: /bin/bash.
+        """
         if sys.platform == "win32":
+            # Windows: PowerShell for execution (Git Bash detection used for schema hints)
             command = _translate_chain_for_ps5(command)
             ps_script = f"$ProgressPreference='SilentlyContinue'\n{command}"
             encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
-            command = f"powershell -NoProfile -EncodedCommand {encoded}"
+            exec_args = f"powershell -NoProfile -EncodedCommand {encoded}"
+        else:
+            exec_args = command  # Unix: shell=True, command as-is
 
         start = time.monotonic()
         enc = _preferred_encoding()
@@ -561,7 +677,7 @@ class PopenExecutor:
         stderr = ""
         try:
             proc = subprocess.Popen(
-                command,
+                exec_args,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -573,6 +689,13 @@ class PopenExecutor:
                 start_new_session=True,
             )
             stdout, stderr = proc.communicate(timeout=timeout)
+
+            # B8: decode CLIXML output on Windows (PowerShell error format)
+            if sys.platform == "win32":
+                if _is_clixml(stdout):
+                    stdout = _decode_clixml(stdout)
+                if _is_clixml(stderr):
+                    stderr = _decode_clixml(stderr)
         except subprocess.TimeoutExpired:
             duration = time.monotonic() - start
             if proc is not None:

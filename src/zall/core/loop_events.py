@@ -7,14 +7,6 @@ from zall.core.goal import GoalTriple, TerminationState
 
 MAX_STEPS = 50
 
-_EMPTY_STOP_NUDGE = (
-    "Your previous turn produced no tool_call and no useful answer. You MUST now emit a "
-    "tool_call to actually perform the user''s request (bash / write_file / edit_file / "
-    "list_dir / grep / etc.). Do NOT reply with text that only describes what you intend "
-    "to do (eg. ''I will create ...'') — that is a failure. Execute the action via a "
-    "tool_call in THIS turn. If the request is truly a pure question that needs no tool, "
-    "answer it concisely and substantively. Never return an empty response."
-)
 
 class LoopEvent(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -34,6 +26,9 @@ class RunEgress(BaseModel):
     candidate_goals: tuple[GoalTriple, ...] = ()
     downgrade_depth: int = 0
     final_claim: str = ""
+    # §12.1 Verifiability: 运行时链完整性自检结果 (None=链完整, str=篡改警告)
+    # MASTER.md §12.1 Verifiability + §3.1.4 运行时自检
+    chain_warning: str | None = None
 
 class StepResult(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)

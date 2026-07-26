@@ -9,6 +9,7 @@ AgentBuilder 根据预设构建 ToolRegistry。
   PLAN      — 规划 (read + grep + list_dir + glob + search + todo)
   CODEX     — Codex 兼容 (bash + read + apply_patch + grep)
   OPENCODE  — OpenCode 兼容 (bash + read + write + edit + grep + glob + skill + todo)
+  LEAN      — 精简而宽的动作空间 (Bitter Lesson: bash+read+write+edit+grep+glob+list_dir, 7 个)
 
 IPR constraints:
   IPR-0: invariant tests at tests/test_toolset_presets.py
@@ -76,6 +77,17 @@ _TOOLSETS: dict[str, list[str]] = {
         "glob",
         "todo_list",
     ],
+    # PARADIGM Step 0 (Bitter Lesson): 少而宽的通用动作空间 (对齐 Pi 的7 工具)。
+    # 代码执行=通用动作; 工具少→模型选择清晰 + schema token 省。opt-in, 不改默认。
+    "lean": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "grep",
+        "glob",
+        "list_dir",
+    ],
 }
 
 
@@ -99,6 +111,7 @@ def get_tool_ids_for_preset(preset: str) -> list[str]:
         "plan": "plan",
         "codex": "codex",
         "opencode": "opencode",
+        "lean": "lean",
     }
     key = _NORMALIZE.get(normalized)
     if key is None:
@@ -123,6 +136,12 @@ _TOOL_CLASSES: dict[str, type | None] = {}
 """工具 ID -> 工具类的惰性映射。None = 未加载。"""
 
 
+def reset_tool_classes_cache() -> None:
+    """v0.5.0: 重置工具类缓存, 用于测试隔离。"""
+    global _TOOL_CLASSES
+    _TOOL_CLASSES.clear()
+
+
 def _lazy_import_tool(tool_id: str) -> type | None:
     """延迟导入工具类。
 
@@ -138,6 +157,7 @@ def _lazy_import_tool(tool_id: str) -> type | None:
         "read_file": ("zall.tools.read_file", "ReadFileTool"),
         "write_file": ("zall.tools.write_file", "WriteFileTool"),
         "edit_file": ("zall.tools.edit_file", "EditFileTool"),
+        "apply_patch": ("zall.tools.apply_patch", "ApplyPatchTool"),
         "batch_edit": ("zall.tools.batch_edit", "BatchEditTool"),
         "bash": ("zall.tools.bash", "BashTool"),
         "grep": ("zall.tools.grep", "GrepTool"),

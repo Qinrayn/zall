@@ -65,6 +65,25 @@ _KNOWN_WINDOWS: dict[str, int] = {
 # defaultwindow大小 (未知model)
 _DEFAULT_WINDOW: int = 32000
 
+# A2 (provider 一等化): 自定义 provider 的 window/price 运行时覆盖表。
+# 由 cli/config._merge_custom_providers() 在启动时填充 (从 TOML [[providers]] 的
+# window_size / price_in / price_out 字段)。get_window_size()/get_price() 先查此表,
+# 再查内置 _KNOWN_WINDOWS/_KNOWN_PRICES。这样自定义模型不再一律拿到默认 32000 / $3+$15。
+_CUSTOM_WINDOWS: dict[str, int] = {}
+_CUSTOM_PRICES: dict[str, tuple[float, float]] = {}
+
+
+def set_custom_windows(prices_map: dict[str, int]) -> None:
+    """供 config 层注入自定义 provider 的 window 元数据 (A2)。"""
+    _CUSTOM_WINDOWS.clear()
+    _CUSTOM_WINDOWS.update(prices_map)
+
+
+def set_custom_prices(prices_map: dict[str, tuple[float, float]]) -> None:
+    """供 config 层注入自定义 provider 的 price 元数据 (A2)。"""
+    _CUSTOM_PRICES.clear()
+    _CUSTOM_PRICES.update(prices_map)
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # model价格表 ($/1M tokens)
@@ -127,9 +146,18 @@ _SORTED_PRICES: list[tuple[str, tuple[float, float]]] = sorted(
 
 
 def get_window_size(model_name: str) -> int:
-    """查modelwindow大小。已知modelreturn精确值, 未知return保守default值。"""
+    """查modelwindow大小。已知modelreturn精确值, 未知return保守default值。
+
+    A2: 先查自定义 provider 运行时覆盖表 (_CUSTOM_WINDOWS), 再查内置表。
+    """
     if not model_name:
         return _DEFAULT_WINDOW
+    # A2: 自定义 provider 覆盖优先 (精确 + 前缀)
+    if model_name in _CUSTOM_WINDOWS:
+        return _CUSTOM_WINDOWS[model_name]
+    for known, size in sorted(_CUSTOM_WINDOWS.items(), key=lambda x: -len(x[0])):
+        if model_name.startswith(known):
+            return size
     # B1 fix: 先精确匹配完整名称
     if model_name in _KNOWN_WINDOWS:
         return _KNOWN_WINDOWS[model_name]
@@ -145,9 +173,17 @@ def get_price(model_name: str) -> tuple[float, float]:
 
     未知模型返回保守默认值 ($3/$15 per 1M)。
     B1 fix: 先精确匹配完整名称, 再按长前缀降序匹配。
+
+    A2: 先查自定义 provider 运行时覆盖表 (_CUSTOM_PRICES), 再查内置表。
     """
     if not model_name:
         return (_DEFAULT_PRICE_IN, _DEFAULT_PRICE_OUT)
+    # A2: 自定义 provider 覆盖优先 (精确 + 前缀)
+    if model_name in _CUSTOM_PRICES:
+        return _CUSTOM_PRICES[model_name]
+    for prefix, prices in sorted(_CUSTOM_PRICES.items(), key=lambda x: -len(x[0])):
+        if model_name.startswith(prefix):
+            return prices
     # 先精确匹配
     if model_name in _KNOWN_PRICES:
         return _KNOWN_PRICES[model_name]
@@ -190,16 +226,32 @@ _ADAPTER_TYPE_MAP: dict[str, str] = {
 }
 
 
-def get_model_provider(model_name: str) -> str:
-    """根据model名推断 provider type (Item B: 基于register表)。"""
+def get_model_provider(model_name: str, registry: _ProviderMeta | None = None) -> str:
+    """根据model名推断 provider type (Item B: 基于register表)。
+
+    A1 fix (provider 一等化): 若传入 registry (合并表, 含自定义 provider) 则用之,
+    否则仅用内置 _PROVIDER_REGISTRY。调用方 (cli/config._detect_provider) 传入
+    _get_provider_registry() 以使自定义 provider 的 prefix 也参与推断, 否则
+    "deepseek-v4-flash" 会因内置 deepseek prefix 错路由, 自定义 provider 永远
+    匹配不到。
+
+    A1b fix (最长前缀优先): 当多个 provider 的 prefix 都匹配时 (典型冲突:
+    内置 "deepseek-" 与自定义 "deepseek-v4-flash" 同时匹配模型名
+    "deepseek-v4-flash"), 选最长匹配的 prefix 对应的 provider。这保证更具体的
+    自定义 provider 能覆盖较宽泛的内置 provider, 而不依赖 dict 迭代顺序。
+    """
     if not model_name:
         return "openai"
+    reg = registry if registry is not None else _PROVIDER_REGISTRY
     model_lower = model_name.lower()
-    for provider, (_display, _env, _base, _url, prefixes, _adapter) in _PROVIDER_REGISTRY.items():
+    best_provider: str | None = None
+    best_prefix_len: int = -1
+    for provider, (_display, _env, _base, _url, prefixes, _adapter) in reg.items():
         for prefix in prefixes:
-            if model_lower.startswith(prefix):
-                return provider
-    return "openai"  # default
+            if model_lower.startswith(prefix) and len(prefix) > best_prefix_len:
+                best_prefix_len = len(prefix)
+                best_provider = provider
+    return best_provider if best_provider is not None else "openai"  # default
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -223,3 +275,69 @@ _MODEL_PRESETS: list[tuple[str, str, str, str]] = [
     ("ollama-qwen25",   "qwen2.5",         "Ollama local (qwen2.5)", "ollama"),
     ("llama.cpp",       "llama.cpp-local", "llama.cpp local server (OpenAI-compat)", "openai"),
 ]
+
+
+# ─────────────────────────────────────────────────────────────
+# Provider 展示辅助 (单一真相源, 供 CLI /model /provider 使用, 消除重复硬编码)
+# ─────────────────────────────────────────────────────────────
+
+# provider key → 单字母标签 (紧凑列表用)
+_PROVIDER_TAG: dict[str, str] = {
+    "openai": "O",
+    "anthropic": "C",
+    "gemini": "G",
+    "ollama": "L",
+    "agnes": "A",
+    "deepseek": "D",
+}
+
+
+def get_provider_display(provider: str) -> str:
+    """provider key → 人类可读显示名 (取自 _PROVIDER_REGISTRY, 单一真相源)。"""
+    meta = _PROVIDER_REGISTRY.get(provider)
+    return meta[0] if meta else provider
+
+
+def get_provider_tag(provider: str) -> str:
+    """provider key -> 单字母标签; 未知 provider (含自定义) 返回其名首字母大写。
+
+    A3 fix (provider 一等化): 自定义 provider 不再固定返回 '?'。用 provider 名
+    首字母大写作为兜底标签, 使自定义 provider 在 /model 紧凑列表里也有可区分标记。
+    """
+    tag = _PROVIDER_TAG.get(provider)
+    if tag:
+        return tag
+    if provider:
+        return provider[0].upper()
+    return "?"
+
+
+def list_providers(registry: _ProviderMeta | None = None) -> list[tuple[str, str, str, str]]:
+    """列出所有已注册 provider: (key, display, env_var, get_key_url)。
+
+    A3 fix: 默认读合并表 (含自定义 provider)。调用方可传内置 _PROVIDER_REGISTRY
+    以仅列内置。
+    """
+    reg = registry if registry is not None else _PROVIDER_REGISTRY
+    return [(key, meta[0], meta[1], meta[3]) for key, meta in reg.items()]
+
+
+def get_provider_default_model(provider: str, registry: _ProviderMeta | None = None) -> str:
+    """provider key -> 该 provider 的默认模型 full_name (_MODEL_PRESETS 首个匹配)。
+
+    无匹配预设时返回空串 (调用方需提示用户手动指定模型)。
+
+    A3 fix: 对自定义 provider 无预设时, 不再固定返回空串 -- 改用其首个 model_prefix
+    (若注册表项可取到), 仍无则返回空串。这样 /provider <custom> 不再因无预设而失败。
+    """
+    reg = registry if registry is not None else _PROVIDER_REGISTRY
+    for _alias, full_name, _note, prov in _MODEL_PRESETS:
+        if prov == provider:
+            return full_name
+    # 自定义 provider 兜底: 取其首个 prefix 作默认模型名
+    meta = reg.get(provider)
+    if meta is not None:
+        prefixes = meta[4]
+        if prefixes:
+            return prefixes[0].rstrip("-")
+    return ""

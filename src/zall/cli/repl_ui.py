@@ -23,6 +23,7 @@ from zall.cli.commands import (
     handle_slash,
 )
 from zall.cli.config import _onboarding, _detect_provider
+from zall.cli.file_complete import expand_at_references
 from zall.cli.orchestrator import make_usage_observer as _make_usage_observer
 from zall.cli.orchestrator import build_mcp_tools
 from zall.cli.prompt import make_prompt_fn
@@ -32,8 +33,9 @@ from zall.core.checkpoint import CheckpointManager
 from zall.core.compactor import ModelCompactor
 from zall.core.context import Context
 from zall._util.logging import get_zall_logger as _get_zall_logger
+from zall._util.term import ensure_new_line as _ensure_new_line  # G10: 提示符行首保证
 from zall.core.builder import AgentBuilder
-from zall.core.loop import AgentLoop
+from zall.core.loop import AgentLoop, TRANSIENT_KEYWORDS, is_transient_error
 from zall.core.model import Message
 from zall.mcp.tool import MCPTool
 from zall.safety.rules_file import load_rules
@@ -49,10 +51,15 @@ __all__ = [
     "_prompt",
     "_make_usage_observer",
     "REPL_MAX_STEPS",
+    "TRANSIENT_KEYWORDS",
+    "is_transient_error",
 ]
 
 # REPL 对话态步数max: 100000 等价"无max"
 REPL_MAX_STEPS = 100_000
+
+# 瞬态(可重试)错误判定 — 真相源在 core.loop (run/REPL/TUI 三路径共用);
+# TRANSIENT_KEYWORDS / is_transient_error 已从顶部 import 并通过 __all__ re-export。
 
 
 def _prompt(state: dict[str, Any]) -> str:
@@ -68,9 +75,49 @@ def _prompt(state: dict[str, Any]) -> str:
     return f"{base} \u25b8 "
 
 
+def _read_multiline_input(prompt: str, input_fn: Any) -> str | None:
+    """Read input with multi-line support (fallback for when prompt_toolkit is unavailable).
+
+    Supports:
+    - Backslash continuation: line ending with ``\\`` shows continuation prompt (``... ``)
+      and joins the next line(s). Multiple backslash continuations are supported.
+    - Paste detection: input containing ``\\n`` (paste from clipboard) is accepted directly
+      as-is, with embedded newlines preserved.
+    - Single-line input: unchanged behavior (identity).
+
+    This function is a safety net for the bare ``input()`` fallback path.
+    When prompt_toolkit is available, ``make_prompt_fn`` already handles multi-line
+    via Alt-Enter, backslash, double-enter, and unclosed-paren detection.
+    """
+    line = input_fn(prompt)
+    if line is None:
+        return None
+    if "\n" in line:
+        # Paste detection: multi-line paste accepted directly
+        return line
+    stripped = line.rstrip()
+    if stripped.endswith("\\"):
+        parts = [stripped[:-1]]
+        while True:
+            try:
+                next_line = input_fn("... ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if next_line is None:
+                break
+            next_stripped = next_line.rstrip()
+            if next_stripped.endswith("\\"):
+                parts.append(next_stripped[:-1])
+            else:
+                parts.append(next_stripped)
+                break
+        return "".join(parts)
+    return line
+
+
 def _print_banner(out: Any, *, model: str | None, branch: str | None,
                   max_steps: int, verbose: bool, plan: bool = False) -> None:
-    """REPL banner — Obsidian theme: architectural minimal header."""
+    """REPL banner — Obsidian 框式 header (v1.4: 恢复框式设计 + 呼吸空行)。"""
     try:
         import os as _os
         if _os.name == "nt":
@@ -86,22 +133,25 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
     else:
         from zall.cli.config import _config_status
         display_model = _config_status().get("model") or "unset"
-    # Architectural header
+    # v1.4: 框式 banner (用户偏好) + 上下呼吸空行
     width = min(50, max(30, len(display_model) + 20))
     _dash_line = "\u2500" * width
+    console.print()
     console.print(f"  [bold {_C.ACCENT}]\u256d{_dash_line}\u256e[/]")
     console.print(f"  [bold {_C.ACCENT}]\u2502[/]  [bold]zall[/]  "
                   f"[dim {_C.ACCENT}]\u00b7[/]  [dim]{display_model}[/]")
     meta_parts = []
     if branch:
-        meta_parts.append(f"[dim]{branch}[/]")
+        meta_parts.append(f"[{_C.INFO}]{branch}[/]")
     if plan:
         meta_parts.append(f"[{_C.THINKING}]plan[/]")
     if verbose:
-        meta_parts.append("[dim]verbose[/]")
+        meta_parts.append(f"[{_C.DIM}]verbose[/]")
     if meta_parts:
-        console.print(f"  [bold {_C.ACCENT}]\u2502[/]  [dim]{'  '.join(meta_parts)}[/]")
+        sep = f"  [{_C.SUBTLE}]\u00b7[/]  "
+        console.print(f"  [bold {_C.ACCENT}]\u2502[/]  {sep.join(meta_parts)}")
     console.print(f"  [bold {_C.ACCENT}]\u2570{_dash_line}\u256f[/]")
+    console.print()
 
 
 def build_repl_loop(
@@ -118,10 +168,12 @@ def build_repl_loop(
     plan_mode: bool = False,
     mcp_tools: tuple[MCPTool, ...] = (),
     ext_registry: Any = None,
+    strict: bool = False,
+    responder: Any = None,
 ) -> AgentLoop | None:
     """Construct a REPL AgentLoop (delegates to orchestrator)."""
     from zall.cli import config as _cli_config
-    from zall.cli.orchestrator import build_tools, merge_tools, inject_subagent_context, refine_goal
+    from zall.cli.orchestrator import build_tools, merge_tools, inject_subagent_context, refine_goal, build_perception_engine
     from zall.cli.environment import build_system_prompt, CwdMeta
 
     try:
@@ -162,10 +214,23 @@ def build_repl_loop(
     def _print_fn(s: str) -> None:
         _out_stream.write(s + "\n")
         _out_stream.flush()
-    responder = CliUserResponder(
+    def _greylist_choose(choices: list[tuple[str, str, str]]) -> str:
+        # 确认门主选择走数字选择器 (默认 reject=2); 编辑子提示仍走 ask_fn 文本。
+        # type-ahead 防护: 提问前冲刷模型运行时提前敲的滞留按键
+        # (与 TUI 选择菜单宽限期同源; 仅真 TTY 生效, 注入 input_fn 的测试不受影响)。
+        from zall.cli.responder import flush_stdin_typeahead
+        from zall.cli.select import select_prompt
+        if state.get("_input_fn") is None:
+            flush_stdin_typeahead()
+        return select_prompt(
+            _out_stream, "confirm tool call", choices,
+            input_fn=state.get("_input_fn") or input, default_index=1,
+        )
+    responder = responder or CliUserResponder(
         yes=yes, is_tty=is_interactive, plan_mode=plan_mode,
         print_fn=_print_fn,
-        ask_fn=state.get("_input_fn"),  # v0.3.0 (B3): gate 确认走同一输入栈 (prompt_toolkit), 避免裸 input() 撕裂显示; 测试无 _input_fn 时回落 input
+        ask_fn=state.get("_input_fn"),  # v0.3.0 (B3): gate 确认走同一输入栈 (prompt_toolkit), 避免裸 input() 撞裂显示; 测试无 _input_fn 时回落 input
+        choose_fn=_greylist_choose,
     )
     git_protect = GitProtect()
     try:
@@ -186,10 +251,15 @@ def build_repl_loop(
         .with_git_protect(git_protect)
         .with_checkpoint(checkpoint_mgr)
         .with_plan_mode(plan_mode)
+        .with_strict(strict)
         .with_compactor(ModelCompactor())
         .with_extensions(ext_registry)
+        .with_perception(build_perception_engine())
         .build()
     )
+    if seed_messages is None:
+        # TUI 路径不显式传 seed; 从 state 取 CLI --continue/-r 恢复的消息
+        seed_messages = state.pop("resume_messages", None)
     if seed_messages:
         loop.set_messages(list(seed_messages))
     else:
@@ -212,6 +282,8 @@ def repl(
     verbose: bool = False,
     input_fn: Any = None,
     out: Any = None,
+    strict: bool = False,
+    resume_session: str | None = None,
 ) -> int:
     """REPL: 单一对话态 (持续 AgentLoop + step() + 共享context)。"""
     from zall.cli.environment import get_cached_cwd_meta
@@ -236,6 +308,11 @@ def repl(
         _learn_ext = ext_registry.get("auto_learn")
         if _learn_ext is not None and hasattr(_learn_ext, "get_config_overrides"):
             try:
+                # E2.3: Auto-apply pending suggestions so apply_suggestion's
+                # side effects (file writes, overrides persistence) really happen.
+                if hasattr(_learn_ext, "get_suggestions") and hasattr(_learn_ext, "apply_suggestion"):
+                    for _s in _learn_ext.get_suggestions():
+                        _learn_ext.apply_suggestion(_s)
                 _overrides = _learn_ext.get_config_overrides()
                 if _overrides:
                     set_extension_suggestions(_overrides)
@@ -244,24 +321,35 @@ def repl(
     except Exception as _ext_err:
         _log.warning("built-in extensions skipped: %s", _ext_err)  # Built-in extensions are optional
 
-    if input_fn is None:
-        input_fn = make_prompt_fn(
-            commands=list(get_known_commands()),
-            skills=[s.name for s in skills],
-        )
-    else:
-        input_fn = input_fn or input
-
-    _onboarding(out, input_fn)
-    _setup_completion(skills)
+    # v2.x: 先建 state (供 prompt bottom_toolbar 读 model/context 显示)。
+    # model 未传 --model 时从 config 解析真实名 (与 TUI 一致, 否则 toolbar 显 zall)。
+    from zall.cli.config import _config_status as _cfg_status
     state: dict[str, Any] = {
-        "model": model, "max_steps": REPL_MAX_STEPS,
+        "model": model or (_cfg_status().get("model") or ""),
+        "max_steps": REPL_MAX_STEPS,
         "verbose": verbose, "usage": {"prompt": 0, "completion": 0},
-        "_input_fn": input_fn,
         "_mcp_tools": mcp_tools,    # Item E: 供 /reload 访问
         "_skills": skills,           # Item E: 供 /reload 访问
         "_ext_registry": ext_registry,
     }
+
+    if input_fn is None:
+        input_fn = make_prompt_fn(
+            commands=list(get_known_commands()),
+            skills=[s.name for s in skills],
+            state=state,  # bottom_toolbar 读实时 model/context
+        )
+    else:
+        input_fn = input_fn or input
+    state["_input_fn"] = input_fn
+
+    # CLI --continue/-r: 启动期恢复会话 (设 state["resume_messages"], 供下方 loop 构建 seed)
+    if resume_session:
+        from zall.cli.session import _run_resume
+        _run_resume(out, resume_session, state)
+
+    _onboarding(out, input_fn)
+    _setup_completion(skills)
 
     from zall.cli.session import _check_repl_autosave, _save_repl_state, _clear_repl_autosave
     _check_repl_autosave(out, state)
@@ -270,7 +358,7 @@ def repl(
                   branch=get_cached_cwd_meta(state).git_branch,
                   max_steps=state["max_steps"],
                   verbose=state["verbose"], plan=state.get("plan_mode", False))
-    out.write("  /help for commands \u00b7 Ctrl-D to exit \u00b7 /plan = read-only mode\n")
+    out.write("  /help commands \u00b7 Ctrl-D exit \u00b7 Ctrl-R search history \u00b7 /plan read-only\n")
     out.flush()
 
     # v2: background update check (non-blocking)
@@ -295,8 +383,9 @@ def repl(
     try:
         while True:
             try:
+                _ensure_new_line()  # G10: 工具输出无尾换行时补行, 提示符不接行尾
                 prompt = _prompt(state)
-                line = input_fn(prompt)
+                line = _read_multiline_input(prompt, input_fn)
             except EOFError:
                 out.write("\n  bye\n")
                 return 0
@@ -307,6 +396,10 @@ def repl(
                 return 0
             line = line.strip()
             if not line:
+                # v0.6.0: 空行时更新状态栏
+                renderer = state.get("_renderer")
+                if renderer is not None and hasattr(renderer, "render_status_bar"):
+                    renderer.render_status_bar()
                 continue
             # input长度limit: 防止意外粘贴巨量文本导致 OOM
             if len(line) > 100_000:
@@ -336,6 +429,13 @@ def repl(
                         loop = None
                     continue
 
+            # v2.x: @file 引用展开 — 把 @path 解析到的真实文件内容注入消息 (Claude Code 式)。
+            # 只展开真实文件; 非文件 @token 原样保留。slash 命令已在上方返回, 不受影响。
+            line, _injected = expand_at_references(line)
+            if _injected:
+                out.write(f"  \u00b7 injected {len(_injected)} file(s): {', '.join(_injected[:5])}\n")
+                out.flush()
+
             if loop is None:
                 loop = build_repl_loop(
                     line, state, yes, json_mode, stream, out,
@@ -345,48 +445,80 @@ def repl(
                     plan_mode=state.get("plan_mode", False),
                     mcp_tools=tuple(mcp_tools),
                     ext_registry=ext_registry,
+                    strict=state.get("strict", strict),
                 )
                 if loop is None:
                     continue
                 state["_loop"] = loop
-                if not confirm_goal(out, loop.goal, judge_mode="none", yes=yes, input_fn=input_fn):
+                # v0.6.0: 更新状态栏
+                renderer = state.get("_renderer")
+                if renderer is not None and hasattr(renderer, "update_status"):
+                    from zall.cli.environment import get_cached_cwd_meta
+                    _meta = get_cached_cwd_meta(state)
+                    renderer.update_status(
+                        model=state.get("model", "") or str(getattr(loop.model_adapter, "model_name", "")),
+                        branch=_meta.git_branch or "",
+                        goal=loop.goal.statement.goal_type.value if hasattr(loop.goal, "statement") else "",
+                        plan=state.get("plan_mode", False),
+                    )
+                confirmed, final_goal = confirm_goal(out, loop.goal, judge_mode="none", yes=yes, strict=strict, input_fn=input_fn)
+                if not confirmed:
                     out.write("  goal not confirmed; type a new task to retry.\n")
                     out.flush()
                     loop = None
                     state.pop("_loop", None)
                     continue
+                # 如果用户修改了 goal, 更新 loop 的 goal
+                if final_goal is not None and final_goal is not loop.goal:
+                    # 通过 builder 属性更新 loop 的 goal
+                    if hasattr(loop, "_goal"):
+                        loop._goal = final_goal
             else:
                 loop.add_user_message(line)
 
             while True:
                 try:
+                    pre_step_msg_count = len(loop.messages)
                     result = loop.step()
                 except KeyboardInterrupt:
                     # stop spinner (防止残留output)
                     renderer = state.get("_renderer")
                     if renderer is not None and hasattr(renderer, "_stop_spinner"):
                         renderer._stop_spinner()
-                    out.write("\n  \u00b7 interrupted (context preserved, continue typing)\n")
+                    # 流式输出保留: flush buffer + 插入 [Interrupted] 标记
+                    # 不像旧行为完全丢弃已显示的内容, 而是保留用户已看到的 token
+                    if renderer is not None and hasattr(renderer, "interrupt_stream"):
+                        renderer.interrupt_stream()
+                    # E4: rollback messages to pre-step state (discard model partial output)
+                    pre_step_msgs = loop.messages[:pre_step_msg_count]
+                    loop.set_messages(pre_step_msgs)
+                    # Record user_interrupt event in timeline
+                    try:
+                        import time as _time
+                        from zall.core.verifiability import EventType as _EventType
+                        loop.recorder.append(
+                            event_id=f"user_interrupt_{loop.step_count}",
+                            ts=int(_time.time() * 1000),
+                            event_type=_EventType.USER_INTERRUPT,
+                            payload={"step": loop.step_count, "partial_output_preserved": True},
+                        )
+                    except Exception:
+                        pass
+                    out.write("\n  [interrupted]\n")
                     out.flush()
                     break
                 if result.is_terminal:
                     if result.egress and result.egress.error:
                         err = result.egress.error
-                        transient_keywords = (
-                            "429", "rate limit", "rate_limit", "timeout",
-                            "connection", "503", "502", "500",
-                            "temporary", "try again", "retry",
-                            "service unavailable", "bad gateway", "too many requests",
-                        )
-                        err_lower = err.lower()
-                        if any(kw in err_lower for kw in transient_keywords):
+                        if is_transient_error(err):
                             out.write(f"  \u26a0 {err[:100]}\n")
                             # auto-retry up to 3 times with backoff
                             import time as _time
+                            from zall._util.backoff import backoff_delay
                             retried = False
                             for attempt in range(1, 4):
-                                delay = attempt * 2  # 2s, 4s, 6s
-                                out.write(f"  \u00b7 retry {attempt}/3 in {delay}s...\n")
+                                delay = round(backoff_delay(attempt), 1)  # G13: 指数+抖动
+                                out.write(f"  · retry {attempt}/3 in {delay}s...\n")
                                 out.flush()
                                 _time.sleep(delay)
                                 try:
@@ -400,8 +532,7 @@ def repl(
                                     out.flush()
                                     break
                                 if result.is_terminal and result.egress and result.egress.error:
-                                    err2 = result.egress.error.lower()
-                                    if not any(kw in err2 for kw in transient_keywords):
+                                    if not is_transient_error(result.egress.error):
                                         break  # non-transient → fall through to error handler
                                     # still transient, continue retry loop
                                 else:
@@ -431,6 +562,9 @@ def repl(
                         fc = renderer.folded_count
                         if fc > 0:
                             out.write(f"  [{fc} tool(s) folded · type /expand <N> to show, /expand all to show all]\n")
+                    # v1.2: 上下文 footer 提示 (借鉴 Claude Code)
+                    if renderer is not None and hasattr(renderer, "render_contextual_hint"):
+                        renderer.render_contextual_hint("idle")
                     out.write("\n")
                     break
             out.flush()

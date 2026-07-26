@@ -96,6 +96,67 @@ class TestMainRegression:
         rc = app_mod.repl(input_fn=boom, out=io.StringIO())
         assert rc == 0
 
+    def test_default_dispatch_is_inline_tui(self, monkeypatch) -> None:
+        """v2.x 收敛: 无 task 无 flag → 默认 Textual inline TUI (inline=True)。
+
+        反例: 默认不再直接进同步 REPL (repl 不被调用, 除非 fallback)。
+        """
+        calls: dict = {}
+        monkeypatch.setattr("zall.cli.config._onboarding", lambda *a, **k: None)
+
+        def fake_run_tui(**kw):
+            calls["run_tui"] = kw
+            return 0
+
+        def fake_repl(**kw):
+            calls["repl"] = kw
+            return 0
+        monkeypatch.setattr("zall.cli.tui.run_tui", fake_run_tui)
+        monkeypatch.setattr("zall.cli.repl_ui.repl", fake_repl)
+        rc = app_mod.main([])
+        assert rc == 0
+        assert "run_tui" in calls
+        assert calls["run_tui"].get("inline") is True   # 默认 inline
+        assert "repl" not in calls                       # 反例: 默认不进同步 REPL
+
+    def test_tui_fullscreen_flag_removed(self) -> None:
+        """--tui 全屏已删: argparse 拒绝 (只剩 inline 默认 + --no-tui + 一次性)。"""
+        with pytest.raises(SystemExit):
+            app_mod.main(["--tui"])
+
+    def test_no_tui_forces_sync_repl(self, monkeypatch) -> None:
+        """--no-tui → 强制同步 REPL, 完全不碰 Textual。"""
+        calls: dict = {}
+        monkeypatch.setattr("zall.cli.config._onboarding", lambda *a, **k: None)
+
+        def fake_run_tui(**kw):
+            calls["run_tui"] = kw
+            return 0
+
+        def fake_repl(**kw):
+            calls["repl"] = kw
+            return 0
+        monkeypatch.setattr("zall.cli.tui.run_tui", fake_run_tui)
+        monkeypatch.setattr("zall.cli.repl_ui.repl", fake_repl)
+        rc = app_mod.main(["--no-tui"])
+        assert rc == 0
+        assert "repl" in calls
+        assert "run_tui" not in calls                    # 反例: --no-tui 不进 Textual
+
+    def test_inline_falls_back_to_repl_when_unsupported(self, monkeypatch) -> None:
+        """默认 inline 但终端不支持 (run_tui 返回 2) → 自动回退同步 REPL。"""
+        calls: dict = {}
+        monkeypatch.setattr("zall.cli.config._onboarding", lambda *a, **k: None)
+        monkeypatch.setattr("zall.cli.tui.run_tui", lambda **kw: 2)  # 终端不支持
+
+        def fake_repl(**kw):
+            calls["repl"] = kw
+            return 0
+        monkeypatch.setattr("zall.cli.repl_ui.repl", fake_repl)
+        rc = app_mod.main([])
+        assert rc == 0
+        assert "repl" in calls                           # rc==2 → 回退同步 REPL
+
     def test_main_does_not_recurse(self) -> None:
         """Counterexample: main() 不再无限recursive (旧 bug).
 
@@ -182,7 +243,10 @@ class TestRunWithFakeAdapter:
 
         session_dir = next((tmp_path / "sessions").iterdir())
         lines = (session_dir / "timeline.jsonl").read_text(encoding="utf-8").strip().split("\n")
-        events = [json.loads(l) for l in lines]
+        records = [json.loads(l) for l in lines]
+        # G12: 首行是版本头 (非事件, 无 prev_hash), 链验证前过滤
+        assert records and records[0].get("type") == "metadata"
+        events = [r for r in records if r.get("type") != "metadata"]
 
         # 链式verify: 每条 prev_hash == 前一条 hash
         prev = "0" * 64
@@ -549,7 +613,7 @@ class TestSessionsAndResume:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 新增commandtest (对齐 Claude Code 水准): init / cost / diff / doctor / compact / usage
+# 新增commandtest (对齐 Claude Code 水准): init / diff / doctor / compact / usage
 # ──────────────────────────────────────────────────────────────────────────
 
 from zall.core.loop_events import LoopEvent  # noqa: E402  (放在类外末尾, 保持导入区style)
@@ -577,24 +641,6 @@ class TestNewCommands:
         os.chdir(old_cwd)
         rules = (tmp_path / ".zall" / "rules.toml").read_text(encoding="utf-8")
         assert "AGENTS" not in rules  # 未误写
-
-    def test_cost_shows_usage(self) -> None:
-        """Happy path: /cost 显示累计 token."""
-        buf = io.StringIO()
-        state = {"usage": {"prompt": 120, "completion": 34}}
-        from zall.cli.commands import cmd_cost
-        cmd_cost("", buf, None, state)
-        out = buf.getvalue()
-        assert "120" in out  # prompt tokens
-        assert "34" in out  # completion tokens
-        assert "cost" in out.lower()
-
-    def test_cost_empty_usage(self) -> None:
-        """Counterexample: 无 usage → 显示 0."""
-        buf = io.StringIO()
-        from zall.cli.commands import cmd_cost
-        cmd_cost("", buf, None, {"usage": {"prompt": 0, "completion": 0}})
-        assert "0" in buf.getvalue()
 
     def test_usage_observer_accumulates(self) -> None:
         """invariant: model_call event的 usage 被累计到 state (跨多轮)."""
@@ -631,7 +677,6 @@ class TestNewCommands:
         v0.0.10: 使用 ModelCompactor, 需要 loop._model 带 complete() 方法.
         """
         buf = io.StringIO()
-        from zall.core.model import Message, ModelResponse, StopReason
 
         class _FakeModel:
             model_name = "fake"
@@ -655,6 +700,9 @@ class TestNewCommands:
             ]  # 8 non-system msgs > keep_recent=4 → will compact
             _model = _FakeModel()
 
+            def set_messages(self, msgs: list) -> None:
+                self._messages = list(msgs)
+
         loop = _FakeLoop()
         state: dict = {}
         cmd_compact("", buf, loop, state)
@@ -671,15 +719,18 @@ class TestNewCommands:
             _messages = [__import__("zall.core.model", fromlist=["Message"]).Message(
                 role="user", content="hi")]
 
+            def set_messages(self, msgs: list) -> None:
+                self._messages = list(msgs)
+
         loop = _FakeLoop()
         cmd_compact("", buf, loop, {})
         assert "nothing to compact" in buf.getvalue().lower()
 
     def test_slash_routing_new_commands(self) -> None:
-        """Happy path: /cost /diff /doctor 路由到corresponds tocommand且不returns exit/clear."""
+        """Happy path: /diff /doctor 路由到corresponds tocommand且不returns exit/clear."""
         buf = io.StringIO()
         state: dict = {"usage": {"prompt": 1, "completion": 1}}
-        for cmd in ("/cost", "/diff", "/doctor"):
+        for cmd in ("/diff", "/doctor"):
             r = app_mod._handle_slash(cmd, state, buf, loop=None)
             assert r == "handled"
 
@@ -691,10 +742,12 @@ class TestNewCommands:
         保留 loop: 成功时压缩已生效, 无可压缩/fail时原对话态保留.
         """
         buf = io.StringIO()
-        from zall.core.model import Message
 
         class _FakeLoop:
             _messages = [Message(role="user", content=f"m{i}") for i in range(6)]
+
+            def set_messages(self, msgs: list) -> None:
+                self._messages = list(msgs)
 
         loop = _FakeLoop()
         r = app_mod._handle_slash("/compact", {}, buf, loop=loop)
@@ -702,9 +755,99 @@ class TestNewCommands:
         assert loop is not None  # 对话态保留
 
     def test_resume_no_arg_shows_usage(self) -> None:
-        """Happy path: /resume 无参 → usage."""
+        """Happy path: /resume 无参 → 会话选择器; 无会话时优雅退让 (不崩)。"""
         buf = io.StringIO()
         state: dict = {}
         with patch.object(session_mod, "_get_sessions_dir", return_value= Path("/tmp/x")):
             app_mod._handle_slash("/resume", state, buf)
-        assert "usage" in buf.getvalue().lower()
+        assert "no sessions" in buf.getvalue().lower()
+
+
+class TestOneShotExitCode:
+    """一次性任务退出码语义 (Bug fix 2026-07-26).
+
+    旧行为: 未开 judge 时 UNDECIDABLE 是必然终态, Q&A 成功也 exit 2 —
+    `zall -y "..." && next` 永远断链。新语义: 未开 judge 且无错 → 0。
+    """
+
+    @staticmethod
+    def _fake_egress(final_state, error=None):
+        from unittest.mock import MagicMock
+        eg = MagicMock()
+        eg.final_state = final_state
+        eg.error = error
+        return eg
+
+    def _run_main(self, monkeypatch, egress, argv):
+        monkeypatch.setattr(app_mod, "run", lambda *a, **k: egress)
+        return app_mod.main(argv)
+
+    def test_no_judge_undecidable_exits_zero(self, monkeypatch) -> None:
+        """核心回归: 默认 (--judge none) UNDECIDABLE 无错 → 0 (脚本可组合)。"""
+        eg = self._fake_egress(TerminationState.UNDECIDABLE)
+        assert self._run_main(monkeypatch, eg, ["-y", "hi"]) == 0
+
+    def test_no_judge_with_error_exits_two(self, monkeypatch) -> None:
+        """反例: 未开 judge 但执行出错 → 仍 2 (不掩盖失败)。"""
+        eg = self._fake_egress(TerminationState.UNDECIDABLE, error="boom")
+        assert self._run_main(monkeypatch, eg, ["-y", "hi"]) == 2
+
+    def test_judge_undecidable_exits_two(self, monkeypatch) -> None:
+        """反例 (PR-0): 开了 judge 裁决不了 → 2 (诚实的不确定保留)。"""
+        eg = self._fake_egress(TerminationState.UNDECIDABLE)
+        assert self._run_main(monkeypatch, eg, ["-y", "--judge", "system", "hi"]) == 2
+
+    def test_met_and_not_met_unchanged(self, monkeypatch) -> None:
+        """MET → 0 / NOT_MET → 1 不变。"""
+        assert self._run_main(
+            monkeypatch, self._fake_egress(TerminationState.MET), ["-y", "hi"]) == 0
+        assert self._run_main(
+            monkeypatch, self._fake_egress(TerminationState.NOT_MET), ["-y", "hi"]) == 1
+
+
+class TestModifiedFilesBaseline:
+    """modified 报告基线过滤 (Bug fix 2026-07-26).
+
+    背景: 脏工作区 (167 个未提交改动) 下纯 Q&A 会话误报
+    "modified: 167 file(s)" — get_modified_files 无基线时报全部存量。
+    """
+
+    @staticmethod
+    def _fake_run(stdout: str):
+        class _R:
+            returncode = 0
+        r = _R()
+        r.stdout = stdout
+        return lambda *a, **k: r
+
+    def test_baseline_filters_preexisting(self, monkeypatch) -> None:
+        """基线内的存量改动被过滤, 只报本次新增。"""
+        import subprocess
+        from zall.cli.orchestrator import get_modified_files
+        monkeypatch.setattr(subprocess, "run", self._fake_run("a.py\nb.py\nnew.py\n"))
+        out = get_modified_files(frozenset({"a.py", "b.py"}))
+        assert out == ["new.py"]
+
+    def test_qa_session_reports_none(self, monkeypatch) -> None:
+        """核心回归: 全部改动均为存量 (Q&A 会话) → None, 不报 modified 行。"""
+        import subprocess
+        from zall.cli.orchestrator import get_modified_files
+        monkeypatch.setattr(subprocess, "run", self._fake_run("a.py\nb.py\n"))
+        assert get_modified_files(frozenset({"a.py", "b.py"})) is None
+
+    def test_no_baseline_keeps_legacy_behavior(self, monkeypatch) -> None:
+        """反例: baseline=None 保留旧语义 (报全部), 兼容直接调用方。"""
+        import subprocess
+        from zall.cli.orchestrator import get_modified_files
+        monkeypatch.setattr(subprocess, "run", self._fake_run("a.py\nb.py\n"))
+        assert get_modified_files(None) == ["a.py", "b.py"]
+
+    def test_snapshot_baseline_and_git_failure(self, monkeypatch) -> None:
+        """snapshot 返回 frozenset; git 失败 (反例) → 空集不崩。"""
+        import subprocess
+        from zall.cli.orchestrator import snapshot_modified_baseline
+        monkeypatch.setattr(subprocess, "run", self._fake_run("x.py\n"))
+        assert snapshot_modified_baseline() == frozenset({"x.py"})
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+        assert snapshot_modified_baseline() == frozenset()

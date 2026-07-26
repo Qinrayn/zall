@@ -85,23 +85,110 @@ def get_known_commands() -> frozenset[str]:
 # command元数据cache (避免每次补全都重建)
 _COMMAND_META_CACHE: dict[str, str] | None = None
 
+# TUI 命令面板: 日常高频命令 (空 query 优先展示 + /help 核心表)
+_CORE_COMMANDS: frozenset[str] = frozenset({
+    "/help", "/model", "/mode", "/plan", "/add", "/drop", "/diff",
+    "/clear", "/compact", "/undo", "/resume", "/commit", "/lab", "/doctor",
+})
+# 面板命令缓存: (规范名, 描述, 分类, 是否核心)
+_PALETTE_CACHE: list[tuple[str, str, str, bool]] | None = None
+
+# 面板降级: 可用自然语言/工具替代的"动作类"命令 — 仍可执行且在 /advanced 列出,
+# 但不进模糊面板也不进 /help (保持面板聚焦高频、不可替代的操作)。
+_PALETTE_DEMOTED: frozenset[str] = frozenset({
+    "/fix", "/review", "/git", "/commit",
+})
+
 
 def get_command_meta() -> dict[str, str]:
-    """return {command名: description} 字典 (供 prompt_toolkit completer 使用)。"""
+    """return {command名: description} 字典 (供 prompt_toolkit completer 使用)。
+
+    G17 (kimi "/name (alias)" 对标): 展示层派生别名关系, 不改 description 源 —
+    别名条目标 "→ 规范名", 规范名条目尾附 "(alias: ...)"。
+    """
     global _COMMAND_META_CACHE
     if _COMMAND_META_CACHE is not None:
         return _COMMAND_META_CACHE
     meta: dict[str, str] = {}
     for cmd_name, cmd in _COMMANDS.items():
-        meta[cmd_name] = cmd.description
+        if cmd_name != cmd.name:
+            # 别名条目: 指向规范名, 补全时用户知道这是同一命令
+            meta[cmd_name] = f"→ {cmd.name}" + (f" · {cmd.description}" if cmd.description else "")
+        else:
+            alias_note = f" (alias: {', '.join(cmd.aliases)})" if cmd.aliases else ""
+            meta[cmd_name] = cmd.description + alias_note
     _COMMAND_META_CACHE = meta
     return meta
 
 
 def _invalidate_command_meta_cache() -> None:
-    """commandregister后使cache失效 (下次 get_command_meta 重建)。"""
-    global _COMMAND_META_CACHE
+    """commandregister后使cache失效 (下次 get_command_meta / palette 重建)。"""
+    global _COMMAND_META_CACHE, _PALETTE_CACHE
     _COMMAND_META_CACHE = None
+    _PALETTE_CACHE = None
+
+
+def get_palette_commands() -> list[tuple[str, str, str, bool]]:
+    """供 TUI 命令面板: 只含规范名 (跳过别名), 附 (name, desc, category, is_core)。
+
+    与 get_command_meta() (含别名, 供 REPL prompt_toolkit) 不同: 面板要干净无别名噪音。
+    """
+    global _PALETTE_CACHE
+    if _PALETTE_CACHE is not None:
+        return _PALETTE_CACHE
+    out: list[tuple[str, str, str, bool]] = []
+    for key, cmd in _COMMANDS.items():
+        if cmd.name != key:
+            continue  # 跳过别名项 (只保留规范名)
+        if cmd.name in _PALETTE_DEMOTED:
+            continue  # 降级命令不进面板 (仍可执行 + /advanced 可查)
+        # G17: desc 尾附别名 — 既是展示信息, 也让 fuzzy desc 命中可经别名召回 (如 "q"→/exit)
+        desc = cmd.description + (f" · {', '.join(cmd.aliases)}" if cmd.aliases else "")
+        out.append((cmd.name, desc, cmd.category, cmd.name in _CORE_COMMANDS))
+    out.sort(key=lambda t: t[0])
+    _PALETTE_CACHE = out
+    return out
+
+
+def _match_score(text: str, q: str) -> int:
+    """模糊匹配档位: 前缀=0 / 子串=1 / 子序列=2 / 不匹配=-1 (越小越靠前)。"""
+    if text.startswith(q):
+        return 0
+    if q in text:
+        return 1
+    it = iter(text)
+    if all(ch in it for ch in q):
+        return 2
+    return -1
+
+
+def fuzzy_rank(
+    query: str,
+    items: list[tuple[str, str, str, bool]],
+    *,
+    limit: int = 8,
+) -> list[tuple[str, str, str, bool]]:
+    """对 (name, desc, category, is_core) 列表做模糊匹配排序。
+
+    打分: name 前缀/子串/子序列 = 0/1/2; name 未中而 desc 命中 → +3 (降级到 name 之后)。
+    未命中剔除。同分: core 优先, 再按名字。query 去前导 '/' 与空白并小写; 空 query → 原序。
+    纯函数, 无副作用 (可离线单测)。
+    """
+    q = query.strip().lstrip("/").lower()
+    if not q:
+        return items[:limit]
+    scored: list[tuple[int, bool, str, tuple[str, str, str, bool]]] = []
+    for it in items:
+        name = it[0].lstrip("/").lower()
+        s = _match_score(name, q)
+        if s < 0:
+            ds = _match_score((it[1] or "").lower(), q)
+            if ds < 0:
+                continue
+            s = ds + 3
+        scored.append((s, not it[3], name, it))
+    scored.sort(key=lambda t: (t[0], t[1], t[2]))
+    return [t[3] for t in scored[:limit]]
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -114,6 +201,7 @@ _CATEGORY_MODEL = "Model & Config"
 _CATEGORY_TOOLS = "Tools & Files"
 _CATEGORY_NAV = "Navigation"
 _CATEGORY_VIEW = "View"  # v0.4.0: 显示控制命令
+_CATEGORY_ADVANCED = "Advanced"  # v0.6.0: 高级命令 (隐藏, /advanced 查看)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -122,9 +210,11 @@ _CATEGORY_VIEW = "View"  # v0.4.0: 显示控制命令
 
 
 def _print_about(out: Any) -> None:
-    """打印项目design哲学。"""
+    """打印项目 design 哲学 + 身份信息 (版本/作者/许可证)。"""
+    from zall import __version__
     lines = [
-        "  zall — a falsifiable, reproducible coding agent",
+        f"  zall v{__version__} — a falsifiable, reproducible coding agent",
+        "  author: qinrayn (Yuhan Zhang) · license: MIT · (c) 2026",
         "",
         "  Architecture-guaranteed, not prompt-engineering-guaranteed:",
         "    PR-0 (No Hallucination): stop_reason=STOP + no tool_calls → flagged",
@@ -133,7 +223,7 @@ def _print_about(out: Any) -> None:
         "    §2   (R-Metric):       5-dimensional eval with anti-metric pairs",
         "    IPR-3 (Model-Agnostic): core/ never imports any model SDK",
         "",
-        "  DESIGN.md → IMPL.md → code: full traceability",
+        "  MASTER.md → IMPL.md → code: full traceability",
         "  Type /help for commands, /eval to run evaluation.",
     ]
     if hasattr(out, "isatty") and out.isatty():
@@ -141,6 +231,8 @@ def _print_about(out: Any) -> None:
         for line in lines:
             if line.startswith("  zall"):
                 c.print(f"[yellow]{line}[/]")
+            elif line.startswith("  author"):
+                c.print("  [dim]author:[/] [cyan]qinrayn (Yuhan Zhang)[/] [dim]· license: MIT · (c) 2026[/]")
             elif line.startswith("    PR-0"):
                 c.print("  [green]PR-0[/] (No Hallucination): [dim]stop_reason=STOP + no tool_calls → flagged[/]")
             elif line.startswith("    §4.3"):
@@ -159,7 +251,7 @@ def _print_about(out: Any) -> None:
 
 
 def _print_help(out: Any, cmd_name: str = "") -> None:
-    """渲染command帮助。"""
+    """渲染command帮助 (v0.6.0: 精简版, 仅显示核心命令)。"""
     _DETAILED_HELP: dict[str, str] = {
         "/help": (
             "  /help [command]\n"
@@ -168,6 +260,20 @@ def _print_help(out: Any, cmd_name: str = "") -> None:
             "      /help           → list all commands\n"
             "      /help add       → show /add command details\n"
             "      /help --verbose → show all commands with examples"
+        ),
+        "/advanced": (
+            "  /advanced\n"
+            "    Show all advanced commands (hidden from /help).\n"
+            "    Includes: /lsp, /sandbox, /codegraph, /plugin, /git, /web,\n"
+            "    /search, /checkpoint, /suggest, /learn, /max-steps, /mode, /init, ..."
+        ),
+        "/mode": (
+            "  /mode [strict|fast]\n"
+            "    Show or switch interaction mode.\n"
+            "    /mode          - show current strict/plan state\n"
+            "    /mode strict   - confirm every operation (safe); alias: safe\n"
+            "    /mode fast     - auto-confirm (faster); alias: auto, normal\n"
+            "    Note: /strict and /fast remain as shortcuts."
         ),
         "/add": (
             "  /add <file> [file2 ...]\n"
@@ -256,53 +362,35 @@ def _print_help(out: Any, cmd_name: str = "") -> None:
             out.write(f"  no detailed help for {full_name} (try just /help)\n")
         return
 
+    # v0.6.0: 精简版 — 只显示核心命令, 高级命令通过 /advanced 查看
     categories = [
-        (_CATEGORY_CONTEXT, [
-            ("/add <file> [...files]", "add file(s) to agent context"),
-            ("/drop [file]", "remove added files from context"),
-            ("/review [path]", "review uncommitted code changes"),
+        (_CATEGORY_NAV, [
+            ("/help [cmd]", "show this help (or detail for a command)"),
+            ("/about", "project philosophy"),
+            ("/clear", "clear screen"),
+            ("/exit /q", "exit (or Ctrl-D)"),
         ]),
         (_CATEGORY_SESSION, [
             ("/sessions", "list/search/tag/prune sessions"),
             ("/resume <id>", "resume a session's context into REPL"),
             ("/eval", "evaluate all sessions"),
             ("/replay <id>", "replay a session"),
-            ("/cost", "show token usage + cost estimate"),
             ("/compact", "compress conversation context"),
             ("/undo", "revert last tool call"),
             ("/retry", "re-do last agent step"),
-            ("/revert [id]", "restore files to a checkpoint"),
-            ("/remember", "remember convention in AGENTS.md"),
-            ("/forget", "reset AGENTS.md to template"),
         ]),
         (_CATEGORY_MODEL, [
             ("/model [n]", "show/switch model"),
-            ("/max-steps [N]", "show or set step limit"),
-            ("/verbose", "toggle verbose tool output"),
+            ("/mode [strict|fast]", "show/switch interaction mode"),
             ("/plan", "toggle plan mode (read-only)"),
+            ("/verbose", "toggle verbose tool output"),
             ("/doctor", "diagnose config / dependencies / directories"),
         ]),
-        (_CATEGORY_TOOLS, [
+        (_CATEGORY_CONTEXT, [
+            ("/add <file> [...files]", "add file(s) to agent context"),
+            ("/drop [file]", "remove added files from context"),
             ("/diff", "show current git working-tree diff"),
-            ("/web <url>", "fetch a web page"),
-            ("/search <query>", "search the web (DuckDuckGo)"),
-            ("/checkpoint", "list/save/restore file system snapshots"),
-            ("/git", "git operations (status, commit, push, pull)"),
-            ("/commit [msg]", "smart git commit"),
-            ("/fix [cmd]", "auto-diagnose and fix last command error"),
-            ("/skills", "list reusable workflows"),
-            ("/skill <name>", "run a skill; args fill {input}"),
-        ]),
-        (_CATEGORY_NAV, [
-            ("/help", "show this help"),
-            ("/about", "project philosophy"),
-            ("/version /v", "show version"),
-            ("/clear", "clear screen"),
-            ("/exit", "exit (or Ctrl-D)"),
-        ]),
-        (_CATEGORY_VIEW, [
-            ("/expand [N|all]", "expand folded tool output"),
-            ("/fold", "show fold status"),
+            ("/lab [task]", "verifier-grounded self-improvement"),
         ]),
     ]
 
@@ -327,6 +415,7 @@ def _print_help(out: Any, cmd_name: str = "") -> None:
         console.print("  [dim]zall 'task' one-shot = independent run + session + judge[/]")
         console.print("  [dim]CLI flags: --verbose, --version/-V, --yes/-y, --json, --model, --max-steps, --no-stream[/]")
         console.print("  [dim]try '/help <command>' for detailed usage of a specific command[/]")
+        console.print("  [dim]try '/advanced' for all commands (lsp, sandbox, git, web, suggest, ...)[/]")
     else:
         out.write("  zall commands:\n")
         for cat_name, cmds in categories:
@@ -336,6 +425,90 @@ def _print_help(out: Any, cmd_name: str = "") -> None:
         out.write("\n  type anything to chat + use tools; context is shared\n")
         out.write("  zall 'task' one-shot = independent run + session + judge\n")
         out.write("  CLI flags: --verbose, --version/-V, --yes/-y, --json, --model, --max-steps, --no-stream\n")
+        out.write("  try '/advanced' for all commands\n")
+
+
+def _print_advanced_help(out: Any) -> None:
+    """v0.6.0: 显示所有高级命令 (隐藏于 /help 之外)。"""
+    categories = [
+        (_CATEGORY_TOOLS, [
+            ("/web <url>", "fetch a web page"),
+            ("/search <query>", "search the web (DuckDuckGo)"),
+            ("/git", "git operations (status, commit, push, pull)"),
+            ("/commit [msg]", "smart git commit"),
+            ("/checkpoint", "list/save/restore file system snapshots"),
+            ("/revert [id]", "restore files to a checkpoint"),
+            ("/fix [cmd]", "auto-diagnose and fix last command error"),
+            ("/review [path]", "review uncommitted code changes"),
+            ("/verify [run_id]", "verify timeline chain integrity (§12.1)"),
+            ("/skills", "list reusable workflows"),
+            ("/skill <name>", "run a skill; args fill {input}"),
+        ]),
+        (_CATEGORY_MODEL, [
+            ("/max-steps [N]", "show or set step limit"),
+            ("/mode [strict|fast]", "switch mode (/strict /fast are shortcuts)"),
+            ("/provider [name]", "show/switch model provider"),
+            ("/thinking [on|off]", "toggle AI thinking display"),
+            ("/theme [name]", "show/switch color theme (obsidian, attic)"),
+            ("/init", "initialize .zall/ config in current directory"),
+            ("/update", "check for updates"),
+            ("/reload", "reload config and skills"),
+        ]),
+        ("Code Intelligence", [
+            ("/lsp", "LSP live diagnostics, hover, goto-definition"),
+            ("/codegraph", "code symbol search and navigation"),
+            ("/sandbox", "process isolation (worktree/container)"),
+            ("/chatstate", "inspect current conversation state"),
+            ("/plugin", "manage plugins"),
+        ]),
+        ("Self-Evolution", [
+            ("/lab [task]", "verifier-grounded self-improvement (conjecture->refute->distill)"),
+            ("/evolve", "auto-learn self-improve loop (apply verified)"),
+            ("/suggest", "list self-evolution suggestions"),
+            ("/learn", "apply suggestions"),
+            ("/remember", "remember convention in AGENTS.md"),
+            ("/forget", "reset AGENTS.md to template"),
+        ]),
+        ("Science (E3)", [
+            ("/science new \"claim\"", "create a hypothesis"),
+            ("/science list", "list all hypotheses + status"),
+            ("/science show <id>", "show hypothesis + evidence"),
+            ("/science evidence <hid>", "record evidence (--supports/--against)"),
+            ("/science falsify <hid>", "falsify a hypothesis"),
+            ("/science revise <hid>", "revise a falsified hypothesis"),
+        ]),
+        (_CATEGORY_VIEW, [
+            ("/expand [N|all]", "expand folded tool output"),
+            ("/fold", "show fold status"),
+        ]),
+        ("Version", [
+            ("/version /v", "show version"),
+        ]),
+    ]
+
+    if hasattr(out, "isatty") and out.isatty():
+        from rich.table import Table
+        console = _shared_console(out)
+        console.print()
+        console.print("[bold cyan]Advanced commands[/]")
+        console.print("[dim]These are hidden from /help but still available[/]")
+        console.print()
+        for cat_name, cmds in categories:
+            table = Table(title=cat_name, show_header=False,
+                          border_style="dim", padding=(0, 1),
+                          box=None, collapse_padding=True)
+            table.add_column("command", style="cyan", no_wrap=True, width=24)
+            table.add_column("description", style="dim")
+            for cmd, desc in cmds:
+                table.add_row(cmd, desc)
+            console.print(table)
+            console.print()
+    else:
+        out.write("  Advanced commands:\n")
+        for cat_name, cmds in categories:
+            out.write(f"\n  [{cat_name}]\n")
+            for cmd, desc in cmds:
+                out.write(f"    {cmd:24s} {desc}\n")
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -392,12 +565,45 @@ def _handle_bare_slash(out: Any) -> None:
             out.write(f"    /{name:12s} {cmd.description}\n")
 
 
+def _osa_distance(a: str, b: str) -> int:
+    """Optimal String Alignment 距离 (Levenshtein + 相邻换位计为 1 步)。
+
+    相邻换位 typo (如 model↔modle) 距离=1, 使 did-you-mean 能识别转置类错误。
+    """
+    la, lb = len(a), len(b)
+    if not la:
+        return lb
+    if not lb:
+        return la
+    d = [[0] * (lb + 1) for _ in range(la + 1)]
+    for i in range(la + 1):
+        d[i][0] = i
+    for j in range(lb + 1):
+        d[0][j] = j
+    for i in range(1, la + 1):
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)  # 相邻换位
+    return d[la][lb]
+
+
 def _suggest_command(name: str) -> str | None:
-    """did-you-mean: 对未知commandreturn最接近的已知command。"""
+    """did-you-mean: 对未知command return最接近的已知command。
+
+    先用 difflib 取若干近似候选 (保留 0.6 cutoff → 无关词仍返回 None),
+    再用 OSA 距离重排: 转置类 typo (如 /modle → /model 而非 /mode) 优先同长度候选,
+    避免 /mode 与 /model 名称相近时误建议。
+    """
     target = name.lstrip("/").lower()
     candidates = [c.lstrip("/").lower() for c in _COMMANDS.keys()]
-    matches = difflib.get_close_matches(target, candidates, n=1, cutoff=0.6)
-    return matches[0] if matches else None
+    matches = difflib.get_close_matches(target, candidates, n=5, cutoff=0.6)
+    if not matches:
+        return None
+    # (编辑距离升, 长度差升) 重排; difflib 已按相似度降序, sort 稳定保留平局顺序
+    matches.sort(key=lambda c: (_osa_distance(target, c), abs(len(c) - len(target))))
+    return matches[0]
 
 
 def _guess_common_command(name: str, out: Any) -> None:
@@ -430,6 +636,10 @@ def handle_slash(cmd: str, state: dict[str, Any], out: Any, loop: Any = None) ->
     arg = parts[1].strip() if len(parts) > 1 else ""
 
     cmd_entry = _COMMANDS.get(name)
+    if cmd_entry is None:
+        # v1.9 修复: 部分命令注册时不带 / 前缀 (如 lsp/sandbox/codegraph/chatstate/plugin),
+        # 但用户输 /lsp 查找带斜杠 → 归一化去斜杠再查, 避免这 5 个命令永远无法调用。
+        cmd_entry = _COMMANDS.get(name.lstrip("/"))
     if cmd_entry is not None:
         return cmd_entry.handler(arg, out, loop, state)
 
@@ -620,7 +830,7 @@ def _check_git_health() -> tuple[str, str]:
     """
     import subprocess
     try:
-        r = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["git", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         if r.returncode != 0:
             return ("error", "git not found on PATH")
         git_version = r.stdout.strip() or "git available"
@@ -629,7 +839,7 @@ def _check_git_health() -> tuple[str, str]:
 
     try:
         r = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         if r.returncode != 0:
             return ("warn", f"{git_version} — not a git repository")
     except (subprocess.TimeoutExpired, OSError):
@@ -638,10 +848,10 @@ def _check_git_health() -> tuple[str, str]:
     # Git 仓库, checkstate
     try:
         r = subprocess.run(["git", "status", "--porcelain"],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         dirty = bool(r.stdout.strip())
         branch_r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         branch = branch_r.stdout.strip() if branch_r.returncode == 0 else "?"
         if dirty:
             changes = len([line for line in r.stdout.split("\n") if line.strip()])

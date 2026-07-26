@@ -45,6 +45,11 @@ class TodoListTool:
     @property
     def tool_id(self) -> str:
         return "todo_list"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=False, tool_scope=ToolScope.Write)
+
 
     @property
     def schema(self) -> dict[str, Any]:

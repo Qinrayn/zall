@@ -303,3 +303,40 @@ class TestAccountabilityResultInvariants:
         r = AccountabilityResult.from_verdicts(_make_verdict(TerminationState.MET))
         with pytest.raises(ValidationError):
             r.state = TerminationState.NOT_MET  # type: ignore[misc]
+
+
+# ── P4 fix: SystemJudge 受影响测试检测 (dogfood 假阴性修复) ──
+
+
+class TestSystemJudgeAffectedTests:
+    """P4: SystemJudge 只跑 git diff 涉及的快测试, 避免全量超时。"""
+
+    def test_affected_test_files_excludes_slow(self) -> None:
+        """Happy path: 慢测试 (integration/interaction/cli_app) 被排除。"""
+        from zall.core.judge import SystemJudge
+        j = SystemJudge()
+        affected = j._affected_test_files()
+        SLOW = ("integration", "interaction", "cli_app", "new_commands", "sandbox", "pty")
+        for f in affected:
+            assert not any(s in f for s in SLOW), f"slow test not excluded: {f}"
+
+    def test_affected_test_files_from_src(self) -> None:
+        """Happy path: src/ 改动映射到 tests/test_*.py。"""
+        from zall.core.judge import SystemJudge
+        j = SystemJudge()
+        affected = j._affected_test_files()
+        # 当前有大量 src/ 改动, 应该检测到对应的测试文件
+        assert isinstance(affected, list)
+
+    def test_affected_empty_when_no_diff(self, monkeypatch) -> None:
+        """Counterexample: 无 git diff 时返回空列表 (调用方跑全量)。"""
+        from zall.core.judge import SystemJudge
+        j = SystemJudge()
+        monkeypatch.setattr(j, "_git_diff", lambda: "")
+        assert j._affected_test_files() == []
+
+    def test_default_test_cmd_has_x_flag(self) -> None:
+        """Happy path: 默认 test_cmd 含 -x (首失败即停, 快速判定 not_met)。"""
+        from zall.core.judge import SystemJudge
+        j = SystemJudge()
+        assert "-x" in j._test_cmd

@@ -68,7 +68,7 @@ class SandboxMode(str, Enum):
 def _bwrap_available() -> bool:
     """Check if bubblewrap (bwrap) is available on this system."""
     try:
-        r = subprocess.run(["bwrap", "--version"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["bwrap", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         return r.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -78,7 +78,7 @@ def _bwrap_available() -> bool:
 def _docker_available() -> bool:
     """Check if Docker is available on this system."""
     try:
-        r = subprocess.run(["docker", "--version"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["docker", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         return r.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -205,7 +205,7 @@ class WorktreeSandbox:
         try:
             result = subprocess.run(
                 ["git", "-C", str(self._worktree_path), "diff", self._original_branch],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             )
             return result.stdout if result.returncode == 0 else ""
         except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -238,7 +238,7 @@ class WorktreeSandbox:
     def _git_cmd(self, *args: str) -> str:
         result = subprocess.run(
             ["git", "-C", str(self._project_dir)] + list(args),
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             check=True,
         )
         return result.stdout.strip()
@@ -248,7 +248,7 @@ class WorktreeSandbox:
             raise SandboxError("No active worktree")
         result = subprocess.run(
             ["git", "-C", str(self._worktree_path)] + list(args),
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             check=True,
         )
         return result.stdout.strip()

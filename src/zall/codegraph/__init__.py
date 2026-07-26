@@ -182,7 +182,8 @@ class CodeIndex:
         for name, refs in other.references.items():
             self.references.setdefault(name, []).extend(refs)
         self.file_count = len(self.by_file)
-        self.symbol_count = len(self.symbols)
+        # 正确统计总符号数 (非唯一名数)
+        self.symbol_count = sum(len(v) for v in self.symbols.values())
 
 
 # ═══════════════════════════════════════════════════════════════════

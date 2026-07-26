@@ -62,6 +62,15 @@ class EventType(str, Enum):
     GOAL_DOWNGRADE = "goal_downgrade"
     PR0_HALLUCINATION = "pr0_hallucination"
     SYSTEM_INJECTION = "system_injection"  # v0.0.22: 系统注入消息 (eg. 空 STOP nudge), 守 §6.1 全保真
+    # Phase 1 (修裂缝): goal lifecycle events (§3.2 + §9.2.1)
+    GOAL_STATEMENT = "goal_statement"   # Goal 被锁定并记录到 timeline
+    USER_CONFIRM = "user_confirm"        # 用户确认 Goal (confirm gate 通过)
+    # §12.3 E1.1: 感知异常事件 (perception anomaly detected, 含状态摘要)
+    PERCEPTION_ANOMALY = "perception_anomaly"
+    # E4: user interrupt (Ctrl+C during step loop)
+    USER_INTERRUPT = "user_interrupt"     # 用户中断, model 半成品被丢弃
+    # §12.1 Verifiability: 链完整性自检失败 (运行时检测篡改, 不阻止运行)
+    CHAIN_BROKEN = "chain_broken"
 
 
 # ──────────────────────────────────────────────────────────────────────────

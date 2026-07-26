@@ -289,15 +289,24 @@ class TestEventTypeInvariants:
     """§6.1 EventType invariant."""
 
     def test_eight_event_types(self) -> None:
-        """Happy path: EventType 有 12 种 (含 v0.0.5 anchor_ack + v0.0.10 context_compaction + v0.0.11 goal_downgrade + pr0_hallucination + v0.0.22 system_injection).
+        """Happy path: EventType 有 17 种 (含 v0.0.5 anchor_ack + v0.0.10 context_compaction + v0.0.11 goal_downgrade + pr0_hallucination + v0.0.22 system_injection + Phase 1 goal_statement + user_confirm + §12.3 E1.1 perception_anomaly + E4 user_interrupt + E6 chain_broken).
 
-        Counterexample: 如果有人删了事件类型, 审计轨迹断 → fail.
+        Counterexample: 如果有人删了事件类型, 审计轨迹断 -> fail.
         """
         types = {t for t in EventType}
-        assert len(types) == 12
+        assert len(types) == 17
         assert EventType.ANCHOR_ACK in types
         assert EventType.CONTEXT_COMPACTION in types
         assert EventType.GOAL_DOWNGRADE in types
         assert EventType.PR0_HALLUCINATION in types
         assert EventType.MODEL_CALL in types
         assert EventType.TOOL_CALL_START in types
+        # Phase 1 (修裂缝): goal lifecycle events
+        assert EventType.GOAL_STATEMENT in types
+        assert EventType.USER_CONFIRM in types
+        # §12.3 E1.1: perception anomaly
+        assert EventType.PERCEPTION_ANOMALY in types
+        # E4: user interrupt
+        assert EventType.USER_INTERRUPT in types
+        # E6: chain broken (tamper detection)
+        assert EventType.CHAIN_BROKEN in types

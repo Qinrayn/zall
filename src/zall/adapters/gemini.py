@@ -97,6 +97,7 @@ class GeminiAdapter:
                 generation_config=genai.types.GenerationConfig(
                     candidate_count=1,
                 ),
+                request_options={"timeout": self._timeout},
             )
         except Exception as e:
             return ModelResponse(
@@ -139,6 +140,7 @@ class GeminiAdapter:
                 generation_config=genai.types.GenerationConfig(
                     candidate_count=1,
                 ),
+                request_options={"timeout": self._timeout},
             )
 
             for chunk in stream:
@@ -170,7 +172,7 @@ class GeminiAdapter:
                         })
 
         except GeneratorExit:
-            pass
+            return
         except Exception as e:
             yield ("", ModelResponse(
                 content=f"[Gemini stream error: {e}]",
@@ -230,7 +232,7 @@ class GeminiAdapter:
             role = "user" if m.role in ("user", "tool") else "model"
             parts: list[dict[str, Any]] = []
 
-            if m.content:
+            if m.content and m.role != "tool":
                 parts.append({"text": m.content})
 
             if m.tool_calls:
@@ -262,14 +264,25 @@ class GeminiAdapter:
         return history, current_msg
 
     def _build_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Convert zall tool schemas to Gemini FunctionDeclaration format."""
+        """Convert zall tool schemas to Gemini FunctionDeclaration format.
+
+        v0.5.0 (B2 fix): zall tool schema uses OpenAI format:
+          {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+        But also supports legacy format: {"tool_id": "...", "description": "...", "input_schema": {...}}
+        Must handle both.
+        """
         gemini_tools = []
         for t in tools:
+            # Try nested "function" dict first (OpenAI format), fallback to top-level
+            func = t.get("function", t)
+            name = func.get("name") or t.get("tool_id") or "unknown"
+            desc = func.get("description") or t.get("description") or ""
+            params = func.get("parameters") or t.get("input_schema") or t.get("parameters") or {}
             gemini_tools.append({
                 "function_declarations": [{
-                    "name": t.get("tool_id", t.get("name", "unknown")),
-                    "description": t.get("description", ""),
-                    "parameters": t.get("input_schema", t.get("parameters", {})),
+                    "name": name,
+                    "description": desc,
+                    "parameters": params,
                 }],
             })
         return gemini_tools
@@ -293,8 +306,10 @@ class GeminiAdapter:
                 content="[Gemini returned empty content]",
                 stop_reason=StopReason.STOP,
             )
+        finish_name = ""
         if hasattr(candidate, "finish_reason") and candidate.finish_reason:
-            stop_reason = self._map_stop_reason(candidate.finish_reason.name)
+            finish_name = candidate.finish_reason.name
+            stop_reason = self._map_stop_reason(finish_name)
 
         for part in candidate.content.parts:
             if hasattr(part, "text") and part.text:
@@ -323,6 +338,11 @@ class GeminiAdapter:
                 "total": (getattr(resp.usage_metadata, "prompt_token_count", 0) +
                          getattr(resp.usage_metadata, "candidates_token_count", 0)),
             }
+
+        # SAFETY/RECITATION 映射为 STOP 但附加截断警告，
+        # 避免掩盖内容被安全策略截断的事实 (与 openai_compat content_filter 处理一致)
+        if finish_name in ("SAFETY", "RECITATION"):
+            content += f"\n\n[Warning: Response truncated by Gemini {finish_name.lower()} policy]"
 
         return ModelResponse(
             content=content, reasoning=reasoning,

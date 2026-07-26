@@ -54,6 +54,11 @@ class ReadFileTool:
     @property
     def tool_id(self) -> str:
         return "read_file"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=True, tool_scope=ToolScope.Read)
+
 
     @property
     def kind(self) -> ToolKind:
@@ -155,6 +160,16 @@ class ReadFileTool:
                 error=str(e),
             )
 
+        # 敏感文件防护 (kimi sensitive.py 对标): 凭证/私钥/.env 不进模型上下文
+        # (一旦读入即泄漏进会话存档与 API 请求; 用户确需时走 bash 显式命令)
+        from zall.safety.sensitive import is_sensitive_file, sensitive_refusal
+        if is_sensitive_file(str(path)):
+            return ToolResult(
+                success=False,
+                output=sensitive_refusal(str(path)),
+                error="sensitive file blocked",
+            )
+
         # 检测二进制file (使用共享tool)
         if is_binary(path):
             return ToolResult(
@@ -187,7 +202,8 @@ class ReadFileTool:
                         try:
                             rest = f.read()
                             remaining_lines = rest.count("\n")
-                            total_lines = actual_end + remaining_lines
+                            # +1 计入已消费的 next_line
+                            total_lines = actual_end + 1 + remaining_lines
                             exact_total = True
                         except (OSError, MemoryError):
                             pass

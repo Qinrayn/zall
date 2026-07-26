@@ -80,19 +80,26 @@ class ToolExecutor:
         loop = self._loop
         for tc in tool_calls:
             action = Action(tool_id=tc.tool_id, args=tc.args)
-            judgement = context_judge(action, loop._context, loop._rules)
+            # v0.5.1: 传入 tool_registry, 让 context_judge 根据工具能力决定默认权限
+            judgement = context_judge(
+                action, loop._context, loop._rules,
+                tool_registry=loop._tools,
+            )
 
-            # Plan mode: write tools forced to GREYLIST
-            if (
-                loop._plan_mode
-                and (action.tool_id in loop._WRITE_TOOLS
-                     or _is_tool_write_by_kind(loop, action.tool_id))
-                and judgement.level != SafeLevel.BLACKLIST
+            # Plan mode: 写工具强制 GREYLIST (使用 PlanModeTracker + ToolCapabilities)
+            if loop._planner.is_active and judgement.level not in (
+                SafeLevel.BLACKLIST, SafeLevel.GREYLIST,
             ):
-                judgement = Judgement(
-                    level=SafeLevel.GREYLIST,
-                    matched_rule_ids=("plan_mode_read_only",),
-                )
+                # 检查工具能力: 非只读工具在 plan mode 下强制 GREYLIST
+                _tool = loop._tools.get(action.tool_id) if loop._tools else None
+                if _tool is not None:
+                    from zall.core.tool import get_tool_capabilities
+                    _caps = get_tool_capabilities(_tool)
+                    if not _caps.is_read_only:
+                        judgement = Judgement(
+                            level=SafeLevel.GREYLIST,
+                            matched_rule_ids=("plan_mode_read_only",),
+                        )
 
             gate_result = self._process_gate(action, judgement, tc.tool_id, step_count)
 
@@ -146,6 +153,8 @@ class ToolExecutor:
         _suspended_count = 0
         _rejudge_count = 0
         _MAX_REJUDGE = 5
+        _SUSPENDED_TIMEOUT = 300.0  # 5 minutes total timeout for SUSPENDED
+        _suspended_start: float | None = None
 
         while True:
             state = gate_result.state
@@ -176,14 +185,19 @@ class ToolExecutor:
 
             if state == GateState.SUSPENDED:
                 _suspended_count += 1
-                if _suspended_count >= 2:
+                if _suspended_start is None:
+                    _suspended_start = time.time()
+                # v0.5.0 (C1 fix): 增加 SUSPENDED 整体超时机制
+                elapsed = time.time() - _suspended_start
+                if _suspended_count >= 2 or elapsed >= _SUSPENDED_TIMEOUT:
+                    reason = "max_suspensions" if _suspended_count >= 2 else "suspended_timeout"
                     loop.append_message(
                         _make_suspended_rejection(tool_id, loop._tool_call_count + 1)
                     )
                     loop._emit(_loop_event(
                         kind="suspended",
                         step=step_count,
-                        payload={"reason": "max_suspensions", "tool_id": tool_id},
+                        payload={"reason": reason, "tool_id": tool_id},
                     ))
                     return None
                 gate_result = _cast_gate_result(gate.process(UserResponse.resume()))
@@ -274,6 +288,77 @@ class ToolExecutor:
             step=step_count,
             payload={"tool_id": tid, "args": dict(execute_action.args)},
         ))
+
+        # v0.5.1: 运行时 JSON Schema 校验 (MASTER.md §12.1 Plugin: schema 强制校验)
+        from zall.core.tool import validate_tool_args
+        validation_errors = validate_tool_args(tool.schema, dict(execute_action.args))
+        if validation_errors:
+            err_msg = "invalid args: " + "; ".join(validation_errors)
+            from zall.core.tool import ToolResult
+            result = ToolResult(
+                success=False,
+                output=f"[SCHEMA VALIDATION FAILED] {err_msg}",
+                error=err_msg,
+            )
+            # 追加一条独立的校验失败记录到 timeline。
+            # M1 fix: 必须用唯一 event_id (不能复用上面的 tool_call_start_{count}),
+            # 否则 timeline 出现两条同 event_id 事件, 破坏 replay/去重 (event_id 唯一不变量)。
+            loop._recorder.append(
+                event_id=f"tool_call_validation_fail_{loop._tool_call_count}",
+                ts=int(time.time() * 1000),
+                event_type=EventType.TOOL_CALL_START,
+                payload={
+                    "tool_id": tid,
+                    "args": dict(execute_action.args),
+                    "validation_errors": validation_errors,
+                },
+            )
+            # 直接跳到结果处理, 不执行工具
+            loop._emit(_loop_event(
+                kind="tool_call_start",
+                step=step_count,
+                payload={
+                    "tool_id": tid,
+                    "args": dict(execute_action.args),
+                    "validation_errors": validation_errors,
+                },
+            ))
+            # 直接录制结果并返回
+            loop._recorder.append(
+                event_id=f"tool_call_end_{loop._tool_call_count}",
+                ts=int(time.time() * 1000),
+                event_type=EventType.TOOL_CALL_END,
+                payload={
+                    "tool_id": tid,
+                    "success": result.success,
+                    "output_length": len(result.output),
+                    "output": result.output,
+                    "error": result.error,
+                    "artifacts": {},
+                },
+            )
+            loop._emit(_loop_event(
+                kind="tool_call_end",
+                step=step_count,
+                payload={
+                    "tool_id": tid,
+                    "success": result.success,
+                    "output": result.output,
+                    "error": result.error,
+                    "artifacts": {},
+                },
+            ))
+            # Append tool result to messages
+            from zall.core.model import Message, ToolCall
+            _tc_id = call_id or f"call_{loop._tool_call_count}"
+            _tool_call = ToolCall(id=_tc_id, tool_id=tid, args=dict(execute_action.args))
+            loop.append_message(Message.tool_result(
+                content=result.output,
+                tool_call_id=_tool_call.id,
+                tool_id=_tool_call.tool_id,
+            ))
+            loop._mark_watermark_dirty()
+            return
 
         # Execute
         try:
@@ -376,19 +461,3 @@ def _cast_gate_result(result: Any) -> GateResult:
     if isinstance(result, GateResult):
         return result
     raise TypeError(f"expected GateResult, got {type(result).__name__}: {result}")
-
-
-def _is_tool_write_by_kind(loop: Any, tool_id: str) -> bool:
-    """Check if a tool is a write-type tool via its ToolKind.
-    
-    Falls back to False if ToolKind is not available.
-    """
-    try:
-        from zall.core.tool import get_tool_kind
-        if loop._tools is not None:
-            tool = loop._tools.get(tool_id)
-            if tool is not None:
-                return get_tool_kind(tool).is_write()
-    except (ImportError, AttributeError):
-        pass
-    return False

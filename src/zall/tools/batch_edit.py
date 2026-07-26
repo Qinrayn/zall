@@ -50,6 +50,11 @@ class BatchEditTool:
     @property
     def tool_id(self) -> str:
         return "batch_edit"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=False, tool_scope=ToolScope.Write)
+
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -164,15 +169,24 @@ class BatchEditTool:
                 )
                 continue
             if count > 1:
-                # 列出匹配位置
-                lines = content.split("\n")
+                # 列出匹配位置 (支持多行 old_string)
                 locations = []
-                for ln, line in enumerate(lines, 1):
-                    if old in line:
-                        locations.append(f"      Line {ln}: {line.strip()[:80]}")
+                start_pos = 0
+                for _ in range(min(count, 10)):
+                    idx = content.find(old, start_pos)
+                    if idx < 0:
+                        break
+                    line_num = content[:idx].count("\n") + 1
+                    line_start = content.rfind("\n", 0, idx) + 1
+                    line_end = content.find("\n", idx)
+                    if line_end < 0:
+                        line_end = len(content)
+                    preview = content[line_start:line_end].strip()[:80]
+                    locations.append(f"      Line {line_num}: {preview}")
+                    start_pos = idx + 1
                 errors.append(
                     f"  [{i}] old_string matched {count} times in {path} "
-                    "(must be unique):\n" + "\n".join(locations[:10])
+                    "(must be unique):\n" + "\n".join(locations)
                 )
                 continue
 
@@ -201,34 +215,37 @@ class BatchEditTool:
 
         # ── Phase 2: Apply all edits atomically ──
         # v0.0.6 fix (H10): 先全部write临时file, 再原子replace, 保证 all-or-nothing
+        # v3.x fix: 同文件多编辑须叠加应用 (防后编辑覆盖前编辑)
         results: list[dict[str, Any]] = []
         all_success = True
         tmp_files: list[tuple[Path, Path]] = []  # (tmp_path, target_path)
 
         try:
+            # 按路径分组: 同文件多编辑须在同一份内容上叠加应用
+            from collections import OrderedDict
+            path_groups: OrderedDict[Path, list[dict[str, Any]]] = OrderedDict()
             for r in resolved:
-                path = r["path"]
-                old = r["old"]
-                new = r["new"]
-                content = r["content"]
+                path_groups.setdefault(r["path"], []).append(r)
 
-                new_content = content.replace(old, new, 1)
-                # v2 fix: 使用 uuid 唯一临时file名, 避免concurrentwrite竞态
+            for path, group in path_groups.items():
+                content = group[0]["content"]  # 原始内容 (同文件各编辑读取相同)
+                for r in group:
+                    content = content.replace(r["old"], r["new"], 1)
+                    old_lines = r["old"].count("\n") + 1
+                    new_lines = r["new"].count("\n") + 1
+                    diff = _unified_diff(r["old"], r["new"])
+                    results.append({
+                        "path": str(path),
+                        "status": "ok",
+                        "old_lines": old_lines,
+                        "new_lines": new_lines,
+                        "diff": diff,
+                    })
+                # 写入叠加后的最终内容
                 import uuid as _uuid
                 tmp = path.parent / f".zall_tmp_{_uuid.uuid4().hex[:8]}"
-                tmp.write_text(new_content, encoding="utf-8")
+                tmp.write_text(content, encoding="utf-8")
                 tmp_files.append((tmp, path))
-
-                old_lines = old.count("\n") + 1
-                new_lines = new.count("\n") + 1
-                diff = _unified_diff(old, new)
-                results.append({
-                    "path": str(path),
-                    "status": "ok",
-                    "old_lines": old_lines,
-                    "new_lines": new_lines,
-                    "diff": diff,
-                })
 
             # 全部write成功 → 原子replace
             replaced: list[tuple[Path, Path, str | None]] = []  # (tmp, target, original_content)

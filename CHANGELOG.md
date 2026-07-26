@@ -1,19 +1,744 @@
 # Changelog
 
-## [0.4.10] — 2026-07-18
+## [0.1.0] - 2026-07-26 · Collatz 研究+Bugfix 双段 e2e (2026-07-26)
+
+### loop.py 瘦身 (第四轮, 工程化持续)
+- 模型调用面 (`_call_model` + `_call_model_stream`, ~184 行内聚块) 抽取到 `core/loop_model_call.py` (无状态自由函数, 同 loop_perception/loop_checkpoint 协作者模式); loop.py 保留 2 行薄委托 (测试 patch 面不变)。纯搬运零逻辑变更, loop.py 1983→1869 行。
+- 行为等价守护: test_loop_stream/stream_error/loop/loop_step/observer/retry 65 测试全绿 + IPR-3 门禁通过。
+
+### 敏感文件防线闭合
+- `code_understanding._read_file_content` 接入同源防线 (此前直接 open() 绕过 read_file 防护); 全工具层 open()/read_text 审计: grep/read_file/code_understanding 已防护, project_analysis 仅计行数不回显内容, git_protect/batch_edit 非内容回显面。
+
+### 真实研究任务双段 e2e (中等难度, 全流程检验)
+- 段一 (研究): one-shot `zall --yes -j` 跑 Collatz 停止时间研究 [1,100000) — 7 步/6 工具/44.8k tokens, 产出 collatz.py + RESULTS.md。
+- **PR-0 独立核验抓到 agent 真错**: max(77031→350) 与 σ(27)=111 一致, 但均值 114.98 vs 独立参考 107.54 — agent 对整个 memo 字典求均 (含范围外中间键)。
+- 段二 (bugfix): 只喂分歧现象不喂答案, zall 自主定位根因 (memo 含 ~59K 超限中间值)、修复、复跑得 107.5382 与独立参考一致, RESULTS.md 补 Correction 节 — 10 步/10 工具, EXIT=0。
+- 结论: 多步研究与诊断任务链路 (写码/跑码/分析/报告/回归修复) 在真实 API 下端到端可用; 独立核验环节是抓错关键 (agent 自我宣称不可信, 与 PR-0 一致)。
+
+### - 希腊美学转正 · 确认门 e2e 实证 · 工程化清理 (2026-07-26)
+
+### 希腊美学 attic 主题转正为默认 (用户数学审美)
+- `DEFAULT_THEME` obsidian → **attic** (月桂金 #c9a227 / 爱琴海蓝 / 大理石白 / 陶土红 / 橄榄绿); obsidian 保留可 `/theme` 切回。用户 `~/.zall/config.toml` [ui].theme 同步。
+- 新增 I-THEME-6 不变量 (含反例): 默认主题必须是 attic, 退回即测试失败; 主题/diff/渲染相关 fixture 改为随 `DEFAULT_THEME` (不再硬编码 OBSIDIAN)。
+- 实机验证: TUI SVG 截屏断言 attic 月桂金真实上屏且旧 amber (#e0a83b) 绝迹。
+
+### TUI 确认门真人交互 e2e (真实 API + Textual Pilot, 四阶段后续)
+- 新增 `scripts/e2e_tui_confirm.py`: 假 HOME 隔离 (不污染真实 ~/.zall) → 鼠标点击输入框 → 逐键敲入写文件任务 → greylist 确认菜单弹出 → 模拟真人 Enter 批准 (allow once) → 文件落盘 + `USER_RESPONSE accept` 入 timeline → attic 视觉断言, **10/10 断言通过**。
+- 严谨判据升级: 不硬断言"菜单必弹" (模型可自由选 whitelist 工具), 而断言 **greylist 决策 ↔ 菜单弹出 严格对应** (有 greylist 无菜单 = 门被绕过 = 真 bug)。
+- 新增 `scripts/probe_confirm_repro.py`: ScriptedAdapter 确定性确认门复现 (无 API, 秒级); 一次疑似"确认门旁路"的调查由它 + timeline 审计定性为**非产品 bug** (外部沙箱阻写致 always_allow 豁免未被摘除, 门对已豁免工具自动放行属设计行为)。
+- 经验沉淀: Pilot 测试中 StatusBar 周期 timer 使消息泵永不静默, `pilot.press/pause` 需限时旁路 (按键已同步送达)。
+
+### 工程化清理 (目录清晰)
+- 删除根目录顽固 `nul` 保留名文件 (已验证方法: cmd `del \\.\<path>` 设备路径; 已回填 `scripts/del_nul.py` Method 4)。
+- 移除误入仓库的 `Microsoft/` (PowerShell ModuleAnalysisCache) 与 `tmp/` 杂物; `tmp/phase1_acceptance.py` 迁入 `scripts/`; minecraft 日志解除 git 追踪。
+- `.gitignore` 补 `tmp/`、`.e2e_playground/`、`minecraft_*.txt`。
+
+### REPL 路径同源 type-ahead 防护 (续 TUI 宽限期)
+- 新增 `responder.flush_stdin_typeahead()`: greylist 交互提问前冲刷 OS stdin 滞留按键 (Windows msvcrt.kbhit/getwch; POSIX termios.tcflush); 非 TTY/异常静默降级。接线不变量: 仅裸 input 才冲刷, 注入 ask_fn/input_fn (测试/prompt_toolkit) 绝不碰 OS 缓冲。
+- `repl_ui._greylist_choose` 接线同款防护; TUI 子类天然跳过 (自有宽限期)。
+- `test_select_typeahead_guard.py` 扩充至 9 测试 (+3: 非TTY跳过/TTY排空/接线反例)。
+
+### config 加载器漂移修复 (I-CFG-PARITY)
+- `config_layers._config_to_dict` 与 `safety.config` 对齐: [model] 内直写 provider/api_key、采样参数 (temperature/top_p/max_tokens/reasoning_effort)、window_size 现均参与层叠 (此前两套加载器对同一文件给出不同结果)。
+- env 层对齐: 新读 ZALL_PROVIDER/ZALL_TEMPERATURE/ZALL_MAX_TOKENS/ZALL_TOP_P/ZALL_WINDOW_SIZE/ZALL_REASONING_EFFORT (非法值不崩不写)。DEFAULTS 键集与 safety.config 对齐 (新增对齐不变量: 任一方新增键另一方缺失即测试失败)。
+- `test_config_layers.py` 新增 TestConfigLoaderParity (4 测试含反例)。
+
+### 确认菜单 type-ahead 防护 (kimi 审批面板思想, 安全加固)
+- 风险 (e2e 调查中识别): 模型运行时用户提前敲的 Enter/数字键滞留在消息泵, 确认菜单打开瞬间被重放 — 一个滞留回车即可误批写盘操作。
+- 防护: `open_select` 记录打开时刻; 宽限期 `SELECT_GRACE_S=0.35s` 内决策键 (Enter/1-9) 被吞 (纯函数 `is_typeahead_decision`); 导航 (↑↓)/Esc 不受限 (误 Esc 是安全方向)。真人看到菜单再决策 ≥300ms, 无感知延迟。
+- 新增 `tests/test_select_typeahead_guard.py` (6 测试含反例: 宽限期后必须可达/导航永不吞/接线不变量)。
+
+### 敏感文件防护 (kimi utils/sensitive.py 对标, 密钥不进上下文)
+- 新增 `safety/sensitive.py`: 高置信度敏感模式 (.env/.env.* / SSH 私钥 id_rsa等 / .aws·.gcp credentials / .netrc / **zall 自身 trust_anchor_key**), 模板豁免 (.env.example 等), 大小写不敏感 + Windows 反斜杠兼容。
+- 接线: `read_file` 拒读 (BLOCKED 说明, 内容绝不外泄); `@` 引用跳过注入 (占位说明); `grep` 双引擎 (rg + python 退化) 敏感文件整体跳过 + 警示 (grep API_KEY 不得把 .env 密钥行吐进上下文)。逻辑: 凭证一旦读入即泄漏进会话存档/链式 timeline/API 请求; 用户确需时走 bash 显式命令 (信任边界清晰)。
+- 新增 `tests/test_sensitive_file_invariants.py` (11 测试含反例孪生: 豁免文件必须可读 / 普通文件注入与 grep 命中不受影响 / 双引擎同源防线)。
+
+### 测试
+- 全量基线 2259 passed / 13 skipped (唯一失败为真实 API 流式端点闪断, 复跑即过); 主题切换后定向回归 206 passed; ruff 全绿。
+
+### - kimi 对标 bugfix 轮 · GBK · 重试可见性 (2026-07-26)
+
+### 背景
+- 深读 kimi-cli 源码产出 `docs/research/kimi-cli-study.md` (10 模块研读) 与 `docs/research/kimi-zall-gap.md` (G1-G17 差距清单 + 不移植决策)。本轮落地 bugfix 部分 (G3/G4 复查 + 新发现 bug)。
+
+### [HIGH] GBK subprocess 解码崩溃 (中文 Windows)
+- **现象**: 全量测试暴露 `PytestUnhandledThreadExceptionWarning: UnicodeDecodeError ('gbk')` 于 subprocess reader 线程。
+- **根因**: `subprocess.run(..., text=True)` 无 `encoding=` 时按控制台码页 (zh-CN 为 GBK) 解码, 而 git/pytest 输出 UTF-8。
+- **修复**: 平衡括号扫描 codemod 精确修补 **43 处** (`cli/commands/*` · `core/judge` · `core/loop` · `perception` · `plugin` · `sandbox` · `tools` 等), 统一补 `encoding="utf-8", errors="replace"`; 已有 encoding 的调用 (bash.py/mcp) 不动。
+- 新增 `tests/test_subprocess_encoding_invariants.py` (I-GBK 架构不变量: src/zall 内 `text=True` 必须同调用块内有 `encoding=`; 含扫描器反例, IPR-0)。
+
+### [HIGH] Retry-After 预算泄漏 (无限重试)
+- **根因**: `openai_compat.complete()` 中 429 带合法 `Retry-After` 头时 `delay = float(retry_after)` 跳过 `record_attempt` — api 预算不消耗, 服务器持续 429 时死循环。
+- **修复**: `RetryBudget.record_attempt(category, delay_override=None)` — Retry-After 只覆盖延迟, 预算必消耗 (上限 max_delay)。
+
+### 重试可见性 (G3, kimi 对标: 退避不再静默)
+- 此前重试全程静默 sleep (最长 60s 零反馈, 像卡死); `RetryBudget.on_retry` 回调存在但从未接线。
+- 接线链: `BaseAdapter.set_retry_callback` → `OpenAICompatAdapter._retry_budget(on_retry=_dispatch_retry)` + 流式连接重试 → `AgentLoop.__init__` duck-typed 注入 (core 不 import adapters, IPR-3) → `kind="retry"` LoopEvent。
+- 渲染: REPL TTY 换 spinner 活动标签 `Retrying n/N · <原因> · Xs wait` (不插行零闪烁); 非 TTY 落行 `retrying (n/N) in Xs: <原因>`; TUI 加 dim 系统行。文案单一真相源 `adapters.base.RETRY_REASON`。
+- `_ERROR_MAP` 补 402 (余额耗尽→充值/换 provider); `classify_http_status(402)=INVALID_REQUEST` 不重试。
+- G4 复查: 空 STOP backoff (`is_empty_stop`+nudge) 已存在, 评级下调为 ◐, 不重复建设。
+- 新增 `tests/test_retry_visibility_invariants.py` (9 测试: I-RETRY-BUDGET 含硬上限反例守卫 / I-RETRY-VISIBLE / I-402 / I-RETRY-EVENT 含无回调 adapter 反例)。
+
+### 主题系统 (G6, kimi 对标: 单一色源 + 希腊美学主题)
+- 新增 `cli/theme.py`: `Theme` frozen dataclass 为**唯一色源** (20 个 REPL 槽位 + 4 模式色 + code 主题 + 10 个 TUI hex); `apply()` 统一写入 `render._C`/`_ModeColor`/`_ANSI_MAP`/`CODE_THEME`/`CODE_BG`; 解析顺序 env `ZALL_THEME` > config `[ui].theme` > obsidian, 未知名自愈回退。
+- 内置双主题: `obsidian` (现状精确复刻) + `attic` (希腊美学: 月桂金 #c9a227 / 爱琴海蓝 #4f93b8 / 大理石白 #d8d4c8 / 陶土红 #c96a5a / 橄榄绿 #7fa370, code=nord)。
+- **修 4 处隐性色号错误**: 手工 `_ANSI_MAP` 与 rich 权威值不符 (spring_green3 35→41 / dark_orange 166→208 / steel_blue1 75→81 / grey37 240→59); 改为 `Color.parse().get_ansi_codes()` 自动派生, 消灭手工表。
+- **修 widgets.py from-import 值拷贝 bug**: `from render import CODE_THEME` 绑定导入时值, 切主题不生效 → 6 处改模块属性访问 `_render_mod.CODE_THEME`。
+- TUI: `_ZALL_THEME` 改 `_build_zall_theme()` 从 `theme.active()` 派生 (Textual 名固定 "zall", 兼容既有测试)。
+- 命令面: 新增 `/theme [name]` (列出/切换/持久化到 `[ui].theme` + env); `/config set theme <name>` 同步即时换肤; help advanced 补条目。
+- 新增 `tests/test_theme_invariants.py` (11 测试: I-THEME-1 obsidian 复刻等价 / I-THEME-2 ANSI 全槽位覆盖 + 4 旧错码不得回归 / I-THEME-3 未知名报错 + 垃圾 env 回退 / I-THEME-4 主题槽位对等 + TUI hex 校验 / I-THEME-5 attic↔obsidian 往返无残留)。
+
+### Rich diff 三形态 (G1, kimi diff_render.py 对标: 最高价值移植)
+- 新增 `cli/diff_render.py`: `build_hunks` (SequenceMatcher.get_grouped_opcodes 直接建 hunk, 免 unified 文本往返) + `parse_unified_hunks` (既有 artifacts["diff"] 路径, 支持 line_offset 平移到真实文件行号) 双来源; 词级内联高亮 (连续 -/+ 块按序配对, ratio<0.5 跳过); 三形态 = 完整 Panel (行号列+整行背景色+hunk 间 ⋮) / 紧凑 preview (只显改动行上限 6) / 大文件降级 summary (>5000 行, SequenceMatcher O(n²) 护栏)。
+- **修审批盲区**: 此前 `_render_permission_panel` 读 `args["diff"]` — 但 edit_file args 根本没有 diff 键, 审批时永远看不到会改什么。现从 args 的 old/new_string 现算 preview (`_build_edit_preview`), 读文件定位真实行号; batch_edit 每 edit 一段 (最多 3 段)。
+- edit_file artifacts 新增 `start_line` (真实起始行号); REPL `_render_edit_diff` / TUI `widgets._render_diff_panel` 优先走新渲染器, 解析失败回退旧文本着色 (legacy 保留)。
+- Theme 新增 diff_add_bg/del_bg/add_hl/del_hl 四槽位 (kimi DiffColors 对标; attic 用橄榄绿/陶土红座标系); 新增 `theme.current()` (最后 apply 的主题, 与 env/config 解析的 active() 区分 — 热切换真相)。
+- 新增 `tests/test_diff_render_invariants.py` (17 测试: I-DIFF-1 行号保真含 offset 反例 / I-DIFF-2 词级配对含 ratio 反例 / I-DIFF-3 双路等价+截断标记 / I-DIFF-4 preview 上限含反例 / I-DIFF-5 大文件降级含反例 / I-DIFF-6 审批预览含 write_file 反例 / I-DIFF-7 CJK+空输入健壮性)。
+
+### ANSI-16 语法主题 (G7, kimi utils/rich/syntax.py 对标)
+- 新增 `cli/syntax_theme.py`: `ZALL_ANSI_THEME` (ANSISyntaxTheme, kimi token 映射移植 — 关键字 magenta / 字符串 bright_blue / 函数 bright_cyan / 类 bright_yellow bold / 注释 bright_black italic); `resolve_code_theme("zall-ansi")` → 实例, 其余透传; `resolve_code_bg("")` → None (跟随终端背景)。痛点: one-dark/nord 是 truecolor 固定色板, 浅色终端下不可读; ANSI-16 主题自动跟随终端配色。
+- 新增第三主题 `ansi` (纯 ANSI-16 色名槽位, 浅色终端自适应; code_theme="zall-ansi", code_bg=""), 注册进 THEMES。
+- 消费点全接线: TUI `widgets.py` Syntax 1 处 + Markdown 4 处、REPL `render.py` Markdown (顺带修此前 REPL Markdown 从未传 code_theme 的不一致 — 之前 REPL 代码块永远是 rich 默认 monokai)。
+- 新增 `tests/test_syntax_theme_invariants.py` (10 测试: I-ANSI16-1 resolve 大小写不敏感+透传反例 / I-ANSI16-2 code_bg 空串→None+透传反例 / I-ANSI16-3 ANSI 纯净性 — zall-ansi 渲染绝无 truecolor 38;2; 转义, one-dark 反例有 / I-ANSI16-4 主题注册完整+全槽位 ANSI 可派生+未知名反例)。
+
+### 大段粘贴折叠 (G5, kimi placeholders.py 对标)
+- 新增 `cli/paste_fold.py`: `PasteFolder` — 粘贴 >=1000 字符或 >=15 行 (env 可调) 折叠为 `[Pasted text #N +M lines]` 占位符, 提交时 `expand()` 展开为原文; 未知 id (跨会话历史召回) 原样保留; 入口即 `sanitize_surrogates` (Windows 剪贴板孤立 UTF-16 surrogate → U+FFFD, 免 json/历史文件 UnicodeEncodeError) + CRLF 归一化。
+- REPL `prompt.py`: 新增 `Keys.BracketedPaste` eager 绑定 — 粘贴作为单一事件插入, **修复多行粘贴被 Enter 绑定逐行解释的问题**; 提交时 `folder.expand()`。
+- TUI `widgets.py ChatTextArea`: 新增 `_on_paste` 拦截 (select_mode/read_only 吞掉; 否则折叠后 `_replace_via_keyboard` 插入); `expanded_text` property; Enter 提交与 Ctrl+S steer 均发展开后文本。
+- 新增 `tests/test_paste_fold_invariants.py` (11 测试: I-PASTE-1 阈值含反例 / I-PASTE-2 往返保真+多占位符+未知 id 反例 / I-PASTE-3 CRLF+surrogate+CJK / I-PASTE-4 占位符格式 / I-PASTE-5 ChatTextArea 集成)。
+
+### 测试自身 I-GBK 违规修复
+- `tests/test_platform_compat.py::test_subprocess_output_encoding_consistency` 自身裸用 `text=True` 无 encoding — 子进程 GBK 输出碰 `-X utf8` 父进程时 reader 线程 UnicodeDecodeError、stdout=None 碰 `in` 报 TypeError。修复: 子进程 `-X utf8` + 父进程显式 `encoding="utf-8", errors="replace"`, 断言从“或者返回码为 0”弱断言强化为两条都必须成立。
+
+### 审批 feedback 拒绝语义 (G2, kimi 审批 UX 对标)
+- **痛点**: 此前拒绝时模型只知道 "user rejected" — 不知道为什么被拒/该怎么改, 常常换个写法重试同一件事。
+- `core/gate.py`: `UserResponse` 新增 `feedback: str | None`; greylist/blacklist REJECT 分支带 feedback 时 rejection_reason 变为 "user rejected with feedback: {理由} — adjust the approach accordingly", 经 executor `_make_rejection_message` 流入 tool_result — 模型可见。
+- `cli/responder.py`: greylist 新增 `f` 选项 (reject + why) — 选中后追问一行自由文本理由; 空理由退化为纯拒绝。`_GREYLIST_CHOICES` 同源 — TUI 选择菜单自动获得 f 项, feedback 输入经既有 `_tui_ask` 机制免接线。
+- 新增 `tests/test_reject_feedback_invariants.py` (8 测试: I-FB-1 reason 含理由+纯拒绝反例 / I-FB-2 blacklist 同语义 / I-FB-3 f 收集+空输入退化反例+纯 n 不提问反例+菜单同源 / I-FB-4 端到端 tool_result 可见)。
+- 同步 `tests/test_confirm_select.py` 选项契约测试: `_GREYLIST_CHOICES` 契约从 y/n/a/e 更新为 y/n/f/a/e (G2 引入 f 后全量曾短暂 1 failed, 已修)。
+
+### cell-width 截断工具 (G11, kimi utils/string.py 对标 + 增强)
+- `_util/string.py` 新增 `display_width` (East Asian Wide/Fullwidth 计 2 格) / `shorten` (空白归一化+词边界优先, CJK 无空格硬切不塌缩) / `truncate` (不归一化空白, 保留代码/日志行缩进) / `shorten_middle` (头尾保留, 反转串量尾部)。相对 kimi 版 (纯字符数) 升级为终端 cell 宽度感知 — CJK 双宽不再撑爆 rich 表格/面板。纯 stdlib (IPR-3)。
+- 替换 5 处硬截断消费点: `responder._preview_args` (args 预览, 顺带多行归一防滚屏) / `widgets.ThinkWidget.render` (顺带消灭 `[:78]` 后永假的 `>78` 死分支) / `render.py` Goal intent / 工具输出预览行 (用 truncate 保缩进) / tool summary 首行。API key 脱敏 (`commands/config.py`) 非截断语义, 不动。
+- **顺手修 TUI 崩溃隐患**: `ThinkWidget.render` 把原始 reasoning 直接塞 `Text.from_markup` — 思考文本含 `[` (如 `list[int]`) 会 MarkupError 崩 TUI; 展开/折叠两分支均补 `rich.markup.escape`。
+- 新增 `tests/test_shorten_invariants.py` (17 测试: I-SHORT-1 词边界+CJK 硬切反例 / I-SHORT-2 cell 感知 ASCII 对照 / I-SHORT-3 永不超宽+短文本原样反例 / I-SHORT-4 middle 头尾保留 / I-SHORT-5 display_width / I-SHORT-6 truncate 保缩进与 shorten 对照反例)。
+
+### 提示符行首保证 (G10, kimi utils/term.py 对标 + 修其 off-by-one)
+- **痛点**: bash 等工具输出无尾换行时, REPL 提示符接在残留输出行尾。
+- 新增 `_util/term.py`: `ensure_new_line()` 提示符前探测光标列, 不在行首才补 `\n`。Windows 走 `GetConsoleScreenBufferInfo` (ctypes 同步无竞态, 用户主环境); Unix 走 `ESC[6n` 查询 (cbreak+非阻塞读+200ms 超时, 不会卡死在不可中断 os.read)。纯 stdlib (IPR-3)。
+- **修 kimi 原版 off-by-one**: kimi `_cursor_column_windows` 返回 1-indexed 却判 `not in (None, 0)` — 行首 (列 1) 会误插空行。zall 版两平台统一 1-indexed + 单一判据 `_needs_newline` (行首/探测失败都不写, 探测失败保守不乱插空行)。
+- 接线 `repl_ui.py` 主循环: 每轮提示符前 `_ensure_new_line()`; 非 TTY (管道/测试) 零输出直接短路。
+- 新增 `tests/test_term_invariants.py` (9 测试: I-TERM-1 判据含行首/None 反例 (off-by-one 回归守卫) / I-TERM-2 非 TTY 零输出反例 / I-TERM-3 恰写一个 \n+两反例 / I-TERM-4 错平台返 None+原生探测不抛)。
+
+### 指数抖动退避 (G13, kimi wait_exponential_jitter 对标)
+- **痛点**: 三处消费点 (core/loop · cli/repl_ui · cli/tui/app) 各自硬编码 `attempt * 2` (2s/4s/6s) — 线性退避僵硬, 固定值多客户端同时重试有同步惊群。
+- 新增 `_util/backoff.py` `backoff_delay(attempt)`: base = min(2·2^(n-1), 8), 乘以中心对称均匀抖动 [1-j/2, 1+j/2) — 期望值恰为 base (好推理), rng 可注入 (测试确定性); jitter=0 退化为确定性指数 2/4/8。纯 stdlib (IPR-3)。
+- 三消费点统一接线单一真相源; 显示格式化一位小数。
+- 新增 `tests/test_backoff_invariants.py` (9 测试: I-BO-1 指数序列+非旧线性反例 / I-BO-2 封顶+放宽反例 / I-BO-3 抖动区间 rng 注入+200 样本带内 / I-BO-4 居中 / I-BO-5 attempt<1 防御 / I-BO-6 架构守卫三消费点无残留硬编码)。
+
+### timeline 版本头 + 坏行容错 (G12, kimi wire.jsonl 首行 protocol_version 对标)
+- 新增 `_util/jsonl.py`: `make_metadata`/`is_metadata`/`read_jsonl`/`read_metadata` — 首行版本头 `{"type":"metadata","version":1,...}`, 无头旧文件视为 legacy 行为完全一致 (向后兼容)。纯 stdlib (IPR-3)。
+- **修一坏全弃**: 此前 `_load_timeline_events` 任一行 JSONDecodeError 整个返 None 丢掉全部可读事件; 现坏行 skip 保住其余记录。
+- 接线: `_save_session` timeline 首行写版本头 (run_id+saved_at); `commands/system._load_timeline_events` 改走 `read_jsonl`; `core/eval.load_timeline` 显式跳版本头 (原 KeyError 兜底升级为显式语义)。
+- 同步 `test_cli_app.py::test_timeline_chain_intact`: 链验证前过滤版本头并断言首行必为 metadata (端到端验证写入)。
+- 新增 `tests/test_jsonl_header_invariants.py` (12 测试: I-JH-1 往返+事件非头反例 / I-JH-2 过滤+保留反例 / I-JH-3 坏行 skip+全坏反例 / I-JH-4 legacy 一致 / I-JH-5 read_metadata+legacy None 反例 / I-JH-6 两消费方端到端)。
+
+### completion token 动态钳制 (G16, kimi compute_max_completion_tokens 对标)
+- **痛点**: max_tokens 固定透传 — 长上下文时 input + requested 超出模型窗口, provider 直接 400 (kimi 用发前钳制根治)。
+- 新增 `_util/tokens.py`: `estimate_text_tokens` (CJK 感知: ASCII (n+3)//4 + 非 ASCII 每字符 1, kimi 同款) / `estimate_body_tokens` (整个请求体 json.dumps 后估算 — 覆盖 kimi 分项估算全部内容且天然含结构开销) / `clamp_completion_tokens` (max(minimum, min(requested, window-input-margin)); window<=0 未知窗口不敢钳原样透传)。SAFETY_MARGIN=1024 (kimi 同值), MIN_COMPLETION=256 保底。纯 stdlib (IPR-3)。
+- 接线: `openai_compat._build_body` max_tokens 注入处 + `anthropic._build_body` (tools/tool_choice 注入后估算 — 含 schema 开销; thinking 逻辑之前 — 显式启用的 thinking 抬高 budget+1024 语义保留)。窗口来源 `_util/model_registry.get_window_size`。
+- 新增 `tests/test_token_clamp_invariants.py` (11 测试: I-TK-1 估算 ASCII/CJK/混合可加/body 嵌套 / I-TK-2 放得下原样反例+钳到余量+近满保底 / I-TK-3 未知窗口透传反例 / I-TK-4 adapter 集成 500k→<128k + 4096 原样反例 + anthropic 999999 被钳)。
+
+### [HIGH] grep 退化路径 timeout 形同虚设 (G14 线程泄漏审查产出)
+- **审查范围**: 全量 grep `Thread(|ThreadPoolExecutor|create_task` 10 处逐点核实 — spawn_subagent (close+__del__+幂等) / mcp/client (stop Event+join+daemon) / render spinner (持久线程+shutdown Event) / environment / anchor / update / coordinator 均健全。
+- **唯一真缺陷**: `tools/grep.py::_grep_python` 用 `with ThreadPoolExecutor` 包 timeout — TimeoutError 后 `__exit__` 执行 `shutdown(wait=True)` **阻塞等待灾难性回溯的失控 regex 线程**, 5s 保护形同虚设; 且非 daemon 线程还阻止进程退出。
+- **修复**: daemon 线程 + `join(timeout)` + `_cancel` 协作停止标志 (逐文件/逐行/walk 层检查) — 超时后主线程立即返回, 失控线程尽快自行退出; 异常不再静默 (result_box["error"] 回传)。
+- 新增 `TestGrepTimeoutNonBlocking` (3 测试: I-GREP-TO-1 耗时 4s 的搜索在 0.3s timeout 下 <2s 返回 / 快搜索结果完整反例 / I-GREP-TO-2 架构守卫无 executor 回归)。
+
+### 斜杠命令别名展示 (G17, kimi "/name (alias)" 对标)
+- 展示层派生别名关系, `SlashCommand.description` 单一真相源不动: `get_command_meta` (REPL 补全) 别名条目标 `→ /规范名 · desc`, 规范名尾附 `(alias: /h)`; `get_palette_commands` (TUI 面板) desc 尾附别名。
+- 副作用收益: 面板 fuzzy desc 命中现在可经别名召回 — 搜 "selfplay" 出 /lab, 搜 "quit" 出 /exit。
+- 新增 `TestAliasAnnotation` (4 测试: 别名指向规范名 / 规范名列别名 / 无别名不污染反例 / 面板别名召回)。
+
+### scripted/chaos provider (G15, kimi _scripted_echo/_chaos 对标, E2E 设施)
+- 新增 `adapters/scripted.py` `ScriptedAdapter`: JSON 脚本回放 (确定性回归/无 key 冒烟) — 构造期全量解析条目 (坏脚本立即失败不留回放中途); tool_calls 省略 stop_reason 时推断 TOOL_USE; 耗尽返 STOP 收尾 (loop=True 循环); `complete_stream` 逐块 yield 且收尾帧与 complete() 等价 (Protocol 契约); `calls` 记录供测试断言。
+- 新增 `adapters/chaos.py` `ChaosAdapter`: 包装任意真 adapter 按概率注入故障 — 形态与真实错误路径完全同构 (429/500/503 → raw={"status":N} 走 API 重试路径; transport → raise httpx.ConnectError 属 RETRYABLE_EXC); `max_consecutive` 前进性护栏 (概率 1.0 也不锁死会话); rng 可注入; `complete_stream` 经 `__getattr__` 按需派生 — inner 无流式时 hasattr 探测保持 False (loop 降级语义不被包装层破坏)。
+- 接线 `cli/config._build_adapter`: `model=scripted:<path.json>` 或 env `ZALL_SCRIPT` → 回放 (优先于一切); env `ZALL_CHAOS=<0..1>` (+`ZALL_CHAOS_MODES`) → 构建后包装; 非法值警告降级不阻断。
+- 全链路冒烟验证: `ZALL_SCRIPT=... zall --no-tui -y "say hi"` 完整跑通 loop→渲染→会话持久化。
+- 新增 `tests/test_scripted_chaos_invariants.py` (15 测试: I-SC-1 顺序/耗尽+loop 反例 / I-SC-2 tool_calls 推断+STOP 反例 / I-SC-3 流式≡阻塞 (CJK 跨块) / I-SC-4 from_file+坏脚本反例 / I-CH-1 p=0 透传反例 / I-CH-2 前进性 9 次=3 组注注放 / I-CH-3 注入同构 is_retryable_status+RETRYABLE_EXC / I-CH-4 委托+hasattr 反例 / I-BLD-1 接线含无 env 不包装反例)。
+
+### 测试与质量
+- 全量基线: **2081 passed / 13 skipped / 0 failed** (修复前) → bugfix 后 2093 → G6 后 2104 → G7 后 2114 → G5 后 2142 → G2 后 2150 (含契约测试同步修复) → G11 后 2167 → G10 后 2176 → G13/G12/G16 后 2208 → G14/G17 后 2215 → G15 后 **2230 passed / 13 skipped** (全量确认) → E2E 轮后 **2260 passed / 13 skipped** (全量确认, +21 e2e 修复面 +5 流式降级 +4 TUI 死锁守卫); 本轮新增 12+11+17+10+11+8+17+9+9+12+11+3+4+15 测试, 受影响面定向回归 462 + 359 + 379 + 270 + 298 + 284 + 127 + 55 + 126 + 119 + 307 + 187 passed, ruff 全绿。
+- **G8/G9 评估关闭 (2026-07-26)**: 代码核实后关闭两项低优先 gap — G8: REPL 流式实为 append-only 直写 (`_write_stream_text` 无重绘), `_streamed_step == step` 完成分支不重打全文, kimi 两段式固化无对应痛点; G9: 流式已有滚动预览, 非流式路径无增量数据物理不可行, 终态折叠已统一。gap 清单 G1–G17 全部闭环。
+- **修复: 旧版 autosave 残留无限累积 (2026-07-26)**: 实测 `~/.zall/` 累积 37 个旧版 PID 命名 `.repl_autosave_<pid>.json` (E4 固定文件名改造后无代码回收它们)。新增 `_sweep_legacy_autosaves()` 接线 `_check_repl_autosave` 启动时顺手清扫 — 仅删 PID 已死的文件 (与 E4 软锁同一保护语义), 非数字后缀保守不碰。3 测试含反例 (固定名不删/存活 PID 不删/接线验证), test_interaction_debt_e4.py 17 passed。
+- **修复: 脏工作区下 Q&A 会话误报 "modified: 167 file(s)" (2026-07-26, 真实 API 冒烟发现)**: `orchestrator.get_modified_files()` 用 `git diff HEAD` 拿的是工作区**全部**未提交改动, 非本次 run 产物 — 0 tools 的纯问答也报 167 文件。修复: 新增 `snapshot_modified_baseline()` 在 loop.run 前采基线集合, 结束后只报差集; baseline=None 保留旧语义兼容直接调用方。4 测试含反例。
+- **修复: 一次性任务退出码语义 (2026-07-26, 真实 API 冒烟发现)**: 未开 judge (默认 --judge none) 时 UNDECIDABLE 是必然终态, Q&A 成功回答也 exit 2 — `zall -y "..." && next` 永远断链, 脚本化/CI 不可用。新语义: 未开 judge 且无 error → 0; 开了 judge 裁决不了或执行出错 → 仍 2 (PR-0 诚实不确定保留)。4 测试含反例, test_cli_app.py 52 passed; 真实 API 复验 exit=0。
+
+### E2E 轮 (2026-07-26) — 真实 API (SenseNova deepseek-v4-flash) 全流程检验 + 五项真缺陷修复
+- **E2E 通过**: ① 连通性冒烟 (1.5s 往返); ② 中等难度开发任务全自主闭环 (merge_intervals: 4 步/4 工具, 写模块→写测试→跑 pytest 7 passed, 产物落盘质量合格); ③ REPL 多轮模拟真人 (打错命令 did-you-mean、read→edit diff 面板→doctest 6 passed、优雅退出); ④ TUI Pilot 模拟真人输入+鼠标点击 (`scripts/e2e_tui_pilot.py`: 点击聚焦→逐键敲入→Enter→真实 API 回合→断言历史/无错误→/help, 9/9 断言通过)。
+- **修复: 依赖混淆式自毁风险 (安全关键)**: PyPI 上存在**同名陌生包** `zall` (0.4.10) — 本地私有项目 (0.0.1) 启动时提示 "update available: 0.0.1 -> 0.4.10", `/update` 会 `pip install --upgrade zall` 把第三方包顶掉 import 名。新增 `_is_dev_install()` (源码运行/editable/file:// 任一命中即 dev, 未知保守归 dev) — dev 安装不提示更新、perform_update 直接拒绝不碰 pip。5 测试含反例 (正式 wheel 安装不误伤)。
+- **修复: 脏仓库下每步误报 "anomaly detected"**: `loop.py __init__` 中 `_init_baseline_modified()` (271 行) 先于 `_project_root` 赋值 (341 行) 执行 — AttributeError 被 except 吞, 基线恒 0, 脏仓库 (167 存量改动 > 50) 下 coding_world_model 每步判 anomaly。修复: `_project_root` 提前到 `_init_baseline_modified()` 之前赋值; 源码顺序守卫测试 ×2。
+- **修复: anomaly 警告刷屏**: render 层每个 perception_state 事件都重打同一条警告 (e2e 实测单任务 5 次) — 改为仅 False→True 翻转沿打印 (`_anomaly_active` 状态位), 恢复后再异常会再报。3 测试含反例。
+- **体验: `/usage` 别名接入 `/stats`** (e2e 模拟真人直觉输入命中 unknown) — G17 alias 基建自动获得帮助/面板标注。
+- **修复: 流式路径网络错误无重试 (chaos e2e 钓出)**: `_with_retry` 重试链只保护非流式 `complete()`, 各 adapter `complete_stream` 是裸流 — `ZALL_CHAOS=0.5` 实测 `ConnectError` 直接 step error 杀死任务 (真实网络闪断会杀死长任务)。分级恢复: **零产出**失败 → 降级非流式 `complete()` (自动获得完整重试链, UI 无重复输出) + 发 `retry(category=stream_fallback)` 可见性事件 (spinner 标签零闪烁); **已有部分产出** → 维持 A1 诚实传播 (降级重打会双重显示半截+完整内容)。`RETRY_REASON` 注册 `stream_fallback` 文案。chaos+真实 API 复验: 注入下任务 4 步收敛完成 (此前 step 2 即死)。5 测试含反例 (部分产出不降级 / timeline 携带降级响应 / 事件可见)。
+- **修复: TUI 流式必死锁 (致命, TUI pilot e2e 钓出)**: `_tui_listener` (worker 线程) 在 `_buf_lock` **锁内**调 `call_from_thread` — 它阻塞等主线程回调完成, 而回调 `_flush_token/thinking_buffer` 首行就要拿同一把锁 → worker 持锁等主线程 / 主线程等锁, **流式第一个 token 即 100% 冻死整个 TUI** (faulthandler 全线程栈转储实锤)。此前所有 TUI 测试都主线程直调 `_handle_event`, 从未走过真实线程路径 (测试盲区)。修复: 锁内只置标志, `call_from_thread` 移到锁外。新增 `tests/test_tui_deadlock_guard.py` (4 测试: AST 守卫 I-TUI-LOCK 锁内禁 call_from_thread + 旧形态反例自证 + 修复形态放行 + flush 回调锁语义不可删)。
+- 定向回归: update/loop/render/palette/e4/cli_app 面 171 passed + 新增不变量测试文件 test_update_and_anomaly_invariants.py 10 passed + stream/retry 面 101 passed + TUI 面 121 passed, ruff 全绿。
+
+### - 深度审查 · Provider 一等化 · 真溯源 · 数学探索 (2026-07-23)
+
+### Provider 一等化 (解决"硬编码"模型提供者)
+- **根因**: `api_base` 本就是 config 驱动的 (`BaseAdapter` 读 `load_config()`), 已有 TOML `[[providers]]` 机制; 真正缺陷是 `model_registry.py` 多处绕过合并后的注册表, 自定义 provider 永远是"二等公民"。
+- A1: `get_model_provider()` 接受可选 `registry` 参数, 用合并表推断; 新增**最长前缀优先**匹配 (修 `deepseek-v4-flash` 被内置 `deepseek-` prefix 错路由到 api.deepseek.com 的问题)。
+- A2: `[[providers]]` TOML schema 新增 `window_size`/`price_in`/`price_out` 字段; `_merge_custom_providers()` 注入运行时覆盖表, `get_window_size()`/`get_price()` 先查覆盖表 (自定义模型不再一律拿默认 32000/$3+$15)。
+- A3: `get_provider_tag()` 对自定义 provider 用首字母兜底 (不再返回 '?'); `list_providers()`/`get_provider_default_model()` 读合并表。
+- A4: `/model` picker `_detect_configured_providers()`/`_build_dynamic_model_list()` 用合并表, 自定义 provider 用真实名 (不再硬编码 "openai")。
+- 新增 `tests/test_custom_provider_invariants.py` (13 测试, 含反例: 自定义 prefix 路由/window/price/tag/list 均一等)。
+
+### 安全配置 deepseek-v4-flash / SenseNova
+- 用 `[[providers]]` 注册 `sensenova` provider (openai-compat), `deepseek-v4-flash` 正确路由到 `https://token.sensenova.cn/v1` (不再错路由到 DeepSeek)。
+- **API key 仅经 env `ZALL_API_KEY` 注入, 不写入任何 git 管理文件**; `~/.zall/config.toml` (仓库外) `[auth].api_key` 留空占位。
+- 端到端验证: provider=sensenova -> OpenAICompatAdapter -> SenseNova base -> 模型回复正常 (HTTP 200)。
+
+### Bug 修复 (按严重度)
+- **[HIGH] C1**: `loop_perception.py` 状态变化检测用错键名 (`git_modified`/`lsp_errors`), 传感器真实输出键是 `modified`/`errors` -> 检测从未触发 (死代码)。修正键名 + 用文件计数。旧测试曾固化 bug (用错键), 一并修正。
+- **[HIGH] C2**: `coding_world_model.py` `anomaly()` 同样用错键名 -> git/LSP 异常检测失效。修正。新增 4 反例测试。
+- **[MED] C3**: `loop.py` `_messages` 影子属性初始化不同步 (若 `chat_state` 预填消息, `_messages=[]` 与 `_chat_state` 不一致, MASTER.md §7.3.2)。修初始化从 ChatState 同步 + 移除冗余 `_sync_messages()` 调用。保留 `_messages` 为影子属性 (多处测试直接赋值, 避免 property 改造的回归风险)。新增 `test_no_dual_write_inconsistency`。
+- **[MED] C4**: `perception/engine.py` `reset()` 销毁已配置 WorldModel (替换为 NullWorldModel) -> 数据丢失。改为只清状态, 保留 world model。新增反例测试。
+- **[LOW] C5**: `chat_state.py` 7 处方法内 lazy `import Message` + `openai_compat.py` 2 处 `import time as _time` 提为模块级 (热路径重复 import)。
+
+### 真溯源哈希 (E3 Science Kit 诚实化)
+- 新增 `src/zall/_util/hash_utils.py`: `hash_file`/`hash_files` (顺序无关聚合)/`hash_dir`/`environment_hash` (stdlib-only, IPR-3)。
+- `ScienceProvenance` 四个 hash 字段此前是硬编码占位符 (`sha256:cli-manual`/`sha256:agent`), 无任何代码对真实文件算哈希 -- "可复现"宣称是空话。现 CLI (`/science evidence --protocol/--data/--code`) 与 agent tool (`add_evidence` 新增 `protocol_path`/`data_path`/`code_path`) 均算真实 SHA-256; 无路径时降级为带标记占位符 `sha256:unspecified-<field>` (明确未溯源, 而非伪装)。
+- 新增 `tests/test_hash_utils_invariants.py` (11 测试, 含反例)。
+
+### Erdős–Straus 猜想真实探索 (Science Kit dogfood)
+- **诚实前提**: 这是开放问题, 无 LLM agent 能"解决"它产出 Science 论文。价值是一次真实、可复现、可证伪的计算探索, 由 Science Kit 全程溯源。
+- `experiments/erdos_straus/`: `solve.py` (有界剪枝枚举 + 整数算术验证), `run_search.py` (批量), `science_campaign.py` (假设驱动循环)。
+- H1 (正假设): [2,50000) 内 4/n 均可分解 -> **CONFIRMED** (区间内, 非证明); H2 (反例假设) -> **FALSIFIED** (0 反例, 负结果 I-10)。
+- 全程真实 provenance (protocol/data/code/env SHA-256, 已验证匹配实际文件) + 链式哈希 timeline 锚定; `REPORT.md` 明确标注局限。
+
+### 测试与质量
+- 全量: **1885 passed / 13 skipped** (基线 1854, +31 新测试, 0 退化)。ruff 全过; mypy 仅 1 预存无关错误。
+
+### - v1.1 现实对齐修订 (2026-07-19/20)
+
+### PARADIGM 落地轮 (2026-07-21) — 可证伪经验机变成能跑的命令 `/lab`
+
+**从原语到成品: `/lab` 命令 (工程化落地)**
+- 新增 `/lab` 命令 (别名 `/selfplay`): 把 Step 1-3 (经验流 / 沙盒证伪 / 开放式生成) 串成用户可直接跑的**可证伪自改进**入口。
+  - `/lab <task>`: 真实模型提解 → **隔离沙盒执行证伪** (grounded reward, 非自评) → 熬过者蒸馏成技能写入经验库 (跨会话复利)。
+  - `/lab` (无参): 开放式一轮, 从已验证技能派生新任务再各自提解+证伪 (空库诚实提示先 bootstrap)。
+  - `/lab skills` / `/lab stats`: 只读查看已学技能与经验库统计。
+- **最前沿交互**: `RedBlueLoop` 新增可选 `on_event` 观察者 (additive, 默认 None → 行为/确定性不变), `/lab` 用它把“猜想 → 提议 → 沙盒反驳 → 蒸馏”每一步 live 渲染 (● 风格)。`run_open_ended_round` 亦透传 `on_event` + 每任务发 `task` 事件。
+- **模型无关**: blue_fn 由 CLI 层用当前 session 的 adapter 组装 (IPR-3 核心零模型依赖不变); adapter 解析 `loop.model_adapter → state → 现建`。
+- 新增 `tests/test_lab_command_invariants.py` (8 测试, 真实沙盒 + 反例): on_event 投递/异常隔离/不改报告; verified→蒸馏、坏码→不蒸馏、只读子命令、无模型优雅退让、空库不调用模型。
+
+### PARADIGM 路线推进轮 (2026-07-21) — Step 2/3 + Step 0 地基 (可证伪经验机脊柱)
+
+**Step 2: 验证器制导反驳 (grounded refutation)**
+- 新增 `core/sandbox_verifier.py`：`SandboxVerifier` 把候选解法**真的在隔离沙盒里跑** (ProcessSandbox), 用退出码/断言结果作 ground-truth reward (非模型自评 → 不自欺)。`make_sandbox_red_fn()` 提供可直接喂给 `RedBlueLoop` 的 red_fn。新增 9 测试 (真实执行, 含反例: 坏代码/错误实现被客观证伪)。
+
+**Step 3: 开放式任务生成 + 永续自改进轮**
+- 新增 `core/open_ended.py`：`OpenEndedGenerator` 从已验证技能模板变异生成**新颖且可学**新任务 (harden/generalize/vary/combine, 确定性、离线、模型无关)。`run_open_ended_round()` 闭环: 生成任务→红蓝提议→沙盒证伪→**仅 verified 解写回经验库为新技能** (Popperian Gate)。新增 8 测试 (含反例: 坏解不污染技能库; 只从 verified 技能派生)。至此 “生成→解→证伪→蒸馏→复利” 脊柱闭环。
+
+**Step 0 地基: lean 工具集预设 (Bitter Lesson)**
+- `core/toolset.py` 新增 `lean` 预设 (bash+read+write+edit+grep+glob+list_dir, 7 个少而宽工具, 对齐 Pi)。**opt-in, 不改默认** (零回归)。新增 `tests/test_toolset_presets.py` (填补之前缺失的预设不变量测试)。
+- 诚实说明: Step 0 的“默认工具收窄 + 系统提示精简 + 热循环本体论解耦”是更大重构, 为不弄坏已验证的默认路径, 本轮只落地无风险的 lean opt-in, 余下作为单独一轮。
+
+**Step 0 收尾 (续): 真实 token 计数 + lean 系统提示**
+- 真实 token 水位计数 (Pi 教训): watermark 用上次响应真实 `usage.prompt` tokens 作 ground truth, 无则回退字符估算。`compactor`/`context_manager`/`loop` 加 `real_tokens` 可选参 (向后兼容), loop 追踪 `_last_usage`。新增 `tests/test_real_token_watermark.py` (4 测试含反例)。
+- lean 系统提示: `build_system_prompt(lean=True)` 仅 base+env, 跳过 repo_map/记忆/skills/lsp/codegraph; `--toolset lean` 自动启用。新增 lean-prompt 测试。
+- 热循环解耦 (完成): 感知块 (~95 行, 每步唯一大块) 抽取到 `core/loop_perception.py` (薄委托, 同 loop_checkpoint 模式; loop.py 净减 ~92 行, 行为等价, perception 测试守护)。六维仅测试用、链校验每 run 一次 → 本就不在每步热路径。至此 **Step 0 全部完成**。
+
+### 可证伪经验机轮 (2026-07-21) — 北极星文档 + 持续学习第一块肌肉 (PARADIGM Step 1)
+
+**北极星文档**
+- 新增 `docs/PARADIGM.md`：**可证伪经验机 (Falsifiable Experience Machine)** — zall 的长期演进北极星。核心：“靠熬过证伪而成长”的持续学习通用智能体。基于前沿 (经验时代 Silver&Sutton / Bitter Lesson / 开放式演化 / Voyager 技能库 / “自改进仅在可验证处成立”) + 波普尔“猜想→反驳→蒸馏”。明确五器官、Popperian Gate、演进路线与诚实边界。
+
+**Step 1: 持久经验流 + 技能复利**
+- 新增 `core/experience_store.py`：`ExperienceStore` 跨会话持久 (`~/.zall/experience/experience.jsonl`)。**Popperian Gate**: 只有 verified (熞过证伪) 的经验才蒸馏为“技能”; `recall(task)` 按关键词相关性召回已验证技能 (模型无关/离线/确定性, 非向量检索, IPR-3)。
+- **复利读路**: `PromptBuilder.add_experience_recall()` 在新任务开始时注入相关技能→同类任务第 2 次(新会话)能用上上次经验; prompt 缓存 key 加入 user_raw 防串。
+- **写路**: `orchestrator.run()` 完成后写入经验 (final_state==MET→verified 技能; 否则仅历史)。
+- 新增 `tests/test_experience_store_invariants.py` (13 测试含反例: 只召回 verified / 无关不注入噪声 / 跨会话复利 / 去重边界 / 排序确定性)。离线验证: 上一会话的 verified 技能确实注入新任务 prompt, 无关任务不注入。
+
+### 红蓝对抗共进化轮 (2026-07-21) — 增量 A: Experience Bank + 吸取前沿 (非盲目 verify)
+
+**版本号 → 0.0.1**
+- `__init__.py` + `pyproject.toml` 统一为 `0.0.1` (完善前重置)。
+
+**修复: inline 下上下文提示消失 (回归)**
+- 默认改 Textual inline 后, 旧的 prompt_toolkit bottom_toolbar 的 ctx% 不再显示; 而 Textual StatusBar 的 `status_context_pct` 声明了却**从未被填充**。新增 `_update_usage()` 从 model_call usage 算 ctx% (prompt tokens / 模型 window) 并回填, 两个 usage 处理点共用。ctx% 重现于状态栏。
+
+**增量 A: 红蓝对抗共进化循环 (借鉴 Hyra, 真正吸取前沿)**
+- 新增 `core/red_blue.py`: `ExperienceBank`(存方案+评估, 兼 Context Agent 合成多样灵感) + `RedBlueLoop`(Blue 提议 → Red **主动攻击**打分 → EB 记录 → 逐轮抬门槛共进化)。三条前沿: 对抗压力(red-team/self-play)、多样性(quality-diversity)、评估器共进化(POET/双层循环)。**不再把“可验证”当卖点** — 可复现只是支撑审计/重放, 真正价值是对抗压力产出更鲁棒的解。纯编排+依赖注入 (blue_fn/red_fn), 无模型依赖 (IPR-3), 可离线单测。
+- 新增 `tests/test_red_blue_invariants.py` (14 测试, 含反例: broken 高分不入选 / blue·red 异常隔离 / 共进化趋势可升可降 / 确定性 / 空方案判 broken / Red 门槛逐轮抬高)。
+- **真实 API dogfood**: is_palindrome 任务, 2轮×2提议, 8 调用/61s, best=0.95; Red 真实找出 unicode 归一化边界案 (非橡皮图章)。
+
+### 欢迎屏极简化轮 (2026-07-21) — 首次能看到真实渲染 (headless SVG 截图)
+
+**用 Textual headless 截图真正看到 UI (不再盲改)**
+- 通过 `App.save_screenshot` 导出 SVG + 浏览器渲染截图, 首次看到真实 TUI。发现旧欢迎屏是一个拥挤的带边框 Panel (header+分隔线+2 个网格), 多消息时被滚动截断→看似一个空框。
+- 重设欢迎屏为极简风 (学 Claude/Pi): 无重边框, 高对比 wordmark (◆ zall vX · model) + 一行 tagline + 一行上手提示 (/help · @ · Shift+Tab · Ctrl+S); 完整命令/键位移到 /help。移除因此多余的 Panel/Group import。
+- Footer: `Ctrl+O` 描述 "Edit in $EDITOR"→"Editor" (修底部键位条截断)。
+
+### 视觉极简 + 持续自改进轮 (2026-07-21) — 学 Claude/Pi 渲染 + 借鉴 Hyra 递归自改进
+
+**B 消息渲染极简化 (学 Claude Code / Pi 的无边框链式)**
+- 工具调用渲染从带边框 Panel 改为极简 `● name(args)` + `└` 缩进 dim 输出 (Claude/Pi 手感); edit_file diff 仍红/绿/青着色但无边框; 用户消息改为 `❯ ` 提示符 + 明亮正文 (比整行 gold 更克制)。保留 assistant 代码块高亮 Panel。
+- A: inline 配色/留白上轮已调; 本轮由消息渲染提升可见度。
+
+**C 持续自改进循环 (借鉴腾讯 Hyra 递归自改进, verified-only 差异化)**
+- 新增 `core/self_improve.py`: `SelfImprovementLoop` — propose→(去重)→**verify**→仅对通过者 apply。Hyra 的递归自改进过程不透明; zall 坚持 IPR-0: **只落地可验证的增益**, 未通过者记录+理由拒绝, 全程可复核。纯编排 + 依赖注入 (propose/verify/apply), 无模型依赖 (IPR-3)。`from_auto_learn()` 接既有 AutoLearnExtension (真实消费者)。
+- 新增 `/evolve` (别名 `/improve`): **默认 dry-run** 预览 (验证候选但不落地), `/evolve apply` 才落地通过验证的; `-c` 调置信度阈。与 `/suggest` (逐条人工) 互补。
+- 新增 `tests/test_self_improve_invariants.py` (14 测试, 含反例: 低置信度不 apply / dry-run 不落地 / 去重 / apply 异常隔离 / adjust_k 越界 / 不安全 skill 名拒绝)。既有自进化闭环 6 测试未破。
+
+### 交互收敛轮 (2026-07-21) — inline 转正为默认 + 视觉美化 (学 Claude/Pi)
+
+**交互界面收敛 (三路 → 一个清晰默认)**
+- `main()` dispatch 重构: **默认即 Textual inline** (停靠输入框 + 模型运行时可输入, 对齐 Claude Code / Pi — 两者都是“同一 app + 两种渲染面”, inline 为主)。`--tui` 降为全屏 alt-screen opt-in; `--no-tui` 强制同步 REPL (dumb 终端 / SSH / 脚本); textual 缺失 / 终端不支持 → 自动回退同步 REPL。
+- `_should_use_tui` 语义收窄为“是否全屏” (仅 `--tui` 且 textual 可用时 True); headless `run()` 一次性路径 **一行未动** (守住可复现/管道/replay)。
+- 新增 4 dispatch 测试 (含反例): 默认 inline / `--tui` 全屏 / `--no-tui` 同步 REPL / 不支持时回退。
+
+**inline 视觉美化 (学 Claude/Pi 的克制配色 + 留白)**
+- CSS: 消息区增加垂直留白 (padding 0 1→1 1); 输入框水平留白 (0 1→0 2) + 配色更凝聚 (bg #232326 / 边框 #43434a); focus 边框改为温暖琴黄 (#b8860b→#e0a83b, 更雅); 状态栏更静音 (#202023 / #8a8a8a)。CSS 解析通过 (9 rules)。
+
+### 内联 TUI 轮 (2026-07-21) — 停靠输入框 + 模型运行时可输入 (不入全屏)
+
+**--inline: Textual inline 模式 (对齐 Claude Code / Pi 的"横框")**
+- 新增 `zall --inline` / `-I`: 启动 Textual **inline 模式** — 停靠式输入框常驻底部, **模型运行时也能输入** (Enter 排队 / Ctrl+S steer, 复用已有机制), 但**不接管全屏** (不入 alt-screen, 保留终端滚回/复粘贴)。这正是用户要的"模型跑时也能输入的横框"。
+- `run_tui(inline=True)` → `app.run(inline=True, inline_no_clear=True)`; 终端不支持时返回 2 安全回退到内联 REPL。Textual 8.2.8 原生支持 inline。
+- 默认仍为内联 REPL (稳); `--tui` 全屏; `--inline` 为新的"停靠输入框"体验。新增解析测试。
+  (本环境无真 TTY 无法交互测试 inline 渲染, 需真机 `zall --inline` 验收。)
+
+### 底部状态栏轮 (2026-07-21) — 上下文占用提示 (学 Pi/Claude)
+
+**内联 REPL 持久底部状态行 (prompt_toolkit bottom_toolbar)**
+- 输入框下方常驻一行: `model · ctx N% / Wk · [plan] · / commands · @ files · Ctrl-D exit` — 对齐 Pi 的 `0.0%/131k` / Claude Code 的上下文指示。
+- 上下文占用 = 最近一次模型调用的 input tokens / 模型 window (`get_window_size`); usage observer 实时刷新 `state["ctx_tokens"]`, toolbar 每次渲染读取。
+- REPL 未传 `--model` 时从 config 解析真实模型名 (toolbar/提示符不再显 "zall")。抽出纯函数 `build_toolbar_text(state)` (可单测, 无 prompt_toolkit 依赖); 新增 3 测试 (含反例: 无 state 不显 / 无 ctx 不显 ctx)。
+
+### @dir 支持 + 发布收尾轮 (2026-07-21) — 目录引用 / 全量回归 / release notes
+
+**@dir 目录引用 (接着 @file)**
+- `file_complete`: 新增 `list_workspace_dirs` + 目录参与补全 (`workspace_file_matches(..., include_dirs=True)`, 目录带末尾 /); `expand_at_references` 对 `@目录/` 注入**一层目录清单** `<dir>` (而非文件内容), 支持 file/dir 混合引用。新增 5 测试 (含反例: noise 目录不收录 / include_dirs=False / 不把目录当文件读)。
+
+**发布收尾 (D)**
+- 全量回归 (排除 real-API/subprocess/PTY 慢套件): **1746 passed / 4 skipped / 0 failed**; `ruff check src/` 全绿; IPR-3 架构不变量 (core/ 无模型 SDK import) 通过。
+- 分发构建输入验证 (C): entry / 144 submodules / 4 adapters / 核心依赖均可解析 (pyinstaller 本环境未装, 单二进制需真机 `python scripts/build_binary.py`)。
+- 新增 `RELEASE_NOTES.md` (面向用户的本版汇总 + 升级注意)。
+
+### @file 自动注入轮 (2026-07-21) — 内联体验对齐 Claude Code 最后一步
+
+**@file 引用 → 自动注入文件内容 (REPL + TUI)**
+- 新增 `file_complete.expand_at_references(text)`: 提交时把解析到**真实文件**的 `@path` 展开为 `<file path="...">...</file>` 块注入消息 (不再只是补全路径字符串)。非文件 @token 原样保留; 去重; 单文件 64KB / 总 200KB 上限 (超限截断标注); 二进制/读失败标注跳过不崩。
+- REPL: slash 处理后、发给 loop 前展开, 显示 `· injected N file(s)` 提示。TUI: `_run_agent_loop` 首回合 + 排队回合均展开 (用户气泡仍显原文 @path, 模型收到展开后)。一次性 `run()` 也已接入 (静默展开, 不污染 JSON/管道) — **三路径 (REPL/TUI/一次性) 全齐**。
+- dogfood 验证: 一次性 `zall "@note.txt 的密码是?"` → 模型直接引用文件里的密码, **1 次模型调用 / 0 次工具调用** (无需 read_file 往返, 更快)。
+- 新增 6 测试 (含反例: 非文件原样/无@快路径/二进制跳过/截断/去重)。至此内联 REPL 与 Claude Code 的 @ 体验对齐。
+
+### 内联 REPL 打磨轮 (2026-07-21) — @ 文件补全进内联 + nul 崩溃修复
+
+**内联 REPL 对齐全屏 (把好东西搬过来)**
+- 新增共享 `cli/file_complete.py` (`file_query` / `list_workspace_files` / `workspace_file_matches`), REPL 与 TUI 共用**单一实现**。
+- REPL 补全器 (`prompt.py` `_DescCompleter`) 新增 **@ 文件路径补全**: 输 `@src/lo` → 下拉候选工作区文件 (basename 前缀优先 + 路径短优先), 选中只替换末尾 @token; slash 命令补全不变。placeholder 提示同步为 `/ commands, @ files`。
+- TUI `_file_query`/`_all_workspace_files`/`_workspace_file_matches` 改为薄委托共享模块 (消除重复)。
+
+**顺带修真实 bug (dogfood 发现)**
+- 工作区扫描遇 Windows 保留设备名文件 (如仓根的 `nul`) 时 `os.path.relpath` 抛 `ValueError` → 崩溃 (TUI 旧代码也潜在此 bug)。现 `list_workspace_files` 捕获并跳过异常路径。
+- 新增 `tests/test_file_complete.py` (13 测试, 含反例: @ 前非空白/token 后空格/noise 目录跳过/缓存复用/不匹配过滤)。
+
+### 内联化 + 提速 + 分发轮 (2026-07-21) — 方向定调: 不搞全屏, 对齐前沿
+
+**A 默认内联 REPL (全屏降为 --tui)**
+- `_should_use_tui`: 默认走内联 REPL (对齐 Claude Code / Codex / Aider / Pi — 前沿 coding agent 均为内联/滚动区, 非全屏 alt-screen); 全屏 TUI 仅 `--tui` 显式开启。内联保留原生滚回/复粘贴/SSH 友好, bug 面更小。新增测试锁定新默认。
+
+**容错统一 (run/REPL/TUI 三路径)**
+- `is_transient_error` / `TRANSIENT_KEYWORDS` 上提到 `core/loop.py` (单一真相源), REPL 从 core re-export; 新增 `AgentLoop._run_retry_transient` — 一次性 `run()` 也具备瞬态退避重试 (2s/4s/6s, retry_step 不漂移 step_count), 与 TUI/REPL 对齐。至此三个入口均不会因一次 429/5xx 而中途死。
+
+**B-启动提速 (7x)**
+- `cli/app.py`: 重型核心依赖 (Context/RunEgress/MCPTool) 降为 `TYPE_CHECKING` 仅注解, environment/TerminationState 懒加载 → `import zall.cli` 从 **487ms 降到 ~70ms** (core 链不再在入口处加载); `zall --version` 端到端 ~0.23s。REPL/任务路径用时才加载 core (无回归)。
+
+**B-分发 (单二进制 “好装”)**
+- 新增 `zall.spec` (PyInstaller, `collect_submodules('zall')` 处理动态 adapter/tool 加载, 默认精简不含 textual, `ZALL_BUNDLE_TUI=1` 可包全屏) + `scripts/build_binary.py` (构建+烟雾测试)。产出自包含单文件, 无需用户装 Python/venv/pip。
+
+**C dogfood (真实 API 多步任务)**
+- 用真实 API 跑“创建猜数字游戏 guess.py”: **24.4s 跑完** (2 model calls / 1 tool call), 文件正确生成 (含可运行的 `play()`, 导入校验通过)。证实修复后多步任务能建库/建项目且不再中途停。
+
+### 容错修复轮 (2026-07-21) — “失败后中途就停” (dogfood 真实任务)
+
+**P0 任务中途失败就终止 (多步任务不可用)**
+- 根因: TUI 步循环在 `result.is_terminal` 时直接 `_show_error` + break — **无瞬态重试** (REPL 早就有)。在慢/抖的 reseller 端点上, 一次 429/5xx/timeout 就杀死整个多步任务 → 用户看到“失败后中途就停”。
+- 修复: 提取共享 `is_transient_error` + `TRANSIENT_KEYWORDS` (repl_ui.py), REPL 与 TUI 共用; 新增 `TuiApp._retry_transient` — 瞬态错误退避重试 (2s/4s/6s, 最多3次, 用 `retry_step()` 不漂移 step_count), 成功恢复则继续任务, 非瞬态/耗尽才显错。重试期间状态栏 spinner 照常动 + 系统消息反馈。新增 `tests/test_transient_retry.py` (5 测试, 含反例: 恢复/耗尽限3次/非瞬态早停/中断中止)。
+
+### 可用性/配置修复轮 (2026-07-21) — dogfood: model unset / config 损坏 / 感知延迟
+
+**P0 model 显示为 "unset" (配置有 API 却显示未设置)**
+- 根因: TUI `TuiApp.__init__` 用 `model=args.model or ""` — 未传 `--model` 时为空, 从不从 config 解析; 且 `state["model"]=""` 使 `build_repl_loop` 的 provider 检测退化为 openai。
+- 修复: TUI 未传 `--model` 时从 `_config_status()` 解析真实 model (与 REPL 一致)。现显示 `agnes-2.0-flash` 而非 "unset", 且 provider 检测正确。
+
+**P0 config 文件损坏 (重复 [auth]/[model] 段无限膨胀)**
+- 根因: `_persist_model_to_config` 的 `_update_key_in_lines(lines, ...)` 收到**含段头**的 lines 并重新吐出段头, 而调用方又单独 append 了段头 → 每次 `/model -p` 都使 `[auth]`/`[model]` 翻倍 (model 因两次调用而三倍)。取决于 TOML 解析器, 严格解析器 (tomllib/tomli) 会拒绝重复表 → 将报错。
+- 修复: `_persist_model_to_config` 改为规范化输出 (段头只写一次, 已知 key 从解析后 data 取, 额外 key 如 timeout 保留, 同名段去重); `save_api_key` 同款去重; `load_toml_simple` 对 tomllib/tomli 解析失败回退到宽松解析器 (last-wins), 不再崩溃。两者均**自愈**已损坏的 config。新增 `tests/test_config_selfheal.py` (3 测试, 含反例)。
+
+**P0 响应慢 / “卡死”感 (dogfood 定位)**
+- 真实 API 测试结论: 框架高效 (建文件任务仅 2 次模型调用, 最优); **慢的是端点** — agnes-ai 代理 ~9–12s/调用 (连“reply one word”也 12s), 与 input token 无关。多步任务 (坦克大战) × 弱模型 (flash) → 很多步 → 十分钟。
+- 感知延迟优化: StatusBar 新增**动画 spinner + 已耗时秒数** (`◔ thinking 8s…`), 由控件自持 `set_interval(0.2)` 驱动 — 即使模型思考的 ~10s 无事件空窗也能看到“在动”, 不再显得卡死。
+- `/doctor` 新增**延迟报告**: `model_api OK (8.9s, N tokens)` + 慢端点时提示 `SLOW endpoint (~9s/call) — try /provider or a faster model`。
+
+### 外部评估修复轮 (2026-07-21) — 六维闭合 + Windows/GBK 健壮性
+
+**P0 (本体论闭合 + 性能)**
+- **I-0/I-7 兑现**: 新增 `AgentIdentity` (core/agent.py) 并接入 AgentLoop — 六维本体论 ① Identity 首次落到运行时; loop 暴露 identity/commitment/perception_engine/authority/accountability/verifiability 六维只读投影 + `agent_has_all_dimensions()` 完整性判据; 新增 `tests/test_ontology_invariants.py` (7 测试, 含反例), 补齐此前完全缺失的旗舰不变量。
+- **世界模型性能**: CodingWorldModel 缓存 CodeGraph (只索引一次), 消除每次写工具调用前全项目重建索引的瓶颈 (§4.2.3)。
+
+**P1 (确定性 bug)**
+- **M1** `executor.py`: schema 校验失败事件改用唯一 event_id (原复用 `tool_call_start_{count}` 造成 timeline 重复 event_id, 破坏 replay/去重)。
+- **M2** `system.py`: 移除重复注册的 `/verify` (旧实现停用注册, 保留从磁盘重建 recorder + anchor 状态的唯一实现)。
+- **M3** `checkpoint.py`: 去重日志集合从模块级全局 set 改为实例级 (消除跨实例共享 + 只增不减泄漏)。
+- **M4** `loop.py`: `_try_compact_for_continuation` 用 `ChatState.message_count` 判断压缩效果 (原用影子列表 `_messages` 可能漏判)。
+- **M5** `/about` 补版本/作者/许可证 (author: qinrayn / Yuhan Zhang · MIT); 修正 `DESIGN.md`→`MASTER.md` 引用; pyproject/README 作者更新。
+
+**P2 (健壮性)**
+- checkpoint 安全网失败从静默 `pass` 改为 `warning` 日志 (可观测, 不再吞磁盘满/权限错误)。
+- **GBK 修复 (中文 Windows)**: `detect_text_encoding` 预初始化 `raw`, 修复文件不存在时的 `UnboundLocalError`; `cmd_review` 的 git subprocess 显式 `encoding=utf-8/errors=replace` + `diff_text` None 防护 (修复 `/review` 在 UTF-8 diff 下崩溃)。
+
+### 评估后续增强轮 (2026-07-21) — 架构拆分 / 多 agent / 文档 / TUI
+
+**架构瘦身 (loop.py 拆分首步)**
+- PR-0 幻觉扫描从 loop.py 抽取到 `core/hallucination.py` (纯函数 + 预编译正则); loop 保留薄委托 staticmethod 兼容内部调用与既有测试; 移除 loop.py 现已多余的 `import re`。
+
+**多 agent 并行编排**
+- 新增 `core/coordinator.py`: `Coordinator` 编排原语 (dispatch+aggregate 角色分离 · 隔离容错 · 有界并发 · 有序聚合), `from_subagent_tool()` 接既有 `SpawnSubagentTool` (真实消费者); 新增 `tests/test_coordinator_invariants.py` (8 测试, 含反例: 失败隔离 / 致命信号传播 / 空任务退让 / 并发上限)。
+
+**文档同步**
+- MASTER.md §12.1 新增 **Identity=REAL** 行 (AgentIdentity 接入 + I-0/I-7 测试); Perception 行改用方法名引用防行号漂移。
+- README: Agent Architecture 新增 "Six-Dimension Ontology" 与 "Subagent & Coordinator"; 对比表新增 "Multi-agent orchestration" 行。
+
+**TUI 全屏交互美化**
+- 输入框边框 `tall`→`round` (圆角), 配色/内边距微调, 滚动条 hover/active 渐变 (#8a6d1f→#b8860b→#FFD700), 状态栏内边距。
+
+### 交互/模型/思考增强轮 (2026-07-21) — UI 精简 + provider 切换 + Claude 思考可见
+
+**TUI 精简 (学 Claude Code/Ink 无可见滑块)**
+- 隐藏滚动条滑块 (`scrollbar-size-vertical: 0`, 保留滚轮/键盘滚动); MessageList / 输入框 / VerticalScroll 均去滑块。
+- 命令菜单 CommandMenu 边框 `tall`→`round` (圆角), 与输入框统一。
+
+**模型 provider 切换 + 去硬编码**
+- `model_registry.py` 新增单一真相源辅助: `get_provider_display/get_provider_tag/list_providers/get_provider_default_model`。
+- `model.py` 移除内联硬编码的 `_PROVIDER_TAG`/`_PROVIDER_LABEL` (改为从 registry 派生)。
+- 新增 `/provider` 命令: 列出所有 provider (tag+显示名+配置状态+当前) / `/provider <name>` 切换 (自动选默认模型 + 缺 key 时提示 env 与获取链接) / `-p` 持久化。
+
+**Claude 思考过程可见 (像 Claude Code)**
+- Anthropic adapter 新增 opt-in 扩展思考: `_build_body` 在 `thinking_budget>=1024` 且模型支持 (claude-3-7/*-4) 时请求 thinking blocks; 自动保证 max_tokens>budget + 回落 tool_choice=auto。thinking 解析此前已就绪 (reasoning→model_thinking→CLI/TUI 展示)。
+- 启用方式: `ZALL_THINKING=1` (默认预算 2048) 或 `ZALL_THINKING_BUDGET=<tokens>` 或 config `thinking_budget`。默认关 (不改成本)。
+- 说明: DeepSeek-R1 / o1·o3 / Gemini 思考模型此前已通过 reasoning_content 自动展示。
+
+### 稳健性/工程化轮 (2026-07-21) — bug 猎杀 + lint 清零 + /thinking + /provider picker
+
+**Bug 修复 (bug 猎杀)**
+- **严重**: gemini/ollama 流式适配器 `except GeneratorExit: pass` 后仍 yield → Ctrl+C 中断流式必崩 (RuntimeError); 改为 `return` (与 anthropic/openai_compat 一致)。
+- **真实崩溃**: apply_patch 锤点未命中分支引用未定义的 `path` → NameError; 修为固定文案。
+- apply_patch 死代码 `new_text`/`anchor_idx` 移除 (替换实际走 new_lines_list, 无功能损失)。
+- checkpoint restore_checkpoint 兑现 bool 契约 (OSError → False, /revert 不崩)。
+- checkpoint _ensure_loaded 空列表每次重扫盘 → 加 `_load_done` 标志。
+- cmd_model `-p -g` 组合解析修正 (guide 检测用去 -p 后首 token)。
+- coordinator from_subagent_tool: meta 先入、prompt/parallel 后设, 防 meta 覆盖必要字段。
+- safety.py / process_anchor/protocol.py: 补 `from typing import Any` (注解未导入)。
+
+**推荐项落地**
+- `/thinking on|off|<budget>`: 运行时开关模型思考展示 (Anthropic Claude 扩展思考; 切换后重建 adapter 生效)。
+- `/provider` 升级为交互式 picker (TTY 下数字选择), 切换时强制重建 adapter (key/base 变更生效)。
+
+**工程化**
+- ruff 从 84 error 清零: 修 3 个 F821 真实 bug + 移除 48 未用 import + 8 空 f-string + 6 死变量; 配置 `[tool.ruff.lint]` (ignore E702/E741, __init__ 免 F401) → `ruff check src/` 全绿。
+- CI (.github/workflows/ci.yml): 新增 IPR-3 架构不变量门禁; test_file_not_found 已修复并移出跳过清单; 保留多 OS 矩阵 + PyPI 发布。
+
+### 架构拆分/命令合并轮 (2026-07-21) — loop.py 瘦身 + /mode 合并 + did-you-mean 修复
+
+**架构瘦身 (loop.py 拆分第二步)**
+- file-based checkpoint 簇 (扫描/选文件/快照 + 追踪扩展名/敏感排除常量) 从 `loop.py` 抽取到新模块 `core/loop_checkpoint.py` (无状态自由函数 + 接收 loop, 与 executor.py/context_manager.py 协作者模式一致); loop 保留薄委托方法 (兼容 test_plugin_safety 的 MagicMock 替换); 移除 loop.py 因此多余的 `import os`/`import fnmatch`/`skip_noise_dirs`/`NOISE_DIRS` 导入。loop.py 净减 ~98 行。
+
+**命令合并 (层次化)**
+- 新增 `/mode [strict|fast]` 统一交互模式开关 (无参显示当前 strict/plan; 别名: safe/auto/normal); `/strict` `/fast` 保留为向后兼容快捷方式, 三者共享 `_apply_strict_mode` 单一真相源 (去重)。
+- `/help` 核心区新增 `/mode`; `/advanced` 用单行 `/mode` 替代分散的 `/strict`+`/fast`, 并补上早已存在但未展示的 `/provider` `/thinking`; 新增 `/mode` 详细帮助条目。
+
+**回归修复 (本轮变更引入并当场修复)**
+- `/mode` 与 `/model` 名称相近导致 did-you-mean 回归 (`/modle` 误建议 `/mode`); 新增 OSA (Optimal String Alignment, 含相邻换位) 距离对 difflib 近似候选重排, 使转置类 typo `/modle → /model` (而非 /mode)。
+
+### TUI 交互对齐轮 (2026-07-21) — 学 kimi-cli: Shift+Tab plan + Ctrl+O 编辑器
+
+**新增交互快捷键 (对齐 kimi-cli / Claude Code)**
+- **Shift+Tab**: 切换 plan 模式 (只读探索/规划) — 复用既有 plan_mode 管线 (loop 构建时读 state, 已有 loop 立即 set_plan_mode), 状态栏显示蓝色 `plan` 徽章 + 系统消息反馈。
+- **Ctrl+O**: 用外部编辑器 ($VISUAL/$EDITOR, 缺省探测 code/vim/nano/notepad) 编辑当前输入, 适合多行 prompt; 经 `App.suspend()` 挂起 TUI, 编辑后回填, 全程失败降级 (无编辑器/异常 → 系统提示, 不崩)。
+- 键位经 ChatTextArea→InputBar→App 消息管线拦截 (TextArea 聚焦时也生效), Footer 自动展示提示。
+- 新增 `tests/test_tui_interaction_kimi.py` (12 测试, 含反例: plan 切换对合 / 无 loop 不崩 / 无编辑器返回 None / 未挂载安全)。
+
+### TUI 交互对齐轮二 (2026-07-21) — steer / 队列 / @文件补全 / 主题色
+
+**Ctrl+S steer + Enter 队列 (学 kimi-cli, 复用外部步进式 loop)**
+- **Ctrl+S steer**: 流式生成中把输入注入当前回合 — worker 每步前从线程安全队列取出 steer 消息并 `add_user_message`, 模型下一步即可见 (真 mid-turn 注入, 非中断重启)。空输入 + 有排队 → 将最早排队消息提为 steer。
+- **Enter 队列**: agent 忙时回车不丢失/不抢占 — 消息入 pending 队列, 当前回合结束后自动作为新回合依次运行 (外层循环排空); 中断/报错不自动排空。状态栏显示 `N queued`。
+- 斜杠命令始终立即执行 (不入队列)。
+
+**@ 文件路径补全 (学 kimi/opencode)**
+- 输 `@` 弹工作区文件补全菜单 (basename 前缀优先 + 路径短优先); Tab/Enter 补全为 `@路径 ` 并继续编辑。文件扫描惰性缓存 (跳 noise 目录, 上限 20000, 逐键盘内存过滤)。
+- `CommandMenu` 增 prefix 参数 (命令=`/`, 文件=`@`), 与 `/` 命令菜单共用一套上下选择/补全机制。
+
+**主题色 (学 opencode 语义角色)**
+- `_C` 新增 `QUEUE`/`STEER` 语义色 (复用既有 Obsidian 基色), 为新交互状态提供一致配色。
+- 欢迎屏 + Footer 补齐 Shift+Tab/Ctrl+O/Ctrl+S/@ 提示。
+- 新增 20 测试 (steer/队列/@补全, 含反例: 空队列返回 None / drain 后为空 / 空 steer 提升排队 / @ 前非空白不触发 / 不匹配过滤)。
+- **附带修复 (验证时发现的陈旧测试)**: `test_non_tty_step_prefix` 仍断言 v0.4.10 旧行为 (非 TTY 加 step 前缀), 与 v1.5 有意设计 (render.py:928 非 TTY 纯净输出) 矛盾; 已更新为 `test_non_tty_no_step_prefix` 对齐当前行为 (非本轮回归, 色常量变更无关)。
+
+### 思考渲染 + 主页美化 + bug 猎杀轮 (2026-07-21) — Claude Code 风思考 / dogfood
+
+**思考过程: Claude Code 风格 (非流式)**
+- 思考中只显静态 `✻ Thinking…` 指示 (不逐 token 闪烁), 完成时一次性定格为 dim 斜体块 (头 + 正文, 超 12 行折叠)。**顺带性能**: 思考渲染从每-token 全量重绘 (O(n²)) 降为每回合 2 次渲染 (O(1))。
+
+**主页/欢迎屏美化**
+- 重排为: 含版本号的 wordmark + tagline + 分隔线 + 对齐双列键位/命令网格 + 副标题 (MASTER.md → IMPL.md → code)。
+
+**bug 猎杀 (子代理审查 + dogfood)**
+- **思考卡死**: 中断/报错于思考阶段时不定格 → 永远停在 `✻ Thinking…`; 修: 每轮重置 `_thinking_active` + 在 `_show_interrupt`/`_show_error` 定格。
+- **消息丢失竞态**: `_agent_running` 置位过晚 (build 期间为 False) → 快速第二次提交会被 exclusive worker 取消丢失首条; 修: 主线程提交时立即置位 + build 失败早返回复位。
+- **光标无效**: 补全/历史导航用 `cursor_position`(Textual 8.x 无此属性, 静默空操作) → 改用 `cursor_location = document.end`。
+- **fd 泄漏**: devnull sink 未关闭 → 持引用 + `on_unmount` 关闭。
+- **argparse GBK**: `--help` 描述的 `—`/`→` 改 ASCII (健壮性; 实测→/— 本属 GBK 可编码, 仅 ©/✻ 不可 — 后者仅在 Textual 渲染, 不过 gbk stdout)。
+- **Windows 可移植**: `test_execute_timeout`/`test_sandbox_timeout` 用 Unix `sleep` → Windows 无此命令即退而非超时; 改为平台分支 (`ping -n 11`), 首次在 Windows 上真正验证沙箱超时功能。
+
+**全量测试 + dogfood**
+- 全量套件 (除 real-api/子进程沙箱/pty 3 个慢套件): 1715 passed → 修两个不可移植测试后全绿; 新增 TUI 交互测试至 30 (含 bug 回归)。
+- dogfood: 逐命令打钩 24/24 可用 (含 /verify 链 valid / /science / /sessions / /doctor); 入口 `--version`/`--help` 正常。
+
+### 确认门/性能/交互修复轮 (2026-07-21) — 可用性关键修复
+
+**P0 确认门挂死 (致命: agent 不可用)**
+- TUI 之前复用 `CliUserResponder`, 其 `ask()` 调 `input()` 读 stdin — 而 Textual 占用 stdin → greylist 写文件需确认时 worker 线程永远阻塞 ("等待中")。
+- 新增 `TuiUserResponder` (继承 CliUserResponder, 复用 greylist/blacklist/always-allow/y-n-a-e-s 全部决策逻辑), 但把权限面板投到 TUI 消息区, 用 threading.Event 阻塞 worker 直到用户在输入框回答; `build_repl_loop` 新增 `responder` 可注入参。中断时 cancel() 解除阻塞。新增 4 测试。
+
+**P0 响应慢 (流式卡顿)**
+- `MessageList._rerender_all` 每 80ms 节流都 `clear()`+重做整个会话的 markdown/语法高亮 (长会话 O(n×高亮)) → 新增 `to_rich_cached`: 定格消息缓存渲染, 只重算流式那一条。
+- 内存: 测得启动+构建约 76MB (正常); RichLog 有 max_lines=10000 上限; 极高内存为环境相关 (大项目 CodeGraph 索引 / 已配 MCP 子进程)。
+
+**交互 (右下键位无效)**
+- App BINDINGS 全部加 `priority=True` — 修复输入框(TextArea)聚焦时 Ctrl+C/L/D/Q 等被 TextArea 吞掉导致 "按了无效"。
+
+**思考 (改回 Claude 风: 流式 + 折叠)**
+- 上轮改成静态占位不对 — Claude 是流式 + 可折叠。现恢复节流流式 (80ms, 非每-token → 非 O(n²)): 思考中流式显示末尾 ~8 行 dim 斜体, 完成后折叠 (前 12 行 + "+N more")。
+
+**前沿调研 (评估是否落后)**
+- 2026 SOTA 关键方法: 仓库向量索引/RAG、research-first、多 agent、context engineering。zall 在可证伪/可复现/安全门 **领先**; 多 agent(Coordinator)/压缩/plan **持平**; 语义向量检索(embeddings)、工程成熟度/并发/速度 **略落后** (向量检索与模型无关/离线是取舍)。
+
+### v1.1 核心: MASTER.md §12 执行真相表 + E0-E9 路线 + 红蓝对抗
+
+- **§12 能力真相表** - "宣称 vs 实现"双表对照, §1-§11 条目须在 §12 刷 REAL 才升回 SETTLED。
+- **§12.3 E0-E9** - 近期硬约束路线 (替代旧 Phase 表)。
+- **§12.4 守接口不落码** - Embodied 维度无硬件不写代码。
+- **§1.3.1 红蓝对抗** - dogfood 6 条假设裁决 (2 OPEN 已修, 4 确认)。
+
+### E0: 审计修复
+
+- compactor 双向 tool_call/tool_result 配对保护 + 9 反例测试。
+- gemini SAFETY/RECITATION 截断不再静默映射 STOP。
+- GoalConfirm/help 测试适配 v0.6.0。
+
+### E1: Perception 闭环 (DECORATIVE -> REAL)
+
+- anomaly 熔断 (PERCEPTION_ANOMALY 事件 + system nudge)。
+- 状态摘要注入 (显著变化才注, 反例无变化不注)。
+- predict 进 timeline。
+- OPEN 2 修正: anomaly 用 current-baseline, 脏工作区不误报。
+
+### E2: Self-evolution 闭环 (DECORATIVE -> REAL)
+
+- apply_suggestion 真落盘 (skills/ + learn_overrides.json)。
+- get_config_overrides 读回持久化。
+
+### E3: Science Kit (ABSENT -> REAL)
+
+- core/hypothesis.py (H-1..H-4 不变量) + experiment.py + evidence.py (NegativeResult I-10) + provenance.py (接 RunRecorder anchor)。
+- extensions/science/store.py (append-only JSONL) + cli/commands/science.py (/science 命令)。
+- tools/science.py: agent 可调用的 science 工具 (E3.6)。
+- **E3.6 dogfood 验证**: agent 自主用 science 工具跑通 假设->证据->证伪->修订 完整闭环 (GF-consistency 真实数据)。
+
+### E4: 交互层还债
+
+- autosave 去 PID + 原子写入 (tmp+os.replace) + 软锁。
+- 中断丢弃半成品 (Ctrl+C 回滚 messages + USER_INTERRUPT 事件)。
+- 权限跨会话持久化 (.zall/always_allow.json + /forget-permissions)。blacklist 永不放行。
+- conftest autouse fixture 防 always_allow 测试污染。
+
+### E5: Accountability 多 Judge (PARTIAL -> REAL)
+
+- AgentConfig.judges dict + get_judge(type) 查 base_judge 表。
+- _check_termination 接通 from_verdicts(main, aux) §5.4 编排。向后兼容。
+
+### E6: Verifiability 运行时自检 + CLI
+
+- run 结束 verify_chain() 自检 + CHAIN_BROKEN 事件 + RunEgress.chain_warning。
+- /verify [run_id] 命令: 第三方独立复核 timeline。
+
+### E7+E8+E9: Plugin 生态四支柱
+
+- E7 版本化: get_tool_version/parse_semver/is_version_compatible + check_compatibility (SemVer)。
+- E8 发现机制: plugin_loader.py 扫 entry-points + manifest + 内置优先 + 失败隔离。
+- E9 schema 校验: validate_tool_args (stdlib 子集) + executor 执行前校验。
+- E9 能力声明强制化: assert_capabilities_declared, 插件默认 Write。子进程隔离 OPEN。
+
+### OPEN 修复
+
+- OPEN 1: "undecidable - no judge" -> "no judge (Q&A mode)"。
+- OPEN 2: perception anomaly 用 current-baseline。
+
+### 测试
+
+- 1242 passed / 5 failed -> **1461 passed / 0 failed / 11 skipped** (净增 219)。
+
+### E10-E13: 第四轮深化 (2026-07-20)
+
+- **E10 ScienceTool experiment 管理** - 新增 new_experiment/run_experiment/complete_experiment action, evidence 可关联 experiment_id 形成完整溯源链。25 测试。
+- **E11 Plugin 子进程沙箱** - `core/sandbox.py` SubprocessSandbox (进程级隔离+超时+cwd), 插件工具 (namespace=PLUGIN) 默认 sandboxed。沙箱 PARTIAL->REAL (进程级); 内存/网络/容器级 OPEN。16 测试。
+- **E12 交互层深度优化** - 多行输入 (反斜杠续行+粘贴检测), 会话恢复提示含最后消息摘要, 错误信息 422/401/429 具体提示。23 测试。
+- **E13 bugfix 验证 system judge (dogfood)** - 真实 API 跑 bugfix 任务, 发现 P1: max_steps terminal 不调 judge。已修: max_steps 场景调 _check_termination 覆盖 final_state。P3: aux judge 类型解析 (多 Judge dict 模式才查类型, 单 judge 向后兼容)。3 不变量测试。
+- **测试**: 1461 -> **1512 passed / 0 failed / 11 skipped** (净增 51)。
+
+### E14-E16: 第五轮交互深化 (2026-07-20, 学习 Claude Code/Grok Build/Kimi Code)
+
+- **E14 MAX_STEPS 软处理** - 到上限不直接终止, 先压缩上下文+重置步数继续 (最多重试 2 次)。回答用户"步数限制不合理"的痛点: 限制是安全阀, 但到上限就 UNDECIDABLE 太粗暴, 改为压缩后继续。3 不变量测试。
+- **E15 视觉风格优化 (借鉴三源码)** - spinner stall 检测 (超 10s 渐变 WARN, 超 30s 变 FAIL+taking long); 新增模式色 (_ModeColor: normal/plan/accept/strict); thinking 符号 (◬); 多帧 spinner 已有 (盲文, 同 Grok Build)。无 emoji, 纯 Unicode 几何符号 (三源码共识)。
+- **E15 权限请求 Panel UI (借鉴 Claude Code)** - greylist 工具调用时用 rich Panel 显示工具名+关键参数+风险色, 而非纯文本 "Allow? [y/N]"。降级安全 (Panel 失败回退纯文本)。
+- **E16 P2 CLIXML 解码 (Windows bash)** - bash 工具检测 PowerShell CLIXML 输出 (#< CLIXML) 并解码为纯文本。dogfood 发现 agent 在 Windows 上无法读 pytest 输出。5 测试。
+- **三源码学习** - Claude Code (Ink/React, 双键 Esc, 权限 Panel, 主题系统), Grok Build (Rust, doom_loop 独立预算, Unicode 符号 fallback, TurnCapture 零拷贝), Kimi Code (pi-tui, 流式 50ms 合并刷新, thinking 双模式, 步骤自动折叠)。报告存档供后续迭代。
+- **P4 SystemJudge 假阴性修复 (dogfood 发现)** - judge 之前跑全量 1500+ 测试超时 -> "pytest unavailable" 假阴性。修: 基于 git diff 只跑受影响的快测试 (排除 integration/interaction/cli_app 等慢测试), 加 `-x` 首失败即停, timeout 30s。验证: SystemJudge 现在正确返回 MET + "all 9 test(s) passed"。4 不变量测试。
+- **测试**: 1512 -> **1533 passed / 0 failed / 11 skipped** (净增 21)。
+
+### E17-E20: 第六轮交互跨代升级 (2026-07-20, 全屏 TUI + 流式 + 重试 + 自优化)
+
+- **E17 流式渲染重构 (借鉴 Kimi Code)** - `_StreamBuffer` 50ms 定时合并刷新 (替代字符级节流); partial Markdown fence 临时补全防闪烁; 工具调用实时预览 (部分 JSON 提取 path/command); 中断保留部分输出 + [Interrupted] 标记。断句点 (空格/换行) 立即 flush 给用户即时反馈。21 测试。
+- **E18 API 超时/重试优化 (借鉴 Claude Code + Grok Build)** - 错误分类 (RATE_LIMIT/SERVER_ERROR/TIMEOUT/AUTH_FAILED/INVALID_REQUEST/CONTENT_FILTER); `classify_http_status` + `is_retryable_status`; 401/403/400/422 不重试, 429/5xx 重试; `_notify_retry` 用户可见重试回调; 修复 `is_retryable_http` 变量名 bug (status->status_code)。22 测试。
+- **E19 全屏 TUI 双模式 (借鉴 Claude Code/Kimi Code, 用户坚持不放弃)** - `src/zall/cli/tui/` (textual 8.x): TuiApp + ChatMessage/MessageList/InputBar/StatusBar/ToolPanel/ThinkingPanel widget。`--tui`/`--no-tui`/auto-detect (TTY+textual 可用->TUI, 否则行式)。全事件类型处理 (17 种 LoopEvent); 流式 token reactive 更新; Obsidian 配色 + Unicode 几何符号 (无 emoji)。textual 为可选依赖 (`pip install zall[tui]`)。50 测试。
+- **E20 AI 自优化方案 §13** - MASTER.md 新增 §13 (六步循环 Observe->Diagnose->Propose->Execute->Verify->Reflect, 8 条安全阀, 防退化机制, before/after 基线对比); `docs/AI_SELF_OPTIMIZE_PROMPT.md` 可复制提示词模板 (用户可用 Claude Code/zall 自跑自优化)。
+- **bug 修复** - `is_retryable_http` 变量名 bug (status->status_code); Ctrl+C 中断提示恢复 "interrupted" 文本; 流式 buffer 断句点 flush。
+- **测试**: 1533 -> **1576 passed / 0 failed / 13 skipped** (净增 43, 含 TUI 50 + 流式 21 + 重试 22)。
+
+---
+
+### — 2026-07-19
+
+### UX Overhaul
+
+- **`confirm_goal` 默认不交互** — 不再弹 `[y/N]` 确认。仅在 `--strict` 或 `--judge system` 模式才交互。goal card 仍然渲染（信息性）。
+- **`--strict` / `-S` 标志** — 新 CLI 参数，启用 full confirm/downgrade gates。`zall "task" -S` 或 `zall -S` 进入严格模式。
+- **`_init_downgrade` 默认非交互** — 降级候选仅记录到 timeline，不弹出交互确认。严格模式才交互。
+- **移除 `_is_trivial_task` hack** — 不再需要（降级默认非交互，不会打断 hello world 类任务）。
+- **auto-compact 用户可见提示** — 上下文压缩时在终端输出一行 `compact: N msg (reason)`，替代原先的静默压缩。
+- **`AgentConfig.strict` 属性** — 新增 `strict` 配置字段，控制 confirm/downgrade 是否交互。`AgentBuilder` 新增 `.with_strict(bool)`。
+
+### Architecture: ToolCapabilities 权限体系
+
+- **`ToolCapabilities` 能力声明** — 每个工具声明 `is_read_only` 和 `tool_scope (Read/Write)`。22 个内置工具全部声明完毕。参考 Grok Build 的 `xai-tool-protocol/src/capabilities.rs`。
+- **`context_judge` 决策链重构** — 无规则匹配时不再默认 greylist，而是根据工具能力决定：只读工具 → WHITELIST（默认放行），写工具 → GREYLIST（默认询问）。大幅减少只读操作的不必要弹窗。
+- **`get_tool_capabilities(tool)` 辅助函数** — 获取工具的能力声明，未声明时返回默认值（Write/非只读）。
+- **`ToolExecutor` 移除 `_is_tool_write_by_kind`** — 替换为 `ToolCapabilities.is_read_only` 检查，plan mode 强制执行使用统一能力声明。
+
+### Architecture: PlanModeTracker 状态机
+
+- **`core/plan_mode.py` 新增** — `PlanModeTracker` 状态机（`Inactive↔Active`）。参考 Grok Build 的 `xai-grok-shell/src/session/plan_mode.rs`。
+- **Plan mode 可序列化** — `PlanModeSnapshot` 支持跨进程重启持久化。
+- **Plan mode 只写 plan.md** — 在 plan mode 下，只有 `write_file`/`edit_file`/`batch_edit` 对 `plan.md` 的写入被允许，其他写操作全部拦截。
+- **`AgentConfig.planner` 属性** — 注入 PlanModeTracker 实例。`AgentBuilder` 新增 `.with_planner()`。
+- **`AgentLoop.planner` 属性** — 公开访问 PlanModeTracker，替换纯 `_plan_mode` bool。
+
+### New: ApplyPatchTool (Codex 式语义补丁)
+
+- **`tools/apply_patch.py` 新增** — 语义锚点补丁工具。使用 `@@ function_name` 定位编辑目标，比 `edit_file` 的精确字符串匹配更鲁棒。参考 OpenAI Codex CLI 的 apply_patch 自定义补丁语言。
+- **补丁格式**: `@@ <function/class signature>` 锚点 + `-` 删除行 + `+` 新增行。
+- **语义定位**: 在文件中搜索函数/类签名找到锚点，然后在锚点范围内查找旧文本。
+- **注册到工具集** — 加入 `_get_native_tools()` 默认工具列表和 `toolset.py` 的 `_TOOL_MODULES` 映射。
+- **`ApplyPatchTool` 集成** — 通过 `orchestrator.py` 注入工具循环，模型可直接调用。
+
+### New: Second-Agent /review
+
+- **`/review` 命令新增第二 agent 评审** — 独立上下文模型调用评审代码变更，不污染主对话。评审结果直接输出到终端。
+- **评审维度**: 正确性/安全/代码质量/测试覆盖/改进建议。输出格式: `PASS / MINOR_ISSUES / MAJOR_ISSUES / CRITICAL`。
+
+### DESIGN.md 更新
+
+- **§4.2.1**: 更新 context_judge 函数定义，文档化工具能力决策链。
+- **§4.5**: 新增 tiered-rigor (分层严谨) 文档，说明默认/严格/judge 三种模式的交互差异。
+- **§9.2.1**: 更新 Goal 确认为 tiered confirm，反映 v0.5.1 默认不交互的改动。
+- **§9.2.5**: 更新计划模式为 PlanModeTracker 状态机 + ToolCapabilities 强制执行。
+
+### Phase 1: 修裂缝 (v0.5.x → v0.6)
+
+- **Refiner 接入 run** — `core/verifiability.py` 新增 `GOAL_STATEMENT`、`USER_CONFIRM` EventType；`core/loop.py` `AgentLoop.run()` 在第一条 `tool_call_start` 之前记录 `goal_statement` + `user_confirm` 事件到 timeline。不变量：timeline 中第一条 `tool_call_start` 之前必须有 `goal_statement` + `user_confirm`。
+- **外部锚点真正外部化** — `core/process_anchor/` 新包（`protocol.py` IPC 协议、`server.py` 独立 anchor 进程、`client.py` `ProcessTrustAnchor`）。`ProcessTrustAnchor` 实现 TrustAnchor Protocol，走 IPC 签名，不可达时返回 `None`（诚实退让）。不变量：`ProcessTrustAnchor` 不在 agent 进程内持有私钥。
+- **TerminationCriterion 默认实现** — `core/judge/` 新包（`SystemJudge`、`UserJudge`、`ModelSelfJudge`、`default_judges_for_goal_type`）；`cli/judge.py` 委托到 `core/judge`。不变量：无自定义 Judge 时 run 不崩溃。
+- **评估体系落地** — `core/eval/` 新包（`load_timeline`、`compute_goal_achievement_rate`、`compute_timeline_integrity_rate`、`evaluate_from_timeline`）；`cli/commands/eval.py`（`/eval` 命令从 timeline 计算 metrics）。不变量：`/eval` 从 timeline 计算 metrics，无 timeline 时诚实退让。
+- **测试文件** — `tests/test_phase1_invariants.py`（15 个不变量测试，每个含 counterexample）。
+
+## [0.5.2] — 2026-07-18
+
+### Architecture
+- **移除 `__setattr__` 拦截器** — 不再拦截 `_messages` 赋值。所有消息操作统一通过 `_chat_state.messages`，代码路径更清晰，消除潜在递归风险。
+- **统一消息访问路径** — 所有内部代码（`_call_model`、`_call_model_stream`、`_run_step_body`、Extension hooks）统一使用 `self._chat_state.messages` 或 `self.messages` property，不再直接访问 `self._messages`。
+- **`TemplateRenderer` 提示词模板系统** — 新建 `core/prompt_template.py`，从 Grok Build 的 `PromptContext` + `TemplateRenderer` 模式获得启发。支持 `${{variable}}` 插值、命名模板、模板组合。提取了 `mid_turn_interjection`、`doom_loop_nudge`、`empty_stop_nudge`、`session_resume_note` 等模板。
+- **`_EMPTY_STOP_NUDGE` 移至模板系统** — 从 `loop_events.py` 移入 `prompt_template.py`，消除硬编码常量的循环导入问题。
+
+### Fixed
+- **AutoLearn `_error_patterns` 无限增长** — 添加 `_MAX_ERROR_PATTERNS=100` 上限，`on_turn_done` 中自动修剪。跨会话加载时也进行修剪。
+- **AutoLearn `_persist` 线程安全** — 移除后台线程（改用同步写入），添加重试机制（最多 3 次），写操作在锁保护内完整执行。
+- **`_is_trivial_task` 误判 "help"** — 从 greetings 集合移除 `"help"`，防止 `/help` 命令被跳过目标降级。
+- **CLI `session.py` 后备路径绕开 ChatState** — 移除 `if hasattr(loop, "set_messages"): ... else: loop._messages = ...` 死代码路径，统一使用 `loop.set_messages()`。
+- **`ContextManager._auto_compact` 直接读取 `_loop._messages`** — 改为 `self._loop.messages` property，确保读取 ChatState 真相来源。
+- **AutoLearn 跨会话去重** — 加载时按 `(kind, target)` 去重建议，按置信度排序。
+
+### Improved
+- **AutoLearn 跨会话模式聚类** — `_load_persisted` 中添加 `_cluster_similar_chains()`，相同前缀的工具链只保留最长代表。
+- **AutoLearn 配置层注入** — `get_config_overrides()` 添加 `judge_mode` 覆盖输出，高置信度建议（≥0.8）的 `adjust_judge` 类型自动注入配置层。
+- **AutoLearn 持久化可靠性** — 添加重试机制（指数退避 100ms/200ms/300ms）和最大文件大小限制（500KB）。
+
+## [0.5.1] — 2026-07-18
+
+### Architecture
+- **ChatState 单真相来源** — `AgentLoop._messages` 改为 property 委托到 `_chat_state.messages`。`_append_message`、`set_messages`、`remove_messages_by_predicate`、`_auto_compact` 全部通过 ChatState 操作，消除双写不一致。`_chat_state` 不再为 None（始终初始化）。
+- **`_auto_compact` 通过 `set_messages()` 同步** — 不再直接写 `_loop._messages` 私有属性，通过公开 API 同步 ChatState。
+
+### Improved
+- **错误处理** — `except Exception: pass` 一律改为 `logging.warning(...)`（loop.py auto_learn、events.py EventBus、checkpoint.py rollback），保留 IPR-0 安全性的同时让故障可观测。
+- **`AnthropicAdapter.close()` 防护** — 当 `_client` 为 None 时不再崩溃。
+- **`_SubagentCwdMeta` 继承 git 信息** — 从父 context 继承 `git_branch` / `git_remote`，使 git-protection 规则对子 agent 生效。
+- **`RetryBudget` 集成 OpenAI 适配器** — `_call()` 方法使用 `RetryBudget` 区分 transport/api 错误预算，替代旧 `with_retry`。
+- **工具 schema 性能优化** — 移除 `copy.deepcopy`（ToolRegistry frozen 保证不可变），直接缓存引用。
+- **死代码清理** — 移除 `_COMPACT_PROMPT`（v0.1.4 后改用规则折叠）、`ChatState.messages.setter`（零外部调用）。
+
+### Fixed
+- **ChatState sync 路径统一** — `context_manager.py _auto_compact` 通过 `set_messages()` 同步，消除直接写私有属性的 Bug。
+
+## [0.5.0] — 2026-07-18
+
+### Fixed
+- **B1: `_append_message` 事务安全** — 先写 `_messages` 再写 ChatState，ChatState 失败时回滚，保证两状态一致。
+- **B2: Anthropic + Gemini 工具 schema 查错层级** — zall schema 是 OpenAI 格式 `{"type": "function", "function": {"name": ..., "parameters": {...}}}`，适配器在顶层查 `tool_id`/`name`/`input_schema` 全部返回 None。修复后从 `function` 嵌套 dict 正确提取。影响所有 Anthropic/Gemini 用户的工具路由。
+- **B3: Compaction 在 timeline 记录前应用** — 先记录 CONTEXT_COMPACTION 事件到 timeline，再替换 `_messages`，保证 "timeline 是真相来源" 不变量。
+- **B4: `_auto_apply_suggestions` 绕过 ExtensionRegistry 公开 API** — 添加 `iter_extensions()` 方法，不再直接访问私有 `_extensions` 属性。
+- **C1: Gate SUSPENDED 无超时** — 增加 300 秒整体超时，防止用户按 "s" 后永不回应导致永久挂起。
+- **C2: Anthropic stream 吞掉 GeneratorExit** — 改为 `raise` 传播，确保 Ctrl-C 可正确中断流式请求。
+- **C5: Subagent Future 泄漏** — `_on_done` 回调添加 `except BaseException` 兜底清理，防止 `SystemExit`/`KeyboardInterrupt` 导致线程泄漏。
+- **C6: Gate Decision timeline 顺序错误** — 先询问用户，再记录 GATE_DECISION 事件，保证 timeline 顺序正确反映实际交互时序。
+- **C8: 全局可变状态测试隔离** — 添加 `reset_tool_classes_cache()`、`reset_env_cache()`、`reset_sessions_cache()` 等测试辅助函数；`bash.py` 的 `_SELF_PID` 改为惰性计算避免 fork 后 stale PID。
 
 ### Added
-- **`/suggest` 命令** — 列出 AutoLearn 生成的建议（adjust_k / create_skill / register_goaltype / adjust_judge），支持 `apply N`、`ignore N`、`detail N` 操作。被忽略的建议持久化到 `~/.zall/learned/ignored_suggestions.json`。
-- **`/learn` 命令** — 显示跨会话学习统计（工具使用频率、错误率、工具链数量），支持 `clear` 重置忽略列表。
-- **Auto-apply 高置信度建议** — `AgentLoop._auto_apply_suggestions()` 在 each turn done 后自动应用 confidence >= 0.5 的 `adjust_k` 建议，并 emit `self_adjust` event。
-- **`load_learned_memo()`** — 跨会话学习记忆注入：启动时读取 `auto_learn.jsonl`，注入系统 prompt 作为 `[Cross-session learned patterns]` 节（工具频率、错误模式、工具链统计）。
-- **Config 层连通 AutoLearn** — `repl_ui.py` 启动时调用 `set_extension_suggestions()`，将 `get_config_overrides()` 结果注入配置层。
-- **回归测试** — `test_suggest_command`、`test_learned_memory_invariants`、`test_auto_learn_apply_invariants`。
+- **Doom-loop 检测** — 检测模型重复相同 tool call 序列（`_DOOM_LOOP_WINDOW_SIZE=5`），超过 3 次警告、5 次注入 nudge 打断循环。借鉴 Grok Build 的 doom-loop 恢复机制。
+- **RetryBudget 重试预算体系** — 区分 transport / api / semantic 三类错误预算，各自独立退避策略。借鉴 Grok Build 的 `RequestBudget` 设计。
+- **中间打断缓冲区** — `ContextManager.push_interjection()` / `drain_interjections()` 支持用户在 agent 工作时发消息，下个 step 自动注入为 system message。
+- **ToolStreamItem 流式协议** — 定义 `ToolStreamItem` 类型（Progress / Terminal），为工具流式输出打下基础。借鉴 Grok Build 的 `ToolStreamItem` 协议。
+- **跨会话元学习增强** — `AutoLearnExtension.get_config_overrides()` 新增基于跨会话成功率的 K 值优化：高成功率工具保持低 K，持续失败工具建议高 K。
 
 ### Changed
-- **`memory.py` 扩展** — 新增 `load_learned_memo()` 函数，复用现有 `SessionMemory`；`PromptBuilder.add_session_memory()` 现也注入 learned memo。
-- **`repl_ui.py` 扩展注册** — 启动时连接 AutoLearn 的 `get_config_overrides()` 到 `config_layers.set_extension_suggestions()`。
-- **`loop.py` 扩展钩子** — `finalize()` 和 `run()` 的 on_turn_done 后调用 `_auto_apply_suggestions()`。
+- **`AgentLoop._append_message` 顺序** — 先写 `_messages` 主存储，再同步 ChatState 副存储。
+- **`ContextManager._auto_compact` 顺序** — 先记录 timeline 事件，再应用压缩结果。
+- **`_init_downgrade` 决策顺序** — 先询问用户，再记录 GATE_DECISION 事件。
+- **`bash.py` 自保护 PID 检测** — `_SELF_PID` 改为惰性计算，每次调用时检查当前进程 PID，避免 fork 后使用父进程 PID。
 
 ## [0.4.9] — 2026-07-18
 
@@ -237,7 +962,7 @@
 - mypy strict mode: 0 errors across 87 source files
 - Extension Protocol uses `@property` for `name` and `hooks`
 
-## [0.1.0] — 2025-06-?? (Pre-release)
+## [0.1.0-pre] (legacy) — 2025-06-?? (Pre-release)
 
 ### Added
 - Initial core primitives: ModelAdapter Protocol, ToolRegistry, RuleSet, Context

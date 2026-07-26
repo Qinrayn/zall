@@ -40,6 +40,11 @@ class EditFileTool:
     @property
     def tool_id(self) -> str:
         return "edit_file"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=False, tool_scope=ToolScope.Write)
+
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -133,19 +138,29 @@ class EditFileTool:
             )
 
         if count > 1:
-            # 给出所有匹配位置及context
-            lines = content.split("\n")
+            # 给出所有匹配位置及 context (支持多行 old_string)
             locations = []
-            for i, line in enumerate(lines, 1):
-                if old in line:
-                    locations.append(f"  Line {i}: {line.strip()[:80]}")
+            start = 0
+            for _ in range(min(count, 20)):
+                idx = content.find(old, start)
+                if idx < 0:
+                    break
+                line_num = content[:idx].count("\n") + 1
+                # 取匹配开头所在行作为预览
+                line_start = content.rfind("\n", 0, idx) + 1
+                line_end = content.find("\n", idx)
+                if line_end < 0:
+                    line_end = len(content)
+                preview = content[line_start:line_end].strip()[:80]
+                locations.append(f"  Line {line_num}: {preview}")
+                start = idx + 1
             return ToolResult(
                 success=False,
                 output=f"[ERROR: old_string matched {count} times in {path}. "
                 f"The match must be unique.\n\n"
                 f"Matching locations:\n"
-                + "\n".join(locations[:20])
-                + ("\n  ..." if len(locations) > 20 else "")
+                + "\n".join(locations)
+                + ("\n  ..." if count > 20 else "")
                 + "\n\nHint: include more surrounding lines in old_string to make it unique, "
                 + "or use grep to find a more specific anchor.",
                 error="multiple matches",
@@ -153,6 +168,8 @@ class EditFileTool:
             )
 
         # 唯一匹配 → replace
+        idx = content.find(old)
+        start_line = content[:idx].count("\n") + 1  # G1: 真实文件行号 (diff 渲染用)
         new_content = content.replace(old, new, 1)
         try:
             # v2 fix: 使用唯一临时file名, 避免concurrentwrite竞态
@@ -178,6 +195,7 @@ class EditFileTool:
                 "path": str(path),
                 "old_lines": old_lines,
                 "new_lines": new_lines,
+                "start_line": start_line,  # G1: diff 面板显示真实行号
                 "old_string": old[:500],   # 截断: diff 展示用, 防 timeline 膨胀
                 "new_string": new[:500],
                 "diff": diff,              # v0.0.12: 完整 diff (仅 observer 用, 不进 timeline)

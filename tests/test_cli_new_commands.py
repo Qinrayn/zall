@@ -15,7 +15,7 @@ import pytest
 
 from zall.cli import session as session_mod
 from zall.cli.commands import (
-    cmd_add, cmd_diff, cmd_drop, cmd_fix, cmd_retry, cmd_review, cmd_search,
+    cmd_add, cmd_diff, cmd_drop, cmd_fix, cmd_retry, cmd_review,
     get_known_commands,
 )
 from zall.cli.commands._common import (
@@ -82,39 +82,12 @@ class _FakeLoop:
 
 
 class TestSearchCommand:
-    """/search: networksearch"""
+    """/web /search 已删除 (与 agent 的 web_fetch/web_search 工具重复)。"""
 
-    def test_search_no_query_shows_usage(self) -> None:
-        """Happy path: /search 无参 → usage."""
-        buf = io.StringIO()
-        cmd_search("", buf)
-        assert "usage" in buf.getvalue().lower()
-
-    def test_search_with_query_executes(self) -> None:
-        """Happy path: /search 有参 → 调用 SearchTool."""
-        buf = io.StringIO()
-        cmd_search("python tutorials", buf)
-        val = buf.getvalue()
-        # 可能成功或network不通, 但output应有content
-        assert len(val) > 0
-
-    def test_search_routes_via_slash(self) -> None:
-        """Happy path: /search 路由到 _cmd_search."""
-        buf = io.StringIO()
-        result = handle_slash("/search", {}, buf)
-        assert result == "handled"
-
-    def test_search_routes_with_query(self) -> None:
-        """Happy path: /search query 路由到 _cmd_search."""
-        buf = io.StringIO()
-        result = handle_slash("/search hello world", {}, buf)
-        assert result == "handled"
-
-    def test_search_routes_no_arg(self) -> None:
-        """Happy path: /search 无参 → handled (显示 usage)."""
-        buf = io.StringIO()
-        result = handle_slash("/search", {"usage": {}}, buf)
-        assert result == "handled"
+    def test_web_search_deleted(self) -> None:
+        # 反例: 删除后不得再在命令注册表
+        assert "/search" not in get_known_commands()
+        assert "/web" not in get_known_commands()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -434,17 +407,31 @@ class TestHelpDetailed:
         val = buf.getvalue()
         assert "/add" in val
 
-    def test_help_bare_shows_all(self) -> None:
-        """Happy path: /help 无参显示所有command."""
+    def test_help_bare_shows_core(self) -> None:
+        """v0.6.0: /help 无参显示核心命令 (高级命令在 /advanced)."""
         buf = io.StringIO()
         _print_help(buf)
         val = buf.getvalue()
         assert "/add" in val
         assert "/drop" in val
+        assert "/sessions" in val
+        assert "/model" in val
+        assert "/plan" in val
+        assert "/undo" in val
+        assert "/retry" in val
+        # 高级命令不在 /help 中
+        assert "/advanced" in val  # /advanced 入口在 /help 中
+
+    def test_advanced_help_shows_advanced(self) -> None:
+        """v0.6.0: /advanced 显示高级命令."""
+        from zall.cli.commands._common import _print_advanced_help
+        buf = io.StringIO()
+        _print_advanced_help(buf)
+        val = buf.getvalue()
         assert "/fix" in val
         assert "/review" in val
-        assert "/retry" in val
-        assert "/search" in val
+        assert "/lsp" in val
+        assert "/suggest" in val
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -488,14 +475,14 @@ class TestCommandMeta:
 
     def test_all_new_commands_in_known(self) -> None:
         """Happy path: 所有新command在 _KNOWN_COMMANDS 中."""
-        for cmd in ("/add", "/drop", "/fix", "/review", "/retry", "/search"):
+        for cmd in ("/add", "/drop", "/fix", "/review", "/retry"):
             assert cmd in get_known_commands(), f"{cmd} missing"
 
     def test_all_new_commands_in_prompt_meta(self) -> None:
         """Happy path: 所有新command在 get_command_meta() 中."""
         from zall.cli.commands._common import get_command_meta
         meta = get_command_meta()
-        for cmd in ("/add", "/drop", "/fix", "/review", "/retry", "/search"):
+        for cmd in ("/add", "/drop", "/fix", "/review", "/retry"):
             assert cmd in meta, f"{cmd} missing from get_command_meta()"
 
     def test_bare_slash_includes_new_commands(self) -> None:

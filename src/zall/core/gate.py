@@ -83,6 +83,9 @@ class UserResponse(BaseModel):
     modified_action: Action | None = None  # only MODIFY 时有值
     override_text: str | None = None  # only OVERRIDE 时有值 (须非空)
     downgrade_index: int = 0  # §3.4.4: only ACCEPT_DOWNGRADE 时有值 (选中第几个 candidate)
+    # G2 (kimi 审批 UX 对标): REJECT 可附自由文本 feedback — 理由随
+    # rejection_reason 流入 tool_result, 模型知道为什么被拒/该怎么改。
+    feedback: str | None = None
 
 
 @runtime_checkable
@@ -270,9 +273,16 @@ class ConfirmGate:
 
         if rt == UserResponseType.REJECT:
             self._state = GateState.REJECTED
+            # G2: 带 feedback 的拒绝把理由给模型 (经 executor 的 rejection message)
+            reason = "user rejected"
+            if response.feedback:
+                reason = (
+                    f"user rejected with feedback: {response.feedback}"
+                    " — adjust the approach accordingly"
+                )
             return GateResult(
                 state=GateState.REJECTED,
-                rejection_reason="user rejected",
+                rejection_reason=reason,
             )
 
         if rt == UserResponseType.MODIFY:
@@ -329,9 +339,12 @@ class ConfirmGate:
 
         if rt == UserResponseType.REJECT:
             self._state = GateState.REJECTED
+            reason = "user rejected blacklist action"
+            if response.feedback:
+                reason = f"user rejected blacklist action with feedback: {response.feedback}"
             return GateResult(
                 state=GateState.REJECTED,
-                rejection_reason="user rejected blacklist action",
+                rejection_reason=reason,
             )
 
         raise RuntimeError(f"Unexpected response {rt} in EQUIVALENCE_PROPOSED state")

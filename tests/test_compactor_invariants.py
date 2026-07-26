@@ -446,3 +446,239 @@ class TestEstimateCharsPerToken:
         """空文本 → returns英文default值."""
         ratio = _estimate_chars_per_token("")
         assert ratio == 4.0
+
+
+# ── Tool-call/result 配对完整性 (B1 fix, 双向) ──
+
+
+def _assert_tool_pair_integrity(messages: list[Message]) -> None:
+    """IPR-0: 断言压缩后消息序列中每个 tool_call id 都有配对 tool_result、每个 tool_result 都有配对 tool_call。
+
+    遍历所有 assistant 消息收集 tool_call IDs, 遍历所有 tool 消息收集 tool_result IDs,
+    双向检查集合相等。
+    """
+    tool_call_ids: set[str] = set()
+    for m in messages:
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                tool_call_ids.add(tc.id)
+
+    tool_result_ids: set[str] = set()
+    for m in messages:
+        if m.role == "tool" and m.tool_call_id:
+            tool_result_ids.add(m.tool_call_id)
+
+    # 每个 tool_call 必须有对应的 tool_result
+    orphan_calls = tool_call_ids - tool_result_ids
+    assert not orphan_calls, (
+        f"tool_call(s) without matching tool_result: {orphan_calls}"
+    )
+    # 每个 tool_result 必须有对应的 tool_call
+    orphan_results = tool_result_ids - tool_call_ids
+    assert not orphan_results, (
+        f"tool_result(s) without matching tool_call: {orphan_results}"
+    )
+
+
+class TestToolPairIntegrityBidirectional:
+    """tool_call/result 配对完整性双向测试 (B1 fix, §9.2.9)."""
+
+    # ── 多轮交错场景 (IPR-0 风格, 方向1: tool_result in recent → tool_call in to_compact) ──
+
+    def test_direction1_tool_result_in_recent_expands_boundary(self) -> None:
+        """方向1: tool_result 在 recent 中 → 向前扩展 boundary 包含对应 tool_call."""
+        # assistant1(tc1) → tr1 → [BOUNDARY] → assistant2(tc2) → tr2
+        # keep_recent=1: recent=[tr2], to_compact=[a1(tc1), tr1, a2(tc2)]
+        # B1 应向前扩展 recent 包含 a2(tc2)
+        msgs = [
+            _make_msg("system", "system prompt"),
+            _make_msg("user", "step 1"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc1", tool_id="bash",
+                                           args={"command": "ls"}),)),
+            Message(role="tool", content="file1", tool_call_id="tc1", tool_id="bash"),
+            _make_msg("user", "step 2"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc2", tool_id="bash",
+                                           args={"command": "pwd"}),)),
+            Message(role="tool", content="/home", tool_call_id="tc2", tool_id="bash"),
+        ]
+        compactor = ModelCompactor(keep_recent=1)
+        result = compactor.compact(msgs, _FAKE_ADAPTER)
+        # 不变量: 所有 tool_call 都有配对, 所有 tool_result 都有配对
+        _assert_tool_pair_integrity(result.compressed_messages)
+
+    def test_direction2_tool_call_in_recent_expands_boundary(self) -> None:
+        """方向2: tool_call 在 recent 中 → 向前扩展 boundary 包含对应 tool_result.
+
+        构造: 最后一个 tool_result 落入 to_compact 区域, 而 tool_call 在 recent 中。
+        压缩后应确保配对完整, 不残留无结果的 tool_call。
+        """
+        # assistant1(tc1) → tr1 → [BOUNDARY] → assistant2(tc2) → tr2 → assistant3(tc3)
+        # keep_recent=2: recent=[tr2, a3(tc3)], to_compact=[a1(tc1), tr1, a2(tc2)]
+        # 方向1: tr2 → tc2 → a2(tc2) 在 to_compact → 扩展 recent 包含 a2(tc2)
+        # 方向2: a3(tc3) → tc3 → tr3 不存在, 不触发
+        # 方向2 同时也检查: 如果 a2(tc2) 在 recent 中, tr2 也必须在 recent 中
+        msgs = [
+            _make_msg("system", "system prompt"),
+            _make_msg("user", "init"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc1", tool_id="bash",
+                                           args={"command": "ls"}),)),
+            Message(role="tool", content="f1", tool_call_id="tc1", tool_id="bash"),
+            _make_msg("user", "next"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc2", tool_id="bash",
+                                           args={"command": "pwd"}),)),
+            Message(role="tool", content="/root", tool_call_id="tc2", tool_id="bash"),
+            _make_msg("user", "final"),
+            _make_msg("assistant", "done"),
+        ]
+        compactor = ModelCompactor(keep_recent=2)
+        result = compactor.compact(msgs, _FAKE_ADAPTER)
+        _assert_tool_pair_integrity(result.compressed_messages)
+
+    def test_multi_round_interleaved_boundary_cuts_between_pairs(self) -> None:
+        """多轮交错: 切分点故意放在配对中间, 验证双向扩展。
+
+        scenario: a1(tc1) → tr1 → a2(tc2) → tr2 → a3(tc3) → tr3 → u → a4
+        keep_recent=2: recent=[u, a4], to_compact=[a1~tr3]
+        → 所有配对都在 to_compact 内, 一起摘要, 无残留引用。
+        """
+        msgs = [
+            _make_msg("system", "system prompt"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc1", tool_id="read_file",
+                                           args={"path": "a.py"}),)),
+            Message(role="tool", content="code1", tool_call_id="tc1", tool_id="read_file"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc2", tool_id="edit_file",
+                                           args={"path": "b.py"}),)),
+            Message(role="tool", content="ok", tool_call_id="tc2", tool_id="edit_file"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc3", tool_id="bash",
+                                           args={"command": "pytest"}),)),
+            Message(role="tool", content="pass", tool_call_id="tc3", tool_id="bash"),
+            _make_msg("user", "thanks"),
+            _make_msg("assistant", "you're welcome"),
+        ]
+        compactor = ModelCompactor(keep_recent=2)
+        result = compactor.compact(msgs, _FAKE_ADAPTER)
+        # 所有配对都在 to_compact 中一起摘要, 不应有残留引用
+        _assert_tool_pair_integrity(result.compressed_messages)
+
+    def test_multi_round_boundary_splits_last_pair(self) -> None:
+        """多轮交错: 切分点拆分最后一对 (方向1 + 方向2 联合验证).
+
+        scenario: a1(tc1) → tr1 → a2(tc2) → tr2 → a3(tc3) → tr3
+        keep_recent=1: recent=[tr3], to_compact=[a1,tr1,a2,tr2,a3]
+        → 方向1: tr3 → tc3 → a3 在 to_compact → 扩展 recent 包含 a3
+        → 最终 recent=[a3,tr3], 配对完整。
+        """
+        msgs = [
+            _make_msg("system", "system prompt"),
+            _make_msg("user", "q1"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc1", tool_id="bash",
+                                           args={"command": "ls"}),)),
+            Message(role="tool", content="f1", tool_call_id="tc1", tool_id="bash"),
+            _make_msg("user", "q2"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc2", tool_id="bash",
+                                           args={"command": "pwd"}),)),
+            Message(role="tool", content="/root", tool_call_id="tc2", tool_id="bash"),
+            _make_msg("user", "q3"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc3", tool_id="bash",
+                                           args={"command": "whoami"}),)),
+            Message(role="tool", content="alice", tool_call_id="tc3", tool_id="bash"),
+        ]
+        compactor = ModelCompactor(keep_recent=1)
+        result = compactor.compact(msgs, _FAKE_ADAPTER)
+        _assert_tool_pair_integrity(result.compressed_messages)
+
+    def test_all_pairs_in_to_compact_summarized_together(self) -> None:
+        """所有配对都在 to_compact 中 → 一起摘要, 无残留引用."""
+        msgs = [
+            _make_msg("system", "system prompt"),
+            _make_msg("user", "do it"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc1", tool_id="bash",
+                                           args={"command": "make"}),)),
+            Message(role="tool", content="built", tool_call_id="tc1", tool_id="bash"),
+            _make_msg("user", "run it"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc2", tool_id="bash",
+                                           args={"command": "./run"}),)),
+            Message(role="tool", content="output", tool_call_id="tc2", tool_id="bash"),
+        ]
+        compactor = ModelCompactor(keep_recent=1)
+        result = compactor.compact(msgs, _FAKE_ADAPTER)
+        _assert_tool_pair_integrity(result.compressed_messages)
+
+    # ── 反例测试 (IPR-0 风格) ──
+
+    def test_counterexample_dangling_tool_call_detected(self) -> None:
+        """反例: 构造残留无结果 tool_call 的消息序列 → 断言捕获.
+
+        IPR-0: 验证 _assert_tool_pair_integrity 能发现 broken state。
+        """
+        # assistant(tc1) 存在但没有 tool_result(tc1)
+        broken = [
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc1", tool_id="bash",
+                                           args={"command": "ls"}),)),
+            _make_msg("user", "hello"),
+        ]
+        with pytest.raises(AssertionError, match="tool_call.*without matching"):
+            _assert_tool_pair_integrity(broken)
+
+    def test_counterexample_dangling_tool_result_detected(self) -> None:
+        """反例: 构造无对应 tool_call 的 tool_result → 断言捕获.
+
+        IPR-0: 验证 _assert_tool_pair_integrity 能发现 broken state。
+        """
+        # tool_result(tc1) 存在但没有 assistant(tc1)
+        broken = [
+            _make_msg("user", "hello"),
+            Message(role="tool", content="output", tool_call_id="tc1", tool_id="bash"),
+        ]
+        with pytest.raises(AssertionError, match="tool_result.*without matching"):
+            _assert_tool_pair_integrity(broken)
+
+    def test_counterexample_old_algorithm_would_break(self) -> None:
+        """反例: 旧算法 (单向) 会遗漏方向2, 新算法修复.
+
+        构造场景: tool_result 在 to_compact 中, 其 tool_call 在 recent 中。
+        旧单向算法只检查 tool_result→tool_call, 不检查 tool_call→tool_result,
+        因此不会扩展 boundary, 导致残留无结果 tool_call。
+        新双向算法应扩展 boundary 包含 tool_result。
+        """
+        # 构造: a1(tc1) → tr1 → a2(tc2) → tr2
+        #   to_compact(keep_recent=1) = [a1(tc1), tr1, a2(tc2)]
+        #   recent                   = [tr2]
+        # 方向1: tr2→tc2→a2(tc2) 在 to_compact → 扩展 recent 包含 a2(tc2)
+        # 结果: recent=[a2(tc2), tr2], 配对完整
+        msgs = [
+            _make_msg("system", "sys"),
+            _make_msg("user", "step1"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc1", tool_id="bash",
+                                           args={"command": "ls"}),)),
+            Message(role="tool", content="a", tool_call_id="tc1", tool_id="bash"),
+            _make_msg("user", "step2"),
+            _make_msg("assistant", "",
+                      tool_calls=(ToolCall(id="tc2", tool_id="bash",
+                                           args={"command": "pwd"}),)),
+            Message(role="tool", content="/root", tool_call_id="tc2", tool_id="bash"),
+        ]
+        compactor = ModelCompactor(keep_recent=1)
+        result = compactor.compact(msgs, _FAKE_ADAPTER)
+        # 新算法应保证配对完整
+        _assert_tool_pair_integrity(result.compressed_messages)
+        # 验证 a2(tc2) 和 tr2 都被保留在 recent 中
+        roles = [m.role for m in result.compressed_messages]
+        assert "tool" in roles, "tool_result should be preserved in recent"
+        assert any(
+            m.role == "assistant" and m.tool_calls for m in result.compressed_messages
+        ), "tool_call should be preserved in recent"

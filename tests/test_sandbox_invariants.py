@@ -109,9 +109,12 @@ class TestProcessSandbox:
         sandbox.cleanup()
 
     def test_execute_timeout(self):
+        import sys
         limits = ResourceLimits(timeout_seconds=0.1)
         sandbox = ProcessSandbox(limits=limits)
-        result = sandbox.execute_command("sleep 10")
+        # 跨平台长命令: Windows 无 sleep, 用 ping 占位 (~10s, 无需 stdin)
+        long_cmd = "ping -n 11 127.0.0.1" if sys.platform == "win32" else "sleep 10"
+        result = sandbox.execute_command(long_cmd)
         assert not result.success
         assert "Timeout" in result.error
         sandbox.cleanup()

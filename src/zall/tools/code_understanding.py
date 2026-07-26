@@ -38,6 +38,11 @@ class CodeUnderstandingTool:
     @property
     def tool_id(self) -> str:
         return "code_understanding"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=True, tool_scope=ToolScope.Read)
+
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -152,7 +157,7 @@ class CodeUnderstandingTool:
 
         for fpath in sorted(files.keys()):
             syms = files[fpath]
-            parts.append(f"\n  📄 {fpath}")
+            parts.append(f"\n  {fpath}")
             parts.append(f"     {len(syms)} symbols matching '{target}'")
 
             # Show matching symbols
@@ -192,7 +197,7 @@ class CodeUnderstandingTool:
         parts.append(f"[Code Understanding: '{file_path}']\n")
 
         # File outline
-        parts.append(f"\n  📄 Structure ({len(outline)} symbols):")
+        parts.append(f"\n  Structure ({len(outline)} symbols):")
         for entry in outline:
             name = entry.get("name", "?")
             kind = entry.get("kind", "?")
@@ -222,7 +227,11 @@ class CodeUnderstandingTool:
     def _read_file_content(
         self, file_path: str, parts: list[str], full: bool,
     ) -> None:
-        """读取文件内容。"""
+        """读取文件内容。敏感文件 (凭证/私钥) 跳过 — 与 read_file 同源防线。"""
+        from zall.safety.sensitive import is_sensitive_file
+        if is_sensitive_file(file_path):
+            parts.append("\n  Content: [sensitive file skipped to protect credentials]")
+            return
         try:
             with open(file_path, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
@@ -240,7 +249,7 @@ class CodeUnderstandingTool:
                 else:
                     content = "".join(lines)
 
-            parts.append("\n  📝 Content:")
+            parts.append("\n  Content:")
             for line in content.split("\n")[:60]:
                 parts.append(f"  {line}")
             if len(content.split("\n")) > 60:

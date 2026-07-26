@@ -30,7 +30,14 @@ from zall.cli.config import (
     _config_status, _detect_provider, _persist_model_to_config,
     _resolve_model_alias, _PROVIDER_DISPLAY,
 )
-from zall._util.model_registry import _MODEL_PRESETS, _PROVIDER_REGISTRY
+from zall._util.model_registry import (
+    _MODEL_PRESETS,
+    _PROVIDER_REGISTRY,
+    get_provider_default_model,
+    get_provider_display,
+    get_provider_tag,
+    list_providers,
+)
 from zall.cli.environment import CwdMeta as _CwdMeta
 from zall.cli.environment import build_system_prompt as _build_system_prompt
 from zall.cli.render import _shared_console
@@ -51,6 +58,7 @@ def _detect_configured_providers() -> dict[str, bool]:
     not both "openai" and "agnes".
     """
     from zall._util.model_registry import get_model_provider
+    from zall.cli.config import _get_provider_registry
 
     configured: dict[str, bool] = {}
     try:
@@ -62,17 +70,20 @@ def _detect_configured_providers() -> dict[str, bool]:
         api_key = ""
         model_name = ""
 
+    # A4 fix: 用合并表 (含自定义 provider), 而非仅内置 _PROVIDER_REGISTRY。
+    merged_registry = _get_provider_registry()
+
     # Determine which provider the global api_key actually belongs to
     global_key_provider: str | None = None
     if api_key and api_key != "your-api-key-here":
         # Infer from configured model name
         if model_name:
-            global_key_provider = get_model_provider(model_name)
+            global_key_provider = get_model_provider(model_name, registry=merged_registry)
         else:
-            # No model configured → default to agnes (the default)
+            # No model configured -> default to agnes (the default)
             global_key_provider = "agnes"
 
-    for provider, (_display, env_var, _base, _url, _prefixes, _adapter) in _PROVIDER_REGISTRY.items():
+    for provider, (_display, env_var, _base, _url, _prefixes, _adapter) in merged_registry.items():
         # Check env var first (exact per-provider match)
         if env_var and os.environ.get(env_var, "").strip():
             configured[provider] = True
@@ -117,13 +128,14 @@ def _build_dynamic_model_list(
                 if name and not any(r[0] == name or r[1] == name for r in result):
                     api_base = prov.get("api_base", "")
                     note = api_base[:50] if api_base else "custom"
-                    result.append((name, name, note, "openai", True))
+                    # A4 fix: 用自定义 provider 真实名, 而非硬编码 "openai"。
+                    result.append((name, name, note, name, True))
 
     # Sort: configured providers first, then by provider group, then by alias
     _provider_order = {"agnes": 0, "openai": 1, "anthropic": 2, "gemini": 3, "deepseek": 4, "ollama": 5}
     result.sort(key=lambda x: (
         0 if x[4] or x[3] == "ollama" else 1,  # configured/local first
-        _provider_order.get(x[3], 99),         # by provider group
+        _provider_order.get(x[3], 50),         # A4: 未知 provider 排在内置之后 (50), 而非最后 (99)
         x[0],                                   # by alias
     ))
     return result
@@ -188,6 +200,64 @@ def cmd_verbose(arg: str, out: Any, loop: Any | None = None, state: dict[str, An
         renderer.set_verbose(state["verbose"])
     out.write(f"  verbose \u2192 {'on' if state['verbose'] else 'off'}"
               f" (applies to next new conversation)\n")
+    return "handled"
+
+
+def _apply_strict_mode(state: dict[str, Any], loop: Any | None, enabled: bool, out: Any) -> None:
+    """设置严格模式 — /strict /fast /mode 共享的单一真相源 (合并去重)。"""
+    state["strict"] = enabled
+    # 如果当前 loop 支持, 同步更新
+    if loop is not None and hasattr(loop, "_strict"):
+        loop._strict = enabled
+    if enabled:
+        out.write("  strict mode \u2192 on (full confirm gates, safe but slower)\n")
+    else:
+        out.write("  strict mode \u2192 off (auto-confirm, faster)\n")
+
+
+@slash_command("/mode", description="show/switch interaction mode (strict|fast)", category=_CATEGORY_MODEL)
+def cmd_mode(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """统一的模式开关 — 合并 /strict + /fast (二者保留为快捷方式)。
+
+    用法:
+      /mode              显示当前模式 (strict / plan)
+      /mode strict       启用严格模式 (每步确认, 安全); 别名: safe
+      /mode fast         关闭严格模式 (自动确认, 更快); 别名: auto, normal
+    """
+    if state is None:
+        state = {}
+    sub = arg.strip().lower()
+    if not sub:
+        strict_on = bool(state.get("strict", False))
+        plan_on = bool(state.get("plan_mode", False))
+        out.write(f"  mode: strict={'on' if strict_on else 'off'}, "
+                  f"plan={'on' if plan_on else 'off'}\n")
+        out.write("  usage: /mode strict | /mode fast    (plan mode: /plan)\n")
+        return "handled"
+    if sub in ("strict", "safe"):
+        _apply_strict_mode(state, loop, True, out)
+    elif sub in ("fast", "auto", "normal"):
+        _apply_strict_mode(state, loop, False, out)
+    else:
+        out.write(f"  unknown mode '{sub}' (use: strict | fast)\n")
+    return "handled"
+
+
+@slash_command("/strict", description="shortcut for /mode strict", category=_CATEGORY_MODEL)
+def cmd_strict(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """启用严格模式 (等价 /mode strict)。"""
+    if state is None:
+        state = {}
+    _apply_strict_mode(state, loop, True, out)
+    return "handled"
+
+
+@slash_command("/fast", description="shortcut for /mode fast", category=_CATEGORY_MODEL)
+def cmd_fast(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """禁用严格模式 (等价 /mode fast)。"""
+    if state is None:
+        state = {}
+    _apply_strict_mode(state, loop, False, out)
     return "handled"
 
 
@@ -280,12 +350,19 @@ def cmd_doctor(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
                     timeout=float(cfg.get("timeout", 120.0)),
                 )
                 try:
+                    import time as _time
+                    _t0 = _time.time()
                     test_resp = test_adapter.complete(
                         messages=[Message(role="user", content="Say 'ok' in one word.")],
                         tools=[], tool_choice=ToolChoice.NONE,
                     )
+                    _lat = _time.time() - _t0
                     if test_resp.content and "error" not in test_resp.content.lower():
-                        rows.append(("model_api", f"OK ({test_resp.usage.get('total', 0)} tokens used)", "green"))
+                        # 报告延迟: 让用户看到端点慢不慢 (慢端点是响应慢的主因)
+                        _lat_color = "green" if _lat < 3 else "warn" if _lat < 8 else "red"
+                        rows.append(("model_api", f"OK ({_lat:.1f}s, {test_resp.usage.get('total', 0)} tokens)", _lat_color))
+                        if _lat >= 8:
+                            rows.append(("model_speed", f"SLOW endpoint (~{_lat:.0f}s/call) — try /provider or a faster model", "warn"))
                     else:
                         rows.append(("model_api", f"ERROR: {test_resp.content[:80]}", "red"))
                 finally:
@@ -441,6 +518,168 @@ def _show_model_guide(out: Any) -> None:
         out.write("   ZALL_MODEL=my-model ZALL_API_BASE=... ZALL_API_KEY=...\n")
 
 
+@slash_command("/provider", description="show/switch model provider", category=_CATEGORY_MODEL)
+def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """列出或切换模型提供商 (registry 驱动, 无硬编码)。
+
+    用法:
+      /provider              列出所有提供商 (TTY 下可输数字选择) + 配置状态 + 当前
+      /provider <name>       切换到该提供商 (自动选其默认模型)
+      /provider <name> -p    切换并持久化到 config
+    """
+    if state is None:
+        state = {}
+    cur_model = state.get("model") or _config_status().get("model") or ""
+    cur_provider = _detect_provider(cur_model) if cur_model else ""
+    ready = _detect_configured_providers()
+    providers = list_providers()  # (key, display, env_var, key_url)
+
+    parts = arg.split() if arg else []
+    persist = False
+    if parts and parts[0] in ("--persist", "-p"):
+        persist = True
+        parts = parts[1:]
+    target = parts[0].lower() if parts else ""
+
+    is_tty = hasattr(out, "isatty") and out.isatty()
+    _input_fn = state.get("_input_fn")
+
+    def _do_switch(prov: str) -> str:
+        if prov not in _PROVIDER_REGISTRY:
+            valid = ", ".join(_PROVIDER_REGISTRY.keys())
+            out.write(f"  unknown provider '{prov}'. valid: {valid}\n")
+            return "handled"
+        default_model = get_provider_default_model(prov)
+        if not default_model:
+            out.write(f"  provider '{prov}' has no preset model; use /model <name> to pick one.\n")
+            return "handled"
+        state["model"] = default_model
+        # 切换 provider 后强制重建 adapter (key/base 变更 + httpx 连接池)
+        _ad = state.pop("_adapter", None)
+        if _ad is not None and hasattr(_ad, "close"):
+            try:
+                _ad.close()
+            except Exception:
+                pass
+        out.write(f"  provider \u2192 {get_provider_display(prov)}  [model: {default_model}]\n")
+        if not ready.get(prov, False):
+            _meta = _PROVIDER_REGISTRY[prov]
+            env_var, key_url = _meta[1], _meta[3]
+            if env_var:
+                out.write(f"  \u26a0 no API key detected. set {env_var} or add to ~/.zall/config.toml\n")
+                out.write(f"    get a key: {key_url}\n")
+        if persist:
+            _persist_model_to_config(default_model)
+            out.write("  \u2713 persisted to ~/.zall/config.toml\n")
+        return "handled"
+
+    if target:
+        return _do_switch(target)
+
+    # ── 列出 (TTY 下可交互数字选择) ──
+    cur_disp = get_provider_display(cur_provider) if cur_provider else "(unset)"
+    if is_tty:
+        c = _shared_console(out)
+        c.print(f"  [bold]current provider:[/] [cyan]{cur_disp}[/]")
+        c.print()
+        for i, (key, display, _env, _url) in enumerate(providers, 1):
+            cfg = "[green]\u00b7 configured[/]" if ready.get(key, False) else "[dim]\u00b7 needs key[/]"
+            marker = " [cyan]\u2190 current[/]" if key == cur_provider else ""
+            c.print(f"    {i:2d}. [dim][{get_provider_tag(key)}][/] {key:12s} [dim]{display}[/]  {cfg}{marker}")
+        c.print()
+        if _input_fn:
+            try:
+                sel = (_input_fn("  select [N] / provider name: ") or "").strip()
+            except (EOFError, KeyboardInterrupt):
+                c.print()
+                return "handled"
+            if not sel:
+                return "handled"
+            if sel.isdigit():
+                n = int(sel)
+                if 1 <= n <= len(providers):
+                    return _do_switch(providers[n - 1][0])
+                out.write(f"  invalid selection {n}\n")
+                return "handled"
+            return _do_switch(sel.lower())
+        c.print("  [dim]usage: /provider <name>  (e.g. /provider anthropic)[/]")
+    else:
+        out.write(f"  current provider: {cur_disp}\n")
+        for i, (key, display, _env, _url) in enumerate(providers, 1):
+            cfg = "configured" if ready.get(key, False) else "needs key"
+            marker = "  <- current" if key == cur_provider else ""
+            out.write(f"    {i:2d}. [{get_provider_tag(key)}] {key:12s} {display}  ({cfg}){marker}\n")
+        out.write("  usage: /provider <name>\n")
+    return "handled"
+
+
+@slash_command("/thinking", description="show/toggle the model's thinking process", category=_CATEGORY_MODEL)
+def cmd_thinking(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """开关/查看模型思考过程展示 (like Claude Code)。
+
+    用法:
+      /thinking            显示当前状态
+      /thinking on         开启 (Anthropic Claude 3.7/4 请求扩展思考, 默认预算 2048)
+      /thinking off        关闭
+      /thinking <N>        开启并设 thinking 预算为 N token (>=1024)
+
+    说明: DeepSeek-R1 / o1·o3 / Gemini 思考模型无需开关, reasoning 自动展示;
+    此开关主要影响 Anthropic Claude。切换下次对话生效 (重建 adapter)。
+    """
+    import os as _os
+    if state is None:
+        state = {}
+    a = (arg or "").strip().lower()
+
+    def _rebuild_adapter() -> None:
+        _ad = state.pop("_adapter", None)
+        if _ad is not None and hasattr(_ad, "close"):
+            try:
+                _ad.close()
+            except Exception:
+                pass
+
+    if not a:
+        budget = _os.environ.get("ZALL_THINKING_BUDGET", "").strip()
+        on = bool(budget and budget != "0") or (
+            _os.environ.get("ZALL_THINKING", "").strip().lower() in ("1", "true", "yes", "on"))
+        if on:
+            out.write(f"  thinking: on (budget {budget or '2048'} tokens)\n")
+        else:
+            out.write("  thinking: off\n")
+        out.write("  usage: /thinking on | off | <budget>\n")
+        out.write("  note: DeepSeek-R1 / o1 / Gemini thinking models always show reasoning.\n")
+        return "handled"
+
+    if a in ("off", "0", "no", "false"):
+        _os.environ["ZALL_THINKING"] = "0"
+        _os.environ.pop("ZALL_THINKING_BUDGET", None)
+        _rebuild_adapter()
+        out.write("  thinking \u2192 off\n")
+        return "handled"
+
+    if a in ("on", "yes", "true"):
+        _os.environ["ZALL_THINKING"] = "1"
+        _os.environ.pop("ZALL_THINKING_BUDGET", None)
+        _rebuild_adapter()
+        out.write("  thinking \u2192 on (budget 2048 tokens; Anthropic Claude 3.7/4)\n")
+        return "handled"
+
+    if a.isdigit():
+        n = int(a)
+        if n < 1024:
+            out.write("  thinking budget must be >= 1024 tokens\n")
+            return "handled"
+        _os.environ["ZALL_THINKING_BUDGET"] = str(n)
+        _os.environ["ZALL_THINKING"] = "1"
+        _rebuild_adapter()
+        out.write(f"  thinking \u2192 on (budget {n} tokens)\n")
+        return "handled"
+
+    out.write(f"  unknown option '{arg}'. usage: /thinking on | off | <budget>\n")
+    return "handled"
+
+
 @slash_command("/model", description="show/switch model", category=_CATEGORY_MODEL)
 def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
     if state is None:
@@ -452,7 +691,9 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
         if parts[0] in ("--persist", "-p"):
             persist = True
             model_arg = " ".join(parts[1:]).strip()
-        if parts[0] in ("--guide", "-g", "--help", "-h"):
+        # guide check on effective first token (after -p strip), so `/model -p -g` works too
+        _first = model_arg.split()[0] if model_arg else ""
+        if _first in ("--guide", "-g", "--help", "-h"):
             # Show configuration guide
             _show_model_guide(out)
             return "handled"
@@ -479,9 +720,12 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
     _models = _build_dynamic_model_list(_provider_ready, cur, _custom_providers)
     _all_aliases = set(a for a, *_ in _MODEL_PRESETS)
 
-    _PROVIDER_TAG = {"openai": "O", "anthropic": "C", "gemini": "G", "ollama": "L", "agnes": "A", "deepseek": "O"}
-    _PROVIDER_LABEL = {"openai": "OpenAI-compatible", "anthropic": "Anthropic Claude", "gemini": "Google Gemini",
-                       "ollama": "Ollama (local)", "agnes": "Agnes AI", "deepseek": "DeepSeek"}
+    # de-hardcode: tag/label 派生自 model_registry 单一真相源 (不再在此重复硬编码)
+    # A4: 用合并表 (含自定义 provider) 构建标签/显示名, 自定义 provider 也获正确标记。
+    from zall.cli.config import _get_provider_registry as _get_merged_registry
+    _merged_registry = _get_merged_registry()
+    _PROVIDER_TAG = {p: get_provider_tag(p) for p in _merged_registry}
+    _PROVIDER_LABEL = {p: get_provider_display(p) for p in _merged_registry}
 
     if not is_tty:
         # ── Plain text output ──
@@ -612,7 +856,7 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
     return "handled"
 
 
-@slash_command("/stats", description="show usage statistics (extensions)", category=_CATEGORY_MODEL)
+@slash_command("/stats", aliases=("/usage",), description="show usage statistics (extensions)", category=_CATEGORY_MODEL)
 def cmd_stats(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
     """Display extension-gathered statistics: tool call counts, errors, model info.
 

@@ -165,3 +165,22 @@ def fake_tty() -> _FakeTTY:
 def fake_model() -> _FakeModel:
     """Returns a default _FakeModel instance."""
     return _FakeModel()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_always_allow(tmp_path_factory, monkeypatch):
+    """E4.3: 隔离 always_allow.json, 防止测试污染真实 ~/.zall/always_allow.json。
+
+    E4 引入了跨会话权限持久化 (CliUserResponder._persistent_allow 读写
+    ~/.zall/always_allow.json)。若不隔离, 一个测试按 'a' 写入真实文件后,
+    后续所有 CLI 测试的 greylist 工具会被自动 ACCEPT, 破坏测试独立性。
+    本 fixture autouse, 把 always_allow_path 重定向到独立临时目录。
+
+    用 tmp_path_factory (而非 tmp_path) 因为某些测试文件重定义了 tmp_path
+    为 str, 会破坏 Path 拼接。
+    """
+    fake_path = tmp_path_factory.mktemp("always_allow") / "always_allow.json"
+    monkeypatch.setattr(
+        "zall.cli.responder._always_allow_path", lambda: fake_path
+    )
+    yield

@@ -1,0 +1,170 @@
+{
+  "title": "Covering systems: machine-checked certification (Proof Gate)",
+  "honesty": "Verifies the classic Erdős 1950 covering and enumerates small distinct-modulus coverings (known math, exact machine checks). Erdős–Selfridge odd-covering problem NOT attempted (infeasible search).",
+  "erdos_1950": {
+    "system": [
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        1,
+        4
+      ],
+      [
+        3,
+        8
+      ],
+      [
+        7,
+        12
+      ],
+      [
+        23,
+        24
+      ]
+    ],
+    "tier": "proven",
+    "lcm": 24
+  },
+  "near_miss_drop_last": {
+    "tier": "refuted",
+    "uncovered_residue": 23
+  },
+  "distinct_modulus_enumeration": {
+    "moduli": [
+      2,
+      3,
+      4,
+      6,
+      12
+    ],
+    "assignments_searched": 1728,
+    "coverings_found": 24,
+    "examples": [
+      [
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          1,
+          4
+        ],
+        [
+          1,
+          6
+        ],
+        [
+          11,
+          12
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          1,
+          4
+        ],
+        [
+          5,
+          6
+        ],
+        [
+          7,
+          12
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          3,
+          4
+        ],
+        [
+          1,
+          6
+        ],
+        [
+          5,
+          12
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          3,
+          4
+        ],
+        [
+          5,
+          6
+        ],
+        [
+          1,
+          12
+        ]
+      ],
+      [
+        [
+          0,
+          2
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          1,
+          4
+        ],
+        [
+          3,
+          6
+        ],
+        [
+          11,
+          12
+        ]
+      ]
+    ]
+  },
+  "erdos_selfridge_note": "Odd distinct-modulus covering (Erdős–Selfridge) is OPEN; an exhaustive search is infeasible. Not attempted here (no overclaim).",
+  "provenance": {
+    "protocol_hash": "sha256:eac2c073972fb6c7294d474261c4944b696a527ae14a850c52d8d7a26183f554",
+    "data_hash": "sha256:ba03ce276f1a7e12772cf92b47753d5b8202d72ebeab43a7360094d1e648c0c5",
+    "analysis_code_hash": "sha256:4beea4935cbfd5ad62161277060df8f299cca8a071a51147aac1af8c1e4ad5a3",
+    "environment_hash": "sha256:822183d108bab91ab5acebc686dbd83c2aaac7a6f422638044f5eb0c015860db",
+    "timeline_anchor": "anchor_ack_1784910914331_1",
+    "chain_verified": true
+  }
+}

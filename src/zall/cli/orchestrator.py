@@ -42,12 +42,14 @@ from zall.core.goal import (
 from zall.core.loop_events import RunEgress
 from zall.core.refiner import GoalRefiner
 from zall.core.tool import ToolRegistry, ToolResult
+from zall.core.plugin_loader import discover_tools, merge_tools_with_builtins
 from zall.core.compactor import ModelCompactor
 from zall.core.checkpoint import CheckpointManager
 from zall.safety.rules_file import load_rules
 from zall.tools.bash import BashTool
 from zall.tools.batch_edit import BatchEditTool
 from zall.tools.edit_file import EditFileTool
+from zall.tools.apply_patch import ApplyPatchTool
 from zall.tools.git_protect import GitProtect
 from zall.tools.glob import GlobTool
 from zall.tools.grep import GrepTool
@@ -59,10 +61,39 @@ from zall.tools.todo import TodoListTool
 from zall.tools.web_fetch import WebFetchTool
 from zall.tools.read_image import ReadImageTool
 from zall.tools.search import SearchTool
+from zall.tools.science import ScienceTool
 from zall.mcp.config import load_mcp_config, MCPServerSpec
 from zall.mcp.tool import MCPTool
 
 _log = _get_zall_logger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Perception Engine 构造 (v0.6.0, MASTER.md §4.2.3)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def build_perception_engine(project_root: str | None = None) -> Any:
+    """构造默认 Perception Engine (含 coding agent 传感器)。
+
+    创建带 FileSensor + GitSensor 的 PerceptionEngine,
+    注入 CodingWorldModel 用于轻量级预测。
+
+    Returns:
+        PerceptionEngine 实例 (或 None 如果不可用)
+    """
+    try:
+        from zall.core.perception import PerceptionEngine
+        from zall.core.perception.coding_sensors import FileSensor, GitSensor
+        from zall.core.perception.coding_world_model import CodingWorldModel
+
+        engine = PerceptionEngine()
+        engine.add_sensor(FileSensor(project_root=project_root))
+        engine.add_sensor(GitSensor(project_root=project_root))
+        engine.set_world_model(CodingWorldModel(project_root=project_root))
+        return engine
+    except Exception:
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -123,23 +154,49 @@ def refine_goal(user_task: str, *, judge_mode: str) -> GoalTriple:
 
 
 def confirm_goal(
-    out: Any, goal: Any, *, judge_mode: str, yes: bool, input_fn: Any = None
-) -> bool:
+    out: Any, goal: Any, *, judge_mode: str, yes: bool, strict: bool = False,
+    input_fn: Any = None,
+) -> tuple[bool, Any]:
     """§9.2.1/§9.2.5 Goal lockconfirm: 开工前让用户"confirm承诺"。
 
-    返回 True = 用户确认; False = 拒绝, 调用方应中止。
+    v0.5.1: 默认不交互。仅在 strict 模式或 judge_mode != "none" 时询问用户。
+    始终渲染 goal card (信息性), 默认返回 True (auto-confirm)。
+
+    v0.6.0 (UX): 在 goal card 下方显示提示, 允许用户直接输入新目标来修改。
+    用户按 Enter 确认, 输入非空新目标则重新 refine 并循环。
+
+    返回 (True, final_goal) = 用户确认; (False, None) = 拒绝, 调用方应中止。
     """
-    render_goal_card(goal, judge_mode, out)
+    current_goal = goal
+    render_goal_card(current_goal, judge_mode, out)
     if yes:
-        return True
+        return True, current_goal
     if not sys.stdin.isatty():
-        return True
+        return True, current_goal
+    # v0.5.1: 默认 auto-confirm, 仅在 strict 或 judge 模式时交互
+    if not strict and judge_mode == "none":
+        return True, current_goal
     ask = input_fn or input
     try:
-        ans = ask("  confirm goal? [y/N] ").strip().lower()
+        # Phase 2 (UX): 显示提示, 允许用户直接编辑目标
+        out.write("  \u2500" * 25 + "\n")
+        out.write("  Press Enter to confirm, or enter a new goal to modify\n")
+        out.flush()
+        while True:
+            ans = ask("  goal > ").strip().lower()
+            if not ans or ans in ("y", "yes"):
+                # 确认当前 goal (接受 y/yes 作为确认, 向后兼容)
+                return True, current_goal
+            if ans in ("n", "no"):
+                # 用户拒绝
+                return False, None
+            # 用户输入了新目标, 重新 refine 并循环
+            current_goal = refine_goal(ans, judge_mode=judge_mode)
+            render_goal_card(current_goal, judge_mode, out)
+            out.write("  Press Enter to confirm, or enter a new goal to modify\n")
+            out.flush()
     except (EOFError, KeyboardInterrupt):
-        return False
-    return ans in ("y", "yes")
+        return False, None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -162,13 +219,14 @@ def clear_native_tools_cache() -> None:
 
 
 def _get_native_tools() -> tuple[Any, ...]:
-    """惰性construct并cache 13 个核心tool (Item A)。"""
+    """惰性construct并cache 14 个核心tool (Item A)。"""
     global _NATIVE_TOOLS_CACHE
     if _NATIVE_TOOLS_CACHE is None:
         _NATIVE_TOOLS_CACHE = (
             ReadFileTool(),
             WriteFileTool(),
             EditFileTool(),
+            ApplyPatchTool(),
             BatchEditTool(),
             BashTool(),
             GrepTool(),
@@ -179,6 +237,7 @@ def _get_native_tools() -> tuple[Any, ...]:
             ReadImageTool(),
             SpawnSubagentTool(),
             TodoListTool(),
+            ScienceTool(),
         )
     return _NATIVE_TOOLS_CACHE
 
@@ -236,7 +295,11 @@ _LIST_SUBAGENTS_TOOL: _ListSubagentsTool | None = None
 
 
 def build_tools() -> ToolRegistry:
-    """register全部核心tool (§4.2 tool层), 含 list_subagents (Team Mode)."""
+    """register全部核心tool (§4.2 tool层), 含 list_subagents (Team Mode).
+
+    同时通过 entry-point 发现机制加载第三方插件工具 (MASTER.md §12.1).
+    内置工具优先: 同名 tool_id 的插件工具被丢弃。
+    """
     global _LIST_SUBAGENTS_TOOL
     native = _get_native_tools()
     if _LIST_SUBAGENTS_TOOL is None:
@@ -244,7 +307,11 @@ def build_tools() -> ToolRegistry:
         if spawn is None:
             raise RuntimeError("spawn_subagent tool not found in native tools")
         _LIST_SUBAGENTS_TOOL = _ListSubagentsTool(spawn)
-    return ToolRegistry(tools=native + (_LIST_SUBAGENTS_TOOL,))
+    all_tools = native + (_LIST_SUBAGENTS_TOOL,)
+    # 发现并合并插件工具 (内置优先)
+    plugin_tools = discover_tools()
+    all_tools = merge_tools_with_builtins(plugin_tools, all_tools)
+    return ToolRegistry(tools=all_tools)
 
 
 def merge_tools(native: tuple[Any, ...], mcp_tools: list[MCPTool]) -> ToolRegistry:
@@ -318,6 +385,10 @@ def make_usage_observer(inner: Any, state: dict[str, Any]) -> Any:
                 u = state.setdefault("usage", {"prompt": 0, "completion": 0})
                 u["prompt"] += int(usage.get("prompt", 0) or 0)
                 u["completion"] += int(usage.get("completion", 0) or 0)
+                # 上下文占用 (bottom toolbar 用): 最近一次调用的 input tokens = 当前 context 大小
+                _pt = int(usage.get("prompt", 0) or 0)
+                if _pt:
+                    state["ctx_tokens"] = _pt
         inner(event)
 
     return _obs
@@ -328,20 +399,43 @@ def make_usage_observer(inner: Any, state: dict[str, Any]) -> Any:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def get_modified_files() -> list[str] | None:
-    """通过 git diff --name-only 获取当前工作区被修改的filelist。"""
+def get_modified_files(baseline: frozenset[str] | None = None) -> list[str] | None:
+    """获取本次 run 期间新产生的修改文件列表。
+
+    Bug fix (2026-07-26): 无基线时 `git diff HEAD` 拿到的是工作区**全部**
+    未提交改动 — 脏工作区下纯 Q&A 会话也会误报 "modified: 167 file(s)"。
+    正确语义: run 前采 baseline 集合, 结束后只报差集 (本次新增的改动)。
+    baseline=None 保留旧行为 (兼容直接调用方)。
+    """
     import subprocess
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         if result.returncode != 0:
             return None
         files = [f.strip() for f in result.stdout.split("\n") if f.strip()]
+        if baseline is not None:
+            files = [f for f in files if f not in baseline]
         return files if files else None
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None
+
+
+def snapshot_modified_baseline() -> frozenset[str]:
+    """run 启动前采集当前工作区已有改动集合 (get_modified_files 的基线)。"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+        )
+        if result.returncode != 0:
+            return frozenset()
+        return frozenset(f.strip() for f in result.stdout.split("\n") if f.strip())
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return frozenset()
 
 
 def run(
@@ -358,6 +452,7 @@ def run(
     enable_repo_map: bool = True,
     agent_definition: Any = None,
     toolset_preset: str | None = None,
+    strict: bool = False,
 ) -> RunEgress:
     """接线 AgentLoop 并execute (薄接线层, 不重新编排primitive)。
 
@@ -365,8 +460,14 @@ def run(
     out: 输出流 (默认 sys.stderr); REPL/测试可注入
     agent_definition: 可选 AgentDefinition, 用于覆盖工具集/权限模式
     toolset_preset: 可选工具集预设名 (覆盖 AgentDefinition 和默认工具集)
+    strict: 严格模式 (v0.5.1), 启用 full confirm/downgrade gates
     """
     out_stream = out or sys.stderr
+
+    # v2.x: @file 引用展开 — 与 REPL/TUI 一致 (三路径齐平)。一次性/JSON 模式**静默**展开
+    # (不打印提示以免污染 NDJSON); @path 解析到真实文件则注入内容, 非文件原样保留。
+    from zall.cli.file_complete import expand_at_references
+    user_task, _ = expand_at_references(user_task)
 
     # 1. adapter
     try:
@@ -396,7 +497,14 @@ def run(
             tool_list = [t for t in tool_list if t.tool_id in agent_definition.tools]
         native_tools = ToolRegistry(tools=tuple(tool_list))
     else:
-        native_tools = build_tools()
+        native_tools = build_tools()  # build_tools() 已包含插件发现
+
+    # 插件工具发现 (仅 preset / agent_definition 路径, 默认路径已在 build_tools() 中)
+    if toolset_preset is not None or agent_definition is not None:
+        plugin_tools = discover_tools()
+        merged = merge_tools_with_builtins(plugin_tools, native_tools.tools)
+        native_tools = ToolRegistry(tools=merged)
+
     mcp_tools = build_mcp_tools(out_stream)
     tools = merge_tools(native_tools.tools, mcp_tools)
 
@@ -408,7 +516,10 @@ def run(
     goal = refine_goal(user_task, judge_mode=judge_mode)
 
     # 4.5 Goal confirmation
-    if not confirm_goal(out_stream, goal, judge_mode=judge_mode, yes=yes):
+    confirmed, final_goal = confirm_goal(
+        out_stream, goal, judge_mode=judge_mode, yes=yes, strict=strict,
+    )
+    if not confirmed:
         out_stream.write("  goal not confirmed by user; aborting.\n")
         out_stream.flush()
         return RunEgress(
@@ -416,6 +527,7 @@ def run(
             step_count=0, total_tool_calls=0, total_model_calls=0,
             error="goal not confirmed by user",
         )
+    goal = final_goal  # 使用可能被用户修改的 goal
 
     # 5. context
     # P2 note: run() 是一次性execute, 无持久 state dict 可传给 get_cached_cwd_meta。
@@ -429,9 +541,13 @@ def run(
     def _print_fn(s: str) -> None:
         _resp_stream.write(s + "\n")
         _resp_stream.flush()
+    def _greylist_choose(choices: list[tuple[str, str, str]]) -> str:
+        from zall.cli.select import select_prompt
+        return select_prompt(_resp_stream, "confirm tool call", choices, default_index=1)
     responder = CliUserResponder(
         yes=yes, is_tty=is_interactive,
         print_fn=_print_fn,
+        choose_fn=_greylist_choose,
     )
 
     # 7. judge
@@ -471,6 +587,7 @@ def run(
         .with_git_protect(git_protect)
         .with_checkpoint(checkpoint_mgr)
         .with_compactor(ModelCompactor())
+        .with_strict(strict)
         .build()
     )
 
@@ -478,10 +595,14 @@ def run(
     out_stream.write(f"  {user_task[:100]}\n")
     out_stream.flush()
 
+    # 修改文件报告基线: 只报本次 run 新产生的改动, 不报工作区存量脏改动
+    modified_baseline = snapshot_modified_baseline()
+
     try:
         egress = loop.run(system_prompt=build_system_prompt(
             context, mcp_tools=tuple(mcp_tools),
             enable_repo_map=enable_repo_map,
+            lean=(toolset_preset == "lean"),  # PARADIGM Step 0: lean 预设→极简提示
         ))
     finally:
         for t in mcp_tools:
@@ -511,7 +632,7 @@ def run(
         import sys as _sys
         print(f"  ⚠ session save failed (non-fatal): {_save_err}", file=_sys.stderr)
 
-    modified_files = get_modified_files()
+    modified_files = get_modified_files(modified_baseline)
 
     from zall.cli.render import render_egress_summary
     render_egress_summary(
@@ -525,5 +646,28 @@ def run(
         stream=out_stream,
         usage=usage_state["usage"],
         modified_files=modified_files,
+        judge_ran=(judge_mode != "none"),
     )
+
+    # PARADIGM Step 1: 将本次任务写入持久经验流 (跨会话复利)。
+    # Popperian Gate: final_state==MET (过了 judge) → verified 技能; 否则仅历史。
+    # IPR-0: 记录失败不影响任务结果。
+    try:
+        from zall.core.experience_store import get_experience_store
+        from zall.core.goal import TerminationState as _TS
+        _verified = egress.final_state == _TS.MET
+        _outcome = (egress.final_claim or "").strip()
+        try:
+            for _m in reversed(list(getattr(loop, "messages", []) or [])):
+                if getattr(_m, "role", "") == "assistant" and getattr(_m, "content", ""):
+                    _outcome = str(_m.content).strip()[:1000]
+                    break
+        except Exception:
+            pass
+        get_experience_store().record(
+            user_task, _outcome, verified=_verified, score=1.0 if _verified else 0.5,
+        )
+    except Exception as _exp_err:
+        _log.debug("experience record skipped (non-fatal): %s", _exp_err)
+
     return egress

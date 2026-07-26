@@ -19,7 +19,7 @@ IPR constraints:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import ClassVar, Protocol, runtime_checkable
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -256,7 +256,7 @@ class GoalDowngrade(BaseModel):
       - approximate_flag 必 True (R6 不可 agent 单方触发)
     """
     
-    DEFAULT_MAX_DEPTH: int = 1  # 全局默认 D
+    DEFAULT_MAX_DEPTH: ClassVar[int] = 1  # 全局默认 D (不可构造时覆写)
     
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
     

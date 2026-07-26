@@ -46,14 +46,15 @@ class TestTextMode:
             assert len(out.strip()) > 0 or out, f"kind={kind} 产出空输出"
 
     def test_model_call_shows_content(self) -> None:
-        """Happy path: model_call 显示 content digest."""
+        """Happy path: model_call 显示 content (v1.5: 无 'step N - ' 前缀)."""
         buf = io.StringIO()
         r = CliRenderer(stream=buf)
         r(_ev("model_call", step=1, content="let me read the file", stop_reason="tool_use",
               tool_calls=[]))
         out = buf.getvalue()
         assert "let me read" in out
-        assert "step 1" in out
+        # v1.5: 模型输出独立呈现, 不再加凗余的 "step N - " 前缀
+        assert "step 1 -" not in out
 
     def test_tool_end_shows_success_icon(self) -> None:
         """Happy path: tool_call_end success=True 显示 ✓."""
@@ -93,6 +94,26 @@ class TestTextMode:
         r(_ev("judge_result", step=1, state="met", report="all good"))
         assert "●" in buf.getvalue()
         assert "met" in buf.getvalue()
+
+    def test_judge_no_judge_qna_mode(self) -> None:
+        """v1.1: judge_result with reason='no judge' → 显示 'no judge (Q&A mode)' 中性标记."""
+        buf = io.StringIO()
+        r = CliRenderer(stream=buf)
+        r(_ev("judge_result", step=1, state="undecidable", reason="no judge", report=""))
+        out = buf.getvalue()
+        assert "no judge" in out
+        assert "Q&A" in out
+        assert "○" not in out  # 不是 undecidable 圆标记
+
+    def test_judge_ran_undecidable(self) -> None:
+        """v1.1: judge_result without 'no judge' reason → 保持 'undecidable' 显示."""
+        buf = io.StringIO()
+        r = CliRenderer(stream=buf)
+        r(_ev("judge_result", step=1, state="undecidable", reason="main_aux_divergent", report=""))
+        out = buf.getvalue()
+        assert "undecidable" in out
+        assert "Q&A" not in out
+        assert "○" in out  # 保持 undecidable 圆标记
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -167,6 +188,30 @@ class TestEgressSummary:
         assert "✗" in out
         assert "something broke" in out
 
+    def test_summary_no_judge_qna_mode(self) -> None:
+        """v1.1: undecidable + judge_ran=False → 显示 'no judge (Q&A mode)' 中性标记."""
+        buf = io.StringIO()
+        render_egress_summary(
+            run_id="abc", final_state="undecidable", step_count=2, tool_calls=1,
+            model_calls=2, error=None, session_dir=None, stream=buf, judge_ran=False,
+        )
+        out = buf.getvalue()
+        assert "no judge" in out
+        assert "Q&A" in out
+        assert "○" not in out  # 不是 undecidable 圆标记
+
+    def test_summary_judge_ran_undecidable(self) -> None:
+        """v1.1: undecidable + judge_ran=True → 保持 'undecidable' 显示."""
+        buf = io.StringIO()
+        render_egress_summary(
+            run_id="abc", final_state="undecidable", step_count=2, tool_calls=1,
+            model_calls=2, error=None, session_dir=None, stream=buf, judge_ran=True,
+        )
+        out = buf.getvalue()
+        assert "undecidable" in out
+        assert "Q&A" not in out
+        assert "○" in out  # 保持 undecidable 圆标记
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # model_token streaming (P2)
@@ -186,13 +231,14 @@ class TestModelTokenStreaming:
         assert out.count("\n") == 0  # token 之间不换行
 
     def test_first_token_has_prefix(self) -> None:
-        """Happy path: 首个 token 加 step 前缀."""
+        """Happy path: 首个 token 直接输出 (v1.5: 无 step 前缀)."""
         buf = io.StringIO()
         r = CliRenderer(stream=buf)
         r(_ev("model_token", step=1, token="Hi", accumulated="Hi"))
         out = buf.getvalue()
-        assert "step 1" in out
+        # v1.5: token 独立呈现, 不再加 "step N - " 前缀
         assert "Hi" in out
+        assert "step 1 -" not in out
 
     def test_model_call_after_tokens_only_newline(self) -> None:
         """Happy path: streaming显示过 token 后, model_call 只补换行 (不重复显示 content)."""
@@ -205,14 +251,14 @@ class TestModelTokenStreaming:
         assert out.count("Hello") == 1
 
     def test_model_call_without_tokens_shows_summary(self) -> None:
-        """Counterexample: 无 token streaming时, model_call 显示 content digest (P1 行for)."""
+        """Counterexample: 无 token streaming时, model_call 显示 content (v1.5: 无前缀)."""
         buf = io.StringIO()
         r = CliRenderer(stream=buf)
         r(_ev("model_call", step=1, content="let me read", stop_reason="tool_use",
               tool_calls=[]))
         out = buf.getvalue()
         assert "let me read" in out
-        assert "step 1" in out
+        assert "step 1 -" not in out
 
     def test_json_mode_emits_token_lines(self) -> None:
         """Happy path: json pattern下 model_token 也output NDJSON 行."""

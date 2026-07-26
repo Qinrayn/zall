@@ -42,6 +42,11 @@ class LspDiagnosticsTool:
     @property
     def tool_id(self) -> str:
         return "lsp_diagnostics"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=True, tool_scope=ToolScope.Read)
+
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -190,6 +195,11 @@ class LspHoverTool:
         return "lsp_hover"
 
     @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=True, tool_scope=ToolScope.Read)
+
+    @property
     def schema(self) -> dict[str, Any]:
         return {
             "type": "function",
@@ -263,6 +273,11 @@ class LspGotoDefinitionTool:
     @property
     def tool_id(self) -> str:
         return "lsp_goto_definition"
+
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=True, tool_scope=ToolScope.Read)
 
     @property
     def schema(self) -> dict[str, Any]:

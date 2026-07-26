@@ -1,0 +1,87 @@
+============================================================
+ arXiv SUBMISSION CHECKLIST — zall Proof Gate paper
+ Author: Yuhan Zhang (张宇涵)
+ Email:  qinray@hotmail.com
+============================================================
+
+TITLE (paste into "Title" field):
+  Falsifiability-Gated Discovery: Machine-Checkable Epistemic Tiers for Self-Improving Agents
+
+AUTHORS (paste into "Authors" field):
+  Yuhan Zhang
+
+ABSTRACT:
+  -> paste contents of abstract_arxiv.txt (same folder)
+
+PRIMARY CATEGORY:
+  cs.AI  (Artificial Intelligence)
+
+CROSS-LIST CATEGORIES (add all):
+  cs.LO  (Logic in Computer Science)
+  math.NT (Number Theory)
+
+COMMENTS FIELD (paste):
+  12 pages; one-command reproducible artifact with 3 machine-checked demonstrations
+  and 41 counterexample-bearing invariant tests; code at https://github.com/[YOUR_REPO]
+
+REPORT-NO: (leave blank unless your institution assigns one)
+
+JOURNAL-REF: (leave blank — preprint)
+
+DOI: (leave blank — preprint)
+
+LICENSE (recommended):
+  CC BY 4.0  (allows reuse with attribution; standard for arXiv CS/math)
+
+============================================================
+ SUBMISSION STEPS
+============================================================
+
+1. Go to https://arxiv.org/user/ — register/login with qinray@hotmail.com
+   (Add any institutional email for auto-endorsement if available.)
+
+2. Click "Submit" -> "Start New Submission"
+
+3. Choose primary: cs.AI
+   Add cross-lists: cs.LO, math.NT
+
+4. Upload paper.md converted to PDF (or LaTeX).
+   NOTE: arXiv does NOT accept raw .md files.
+   Conversion options:
+     a) pandoc paper.md -o paper.pdf  (quick, decent formatting)
+     b) Use an md-to-LaTeX tool for better control
+     c) Paste into Overleaf -> export PDF
+
+5. Fill Title / Authors / Abstract / Comments as above.
+
+6. Choose license: CC BY 4.0
+
+7. Preview -> Submit.
+
+8. If endorsement is required (likely with hotmail):
+   arXiv will show you an endorsement code.
+   Send it to someone who has published in cs.AI / cs.LG recently.
+   They click a link to endorse you — one-time process.
+
+============================================================
+ FILES IN THIS FOLDER
+============================================================
+
+paper.md               — Full paper (markdown source)
+abstract_arxiv.txt     — Plain-text abstract for the submission form
+artifact_README.md     — Reproducible artifact README (one-command demo)
+submission_checklist.txt — This file (metadata + steps)
+
+============================================================
+ WHAT TO DO ABOUT PDF CONVERSION
+============================================================
+
+arXiv needs PDF or LaTeX, not .md. Fastest path:
+
+  pip install pandoc   (or download from pandoc.org)
+  pandoc paper.md -o paper.pdf --pdf-engine=xelatex -V geometry:margin=1in
+
+Or use Overleaf: paste the markdown content, format minimally, export.
+
+The paper is structured with ## headings, tables, and code blocks —
+pandoc handles these well out of the box.

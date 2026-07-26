@@ -173,13 +173,15 @@ class TestStreamPrefix:
         assert "Hello" in out  # 内容本体仍显示 (Happy path)
 
     def test_non_tty_first_token_unchanged(self) -> None:
-        """Counterexample: non- TTY 首 token 仍走 'step N · ' 形态 (保旧invariant)."""
+        """Counterexample: non-TTY 首 token 独立输出 (v1.5: 无 'step N' 前缀)."""
         buf = io.StringIO()
         r = CliRenderer(stream=buf, disable_spinner=True)
         r(_ev("model_token", step=1, token="Hello"))
         out = buf.getvalue()
-        assert "step 1" in out
-        assert "✦" not in out  # non- TTY 不加 ✦
+        # v1.5: 模型输出独立呈现, 不再加 "step N - " 前缀
+        assert "Hello" in out
+        assert "step 1" not in out
+        assert "✦" not in out  # non-TTY 不加 ✦
 
 
 # ──────────────────────────────────────────────────────────────────────────

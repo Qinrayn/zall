@@ -1,0 +1,50 @@
+{
+  "generated_at": 1784910741,
+  "python": "3.13.9",
+  "residual_bound": 20000,
+  "demonstrations": {
+    "erdos_straus": {
+      "ran": true,
+      "report": "experiments/erdos_straus/results/PROOF_REPORT.json",
+      "data_hash": "sha256:0402572adec7ef579bd1a29458d258454aab6f7b78701cde9bcd93a3407b14f6",
+      "timeline_anchor": "anchor_ack_1784910913067_1",
+      "chain_verified": true,
+      "summary": {
+        "proven_density": "10/12",
+        "residual_mod_12": [
+          1,
+          5
+        ],
+        "residual_counterexamples": 0
+      }
+    },
+    "diophantine": {
+      "ran": true,
+      "report": "experiments/diophantine/results/DIOPHANTINE_REPORT.json",
+      "data_hash": "sha256:6a04da09f345e168bc080cf4542a9aaf499ec2bec05b69f4e52435a7f4616c74",
+      "timeline_anchor": "anchor_ack_1784910913763_1",
+      "chain_verified": true,
+      "summary": {
+        "euler_family_tier": "proven",
+        "linear_triple_families": 1
+      }
+    },
+    "covering": {
+      "ran": true,
+      "report": "experiments/covering/results/COVERING_REPORT.json",
+      "data_hash": "sha256:ba03ce276f1a7e12772cf92b47753d5b8202d72ebeab43a7360094d1e648c0c5",
+      "timeline_anchor": "anchor_ack_1784910914331_1",
+      "chain_verified": true,
+      "summary": {
+        "erdos_1950_tier": "proven",
+        "near_miss_tier": "refuted",
+        "coverings_found": 24
+      }
+    }
+  },
+  "tests": null,
+  "all_demos_ran": true,
+  "all_chains_verified": true,
+  "tests_ok": true,
+  "reproducible": true
+}

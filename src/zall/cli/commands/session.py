@@ -1,7 +1,8 @@
 """zall.cli.commands.session — Session lifecycle commands.
 
 Extracted from _legacy.py (v0.2.1 refactor).
-Commands: /sessions, /resume, /eval, /replay, /cost, /compact, /undo, /retry
+Commands: /sessions, /resume, /replay, /compact, /undo, /retry
+  (/eval moved to cli/commands/eval.py for Phase 1 timeline-based evaluation)
 
 IPR constraints:
   IPR-3: only stdlib + rich, no model SDK
@@ -12,7 +13,6 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from zall._util.model_registry import get_price as _get_model_price
 from zall.cli.commands._common import (
     _CATEGORY_SESSION,
     slash_command,
@@ -20,7 +20,8 @@ from zall.cli.commands._common import (
 )
 from zall.cli.render import _shared_console
 from zall.cli.session import (
-    _list_sessions, _run_eval, _run_replay, _run_resume,
+    _get_cached_sessions,
+    _list_sessions, _run_replay, _run_resume,
     _search_sessions, _tag_session, _prune_sessions,
 )
 from zall.core.compactor import ModelCompactor
@@ -56,16 +57,42 @@ def cmd_sessions(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
 @slash_command("/resume", description="resume a session", category=_CATEGORY_SESSION)
 def cmd_resume(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
     if not arg:
-        out.write("  usage: /resume <session_id>\n")
-        return "handled"
+        return _resume_picker(out, state)
     result = _run_resume(out, arg, state)
     return result if result == "clear" else "handled"
 
 
-@slash_command("/eval", description="evaluate all sessions", category=_CATEGORY_SESSION)
-def cmd_eval(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
-    _run_eval(out, arg)
-    return "handled"
+def _resume_picker(out: Any, state: dict[str, Any] | None) -> str:
+    """/resume 无参: 会话选择器。交互 TTY → 数字选择器; 否则列表 + 提示手输 id。"""
+    entries = _get_cached_sessions()
+    if not entries:
+        out.write("  (no sessions to resume)\n")
+        return "handled"
+    input_fn = (state or {}).get("_input_fn")
+    interactive = hasattr(out, "isatty") and out.isatty() and input_fn is not None
+    if not interactive:
+        out.write("  recent sessions:\n")
+        for i, (d, data) in enumerate(entries[:9], 1):
+            saved = str(data.get("saved_at", ""))[:16]
+            out.write(f"    {i}. {d.name[:8]}  {data.get('final_state', '?')}  {saved}\n")
+        out.write("  usage: /resume <session_id>\n")
+        return "handled"
+    from zall.cli.select import select_prompt
+    choices: list[tuple[str, str, str]] = []
+    for d, data in entries[:9]:
+        saved = str(data.get("saved_at", ""))[:16]
+        steps = data.get("step_count", "?")
+        desc = f"{data.get('final_state', '?')} · {steps} steps · {saved}"
+        choices.append((d.name, d.name[:8], desc))
+    chosen = select_prompt(out, "resume session", choices, input_fn=input_fn)
+    if not chosen:
+        return "handled"
+    result = _run_resume(out, chosen, state)
+    return result if result == "clear" else "handled"
+
+
+# v0.5.x: /eval moved to cli/commands/eval.py (Phase 1 timeline-based evaluation).
+# _run_eval retained for backward compatibility (used by /sessions flow).
 
 
 @slash_command("/replay", description="replay a session", category=_CATEGORY_SESSION)
@@ -74,41 +101,6 @@ def cmd_replay(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
         out.write("  usage: /replay <session_id>\n")
     else:
         _run_replay(out, arg)
-    return "handled"
-
-
-@slash_command("/cost", description="show token usage", category=_CATEGORY_SESSION)
-def cmd_cost(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
-    u = (state or {}).get("usage", {})
-    prompt_tokens = u.get("prompt", 0) if isinstance(u, dict) else 0
-    completion_tokens = u.get("completion", 0) if isinstance(u, dict) else 0
-    total = prompt_tokens + completion_tokens
-    model = (state or {}).get("model") or ""
-    price_in, price_out = _get_model_price(model)
-    cost_in = prompt_tokens * price_in / 1_000_000
-    cost_out = completion_tokens * price_out / 1_000_000
-    cost = cost_in + cost_out
-
-    if hasattr(out, "isatty") and out.isatty():
-        c = _shared_console(out)
-        # v0.2.1: table layout for cost display
-        from rich.table import Table
-        tbl = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
-        tbl.add_column("", style="dim")
-        tbl.add_column("", justify="right", style="yellow")
-        tbl.add_column("", style="dim")
-        tbl.add_column("", justify="right", style="yellow")
-        tbl.add_row("model", model or "(default)", "", "")
-        tbl.add_row("input", f"{u['prompt']:>8,}", "tokens", f"× ${price_in:.2f}/M → ${cost_in:.4f}")
-        tbl.add_row("output", f"{u['completion']:>8,}", "tokens", f"× ${price_out:.2f}/M → ${cost_out:.4f}")
-        tbl.add_row("total", f"{total:>8,}", "tokens", f"[bold]${cost:.4f}[/]", style="bold")
-        c.print()
-        c.print("  [cyan]cost[/]")
-        c.print(tbl)
-    else:
-        out.write(f"  cost · model: {model or '(default)'}\n")
-        out.write(f"    input {u['prompt']:,} × ${price_in:.2f}/M + output {u['completion']:,} "
-                  f"× ${price_out:.2f}/M = ${cost:.4f} (total {total:,} tokens)\n")
     return "handled"
 
 
@@ -160,10 +152,7 @@ def cmd_compact(arg: str, out: Any, loop: Any | None = None, state: dict[str, An
     except Exception:
         pass
 
-    if hasattr(loop, "set_messages"):
-        loop.set_messages(list(result.compressed_messages))
-    else:
-        loop._messages = list(result.compressed_messages)
+    loop.set_messages(list(result.compressed_messages))
     if state is not None and "usage" not in state:
         state["usage"] = {"prompt": 0, "completion": 0}
 
@@ -278,10 +267,7 @@ def cmd_retry(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
     removed_count = len(msgs) - remove_from
     new_msgs = msgs[:remove_from]
 
-    if hasattr(loop, "set_messages"):
-        loop.set_messages(new_msgs)
-    else:
-        loop._messages = new_msgs
+    loop.set_messages(new_msgs)
     out.write(f"  \u2713 removed last response ({removed_count} message(s)), retrying...\n")
     return "handled"
 

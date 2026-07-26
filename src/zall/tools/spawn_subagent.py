@@ -222,11 +222,20 @@ class _SubagentCwdMeta:
     子 agent 与主进程同 cwd (实际路径由 shell 决定),
     不需要独立 cwd 语义。仅满足 Context.cwd_meta 的类型约束
     (runtime_checkable Protocol 按属性存在性判 isinstance)。
+
+    v0.5.1: 从父 context 继承 git_branch / git_remote,
+    使 git-protection 规则对子 agent 也生效。
     """
 
     cwd_path: str = ""
     git_branch: str | None = None
     git_remote: str | None = None
+
+    def __init__(self, parent_meta: Any = None) -> None:
+        if parent_meta is not None:
+            self.cwd_path = getattr(parent_meta, 'cwd_path', '') or ''
+            self.git_branch = getattr(parent_meta, 'git_branch', None)
+            self.git_remote = getattr(parent_meta, 'git_remote', None)
 
 
 class SpawnSubagentTool:
@@ -284,9 +293,35 @@ class SpawnSubagentTool:
         self._tools = tools
         self._rules = rules
 
+    @staticmethod
+    def _get_parent_cwd_meta() -> Any:
+        """获取当前工作目录的 git 信息 (子 agent 与主 agent 同 cwd)。"""
+        import os
+        import subprocess
+        class _Meta:
+            cwd_path = os.getcwd()
+            git_branch: str | None = None
+            git_remote: str | None = None
+        meta = _Meta()
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                meta.git_branch = result.stdout.strip()
+        except Exception:
+            pass
+        return meta
+
     @property
     def tool_id(self) -> str:
         return "spawn_subagent"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=False, tool_scope=ToolScope.Write)
+
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -432,7 +467,7 @@ class SpawnSubagentTool:
 
         sub_context = Context(
             user_raw=prompt.strip(),
-            cwd_meta=_SubagentCwdMeta(),
+            cwd_meta=_SubagentCwdMeta(parent_meta=self._get_parent_cwd_meta()),
         )
 
         sub_rules = _build_subagent_rules(self._rules, write_access=write_access)
@@ -508,6 +543,16 @@ class SpawnSubagentTool:
                         self._subagents[sub_id]["status"] = "failed"
                         self._subagents[sub_id]["result"] = ToolResult(
                             success=False, output="", error=str(e),
+                        )
+            except BaseException as e:
+                # v0.5.0 (C5 fix): 捕获 BaseException (SystemExit, KeyboardInterrupt等)
+                # 确保 Future 不会泄漏, 即使被异常终止也清理 subagent 状态
+                with self._subagents_lock:
+                    if sub_id in self._subagents:
+                        self._subagents[sub_id]["status"] = "cancelled"
+                        self._subagents[sub_id]["result"] = ToolResult(
+                            success=False, output="",
+                            error=f"subagent cancelled: {type(e).__name__}: {e}",
                         )
 
         future.add_done_callback(_on_done)
@@ -625,7 +670,7 @@ class SpawnSubagentTool:
             artifacts_list = []
             for sub_id, info in self._subagents.items():
                 status = info["status"]
-                status_icon = {"running": "⏳", "completed": "✅", "failed": "❌"}.get(status, "❓")
+                status_icon = {"running": "[~]", "completed": "[ok]", "failed": "[x]"}.get(status, "[?]")
                 lines.append(f"  {status_icon} [{sub_id}] {info['prompt'][:60]}")
                 lines.append(f"     Status: {status}")
 

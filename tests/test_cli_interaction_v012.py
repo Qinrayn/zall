@@ -21,6 +21,7 @@ from zall.cli.responder import CliUserResponder
 from zall.core.action import Action
 from zall.core.context import Context
 from zall.core.gate import UserResponse, UserResponseType
+from zall.core.goal import GoalTriple
 from zall.core.loop import AgentLoop
 from zall.core.loop_config import AgentConfig
 from zall.core.model import ModelResponse, StopReason, ToolCall, ToolChoice
@@ -133,8 +134,9 @@ class TestGoalConfirm:
         """Happy path: --yes pattern自动confirm Goal (不blocking)."""
         buf = io.StringIO()
         goal = _refined_goal("fix the bug")
-        ok = _confirm_goal(buf, goal, judge_mode="none", yes=True)
+        ok, final = _confirm_goal(buf, goal, judge_mode="none", yes=True)
         assert ok is True
+        assert final is goal
         assert "Goal" in buf.getvalue()
 
     def test_non_interactive_auto_confirms(self, monkeypatch) -> None:
@@ -142,33 +144,49 @@ class TestGoalConfirm:
         buf = io.StringIO()
         monkeypatch.setattr("sys.stdin", _FakeStdin())
         goal = _refined_goal("fix the bug")
-        ok = _confirm_goal(buf, goal, judge_mode="none", yes=False)
+        ok, final = _confirm_goal(buf, goal, judge_mode="none", yes=False)
         assert ok is True
+        assert final is goal
         assert "Goal" in buf.getvalue()
 
     def test_interactive_y_accepts(self, monkeypatch) -> None:
-        """Happy path: 交互式input y → confirm."""
+        """Happy path: 交互式input y → confirm (strict=True 启用交互 gate)."""
         buf = io.StringIO()
         monkeypatch.setattr("sys.stdin", _FakeStdinTTY())
         seq = iter(["y"])
         goal = _refined_goal("fix the bug")
-        ok = _confirm_goal(
-            buf, goal, judge_mode="none", yes=False,
+        ok, final = _confirm_goal(
+            buf, goal, judge_mode="none", yes=False, strict=True,
             input_fn=lambda _: next(seq),
         )
         assert ok is True
+        assert final is goal
 
-    def test_interactive_empty_rejects(self, monkeypatch) -> None:
-        """Counterexample: 交互式空input → reject (defaultsecurity)."""
+    def test_interactive_empty_confirms(self, monkeypatch) -> None:
+        """v0.6.0 UX: 交互式空input (Enter) → confirm 当前 goal."""
         buf = io.StringIO()
         monkeypatch.setattr("sys.stdin", _FakeStdinTTY())
         seq = iter([""])
         goal = _refined_goal("fix the bug")
-        ok = _confirm_goal(
-            buf, goal, judge_mode="none", yes=False,
+        ok, final = _confirm_goal(
+            buf, goal, judge_mode="none", yes=False, strict=True,
+            input_fn=lambda _: next(seq),
+        )
+        assert ok is True
+        assert final is goal
+
+    def test_interactive_n_rejects(self, monkeypatch) -> None:
+        """Counterexample: 交互式input n → reject (strict=True 启用交互 gate)."""
+        buf = io.StringIO()
+        monkeypatch.setattr("sys.stdin", _FakeStdinTTY())
+        seq = iter(["n"])
+        goal = _refined_goal("fix the bug")
+        ok, final = _confirm_goal(
+            buf, goal, judge_mode="none", yes=False, strict=True,
             input_fn=lambda _: next(seq),
         )
         assert ok is False
+        assert final is None
 
 
 # ──────────────────────────────────────────────────────────────────────────

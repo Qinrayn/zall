@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from zall.cli.commands import cmd_cost, cmd_init
-from zall.cli.commands._common import _handle_bare_slash, _print_about, _print_help, handle_slash, get_command_meta
+from zall.cli.commands import cmd_init
+from zall.cli.commands._common import _handle_bare_slash, _print_about, _print_advanced_help, _print_help, handle_slash, get_command_meta
 from zall.cli.prompt import make_prompt_fn
 
 
@@ -39,14 +39,21 @@ def test_version_output() -> None:
 
 
 def test_help_contains_commands() -> None:
-    """_print_help output含所有关键command."""
+    """_print_help + _print_advanced_help 合并输出含所有关键 command."""
     buf = io.StringIO()
     _print_help(buf)
-    output = buf.getvalue()
-    # 关键commandmust出现
+    _print_advanced_help(buf)
+    combined = buf.getvalue()
+    # 关键 command 必须出现在 /help 或 /advanced 两者合并输出中
     for cmd in ("/help", "/about", "/sessions", "/model", "/undo",
                 "/git", "/diff", "/doctor", "/exit", "/compact"):
-        assert cmd in output, f"help missing {cmd}"
+        assert cmd in combined, f"help missing {cmd} (not in /help or /advanced)"
+
+    # /help 自身必须包含 "/advanced" 字样，保证可发现性
+    buf2 = io.StringIO()
+    _print_help(buf2)
+    basic_output = buf2.getvalue()
+    assert "/advanced" in basic_output, "basic help must mention /advanced"
 
 
 def test_about_contains_philosophy() -> None:
@@ -109,16 +116,6 @@ def test_handle_slash_unknown() -> None:
     assert "unknown" in output or "try /help" in output
 
 
-def test_handle_slash_cost() -> None:
-    """/cost 在有 usage 时does not raiseexception."""
-    buf = io.StringIO()
-    state = {"usage": {"prompt": 100, "completion": 50}}
-    # _cmd_cost directly从 app 模块调
-    cmd_cost("", buf, None, state)
-    output = buf.getvalue()
-    assert "100" in output or "cost" in output
-
-
 def test_handle_slash_not_command() -> None:
     """不以 / 开头的字符串 → "none"."""
     buf = io.StringIO()
@@ -165,6 +162,25 @@ def test_make_prompt_fn_not_crash() -> None:
     fn = make_prompt_fn(commands=["/help", "/exit"])
     # 至少functioncreate成功
     assert callable(fn)
+    # v2.x: 传 state 也不崩 (bottom_toolbar 路径)
+    assert callable(make_prompt_fn(commands=["/help"], state={"model": "m"}))
+
+
+def test_bottom_toolbar_text() -> None:
+    """v2.x: 底部状态行 (学 Pi/Claude) — model · 上下文占用% · 键位提示。"""
+    from zall.cli.prompt import build_toolbar_text
+    # 反例: 无 state → None (不显 toolbar)
+    assert build_toolbar_text(None) is None
+    assert build_toolbar_text({}) is None
+    # 无 ctx_tokens: 只显 model + 提示, 不显 ctx
+    t0 = build_toolbar_text({"model": "agnes-2.0-flash"})
+    assert "agnes-2.0-flash" in t0 and "ctx" not in t0
+    # 有 ctx_tokens: 显 ctx N% / Wk (占用百分比)
+    t1 = build_toolbar_text({"model": "agnes-2.0-flash", "ctx_tokens": 4096})
+    assert "ctx" in t1 and "%" in t1 and "k" in t1
+    # plan 模式可见
+    t2 = build_toolbar_text({"model": "agnes-2.0-flash", "ctx_tokens": 4096, "plan_mode": True})
+    assert "plan" in t2
 
 
 def test_command_meta_contains_undo_git() -> None:

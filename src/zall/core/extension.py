@@ -24,8 +24,11 @@ IPR constraints:
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Callable, Protocol, runtime_checkable
+
+from zall._util.logging import get_zall_logger as _get_zall_logger
+
+_log = _get_zall_logger(__name__)
 
 
 # Hook type: each hook receives a dict of keyword arguments
@@ -112,6 +115,14 @@ class ExtensionRegistry:
         """Remove all extensions."""
         self._extensions.clear()
 
+    def iter_extensions(self) -> list[Extension]:
+        """Return a snapshot list of all registered extensions.
+
+        v0.5.0 (B4 fix): Public API for iterating extensions.
+        Replaces direct access to private _extensions dict.
+        """
+        return list(self._extensions.values())
+
     # ── Legacy hook firing (kwargs-based) ──
 
     def fire(self, hook: str, **kwargs: Any) -> None:
@@ -123,7 +134,6 @@ class ExtensionRegistry:
         For typed extensions, also attempts to call the corresponding typed
         method if one exists (e.g., hook="on_after_tool" → on_tool_result).
         """
-        _logger = logging.getLogger(__name__)
         for ext in list(self._extensions.values()):
             # Legacy path: hooks dict
             handler = getattr(ext, "hooks", None)
@@ -135,7 +145,7 @@ class ExtensionRegistry:
                     except (KeyboardInterrupt, SystemExit):
                         raise
                     except Exception as _exc:
-                        _logger.warning(
+                        _log.warning(
                             "extension '%s' legacy hook '%s' failed: %s",
                             ext.name, hook, _exc,
                         )
@@ -157,7 +167,6 @@ class ExtensionRegistry:
         """
         from zall.core.lifecycle import SuggestionAccumulator, SelfSuggestion
 
-        _logger = logging.getLogger(__name__)
         accumulator = SuggestionAccumulator()
 
         for ext in list(self._extensions.values()):
@@ -175,14 +184,14 @@ class ExtensionRegistry:
                         if isinstance(item, SelfSuggestion):
                             accumulator.add(item)
                         else:
-                            _logger.warning(
+                            _log.warning(
                                 "extension '%s' returned non-SelfSuggestion from %s: %r",
                                 ext.name, hook, item,
                             )
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as _exc:
-                _logger.warning(
+                _log.warning(
                     "extension '%s' typed hook '%s' failed: %s",
                     ext.name, hook, _exc,
                 )

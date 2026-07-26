@@ -69,7 +69,6 @@ def _top_module_chain(node: ast.ImportFrom | ast.Import) -> list[tuple[str, ...]
 def _is_forbidden(chain: tuple[str, ...]) -> bool:
     if not chain:
         return False
-    top = (chain[0],)
     if chain[0] in FORBIDDEN_TOP_MODULES:
         return True
     # 子包路径检查 (前缀匹配)

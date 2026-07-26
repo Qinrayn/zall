@@ -183,7 +183,7 @@ def _seed(loop: AgentLoop, n: int = 6) -> None:
     for i in range(n):
         role = "user" if i % 2 == 0 else "assistant"
         msgs.append(Message(role=role, content=f"m{i} " * 30))
-    loop._messages = msgs
+    loop.set_messages(msgs)
 
 
 # ──────────────────────────────────────────────────────────────────────────

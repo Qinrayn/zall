@@ -125,6 +125,11 @@ class ReadImageTool:
     @property
     def tool_id(self) -> str:
         return "read_image"
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=True, tool_scope=ToolScope.Read)
+
 
     @property
     def schema(self) -> dict[str, Any]:

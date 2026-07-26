@@ -10,10 +10,12 @@ IPR constraints:
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from rich.panel import Panel
@@ -23,11 +25,11 @@ from rich.table import Table
 from zall.cli.commands._common import (
     _CATEGORY_NAV, _CATEGORY_TOOLS, _CATEGORY_CONTEXT, _CATEGORY_SESSION,
     slash_command,
-    _print_about, _print_help,
+    _print_about, _print_help, _print_advanced_help,
     _auto_step_loop, _cmd_init_simple,
 )
 from zall.cli.render import _shared_console
-from zall.core.verifiability import EventType
+from zall.core.verifiability import EventType, RunRecorder
 
 # Extracted from _legacy.py lines 335-379
 @slash_command("/help", aliases=("/h",), description="show this help", category=_CATEGORY_NAV)
@@ -36,6 +38,13 @@ def cmd_help(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] 
         _print_help(out, cmd_name=arg)
     else:
         _print_help(out)
+    return "handled"
+
+
+@slash_command("/advanced", description="show all advanced commands", category=_CATEGORY_NAV)
+def cmd_advanced(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """v0.6.0: 显示所有高级命令 (隐藏于 /help 之外)。"""
+    _print_advanced_help(out)
     return "handled"
 
 
@@ -190,7 +199,7 @@ def cmd_revert(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
             if git_protect.checkpoint_count > 0:
                 s = subprocess.run(
                     ["git", "status", "--short"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
                 )
                 if s.stdout.strip():
                     out.write("  will revert:\n")
@@ -275,11 +284,72 @@ def cmd_fix(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] |
     return "handled"
 
 
+def _do_second_agent_review(
+    out: Any, loop: Any, diff_text: str, diff_files: list[str],
+    added_lines: int, deleted_lines: int,
+) -> None:
+    """v0.5.1: 第二 agent 独立评审。
+
+    使用独立上下文和模型调用, 不污染主对话。
+    评审结果直接输出到终端, 不注入到 loop 消息历史。
+    """
+    if loop is None:
+        return
+    adapter = getattr(loop, "_model", None)
+    if adapter is None:
+        out.write("  \u00b7 second-agent review unavailable (no model adapter)\n")
+        out.flush()
+        return
+
+    from zall.core.model import Message
+
+    # 构建评审上下文
+    diff_preview = diff_text[:5000] if diff_text else "(no diff)"
+    review_messages = [
+        Message(role="system", content=(
+            "You are a senior code reviewer. Review the following code changes "
+            "and provide a structured analysis. Focus on:\n"
+            "1. Bugs & correctness issues\n"
+            "2. Security vulnerabilities\n"
+            "3. Code quality & style problems\n"
+            "4. Missing tests or edge cases\n"
+            "5. Suggestions for improvement\n\n"
+            "Be concise. Use bullet points. Rate the overall quality: "
+            "PASS / MINOR_ISSUES / MAJOR_ISSUES / CRITICAL."
+        )),
+        Message(role="user", content=(
+            f"Code Review Request\n"
+            f"===================\n"
+            f"Files changed: {len(diff_files)}\n"
+            f"Changes: +{added_lines}/-{deleted_lines} lines\n\n"
+            f"Files:\n" + "\n".join(f"  - {f}" for f in diff_files[:30]) + "\n\n"
+            f"Diff:\n```diff\n{diff_preview}\n```"
+        )),
+    ]
+
+    try:
+        out.write("  \u00b7 second-agent review in progress...\n")
+        out.flush()
+        resp = adapter.complete(review_messages, tools=[])
+        if resp and resp.content:
+            out.write(f"\n  {'=' * 40}\n")
+            out.write("  \u2192 Second-Agent Review\n")
+            out.write(f"  {'=' * 40}\n")
+            for line in resp.content.split("\n"):
+                out.write(f"  {line}\n")
+            out.write(f"  {'=' * 40}\n\n")
+        else:
+            out.write("  \u00b7 second-agent review returned empty response\n")
+    except Exception as e:
+        out.write(f"  \u00b7 second-agent review failed: {e}\n")
+    out.flush()
+
+
 @slash_command("/review", description="review uncommitted code changes", category=_CATEGORY_CONTEXT)
 def cmd_review(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
     try:
         r = subprocess.run(["git", "rev-parse", "--git-dir"],
-                          capture_output=True, text=True, timeout=5)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         if r.returncode != 0:
             out.write("  (not a git repository)\n")
             return "handled"
@@ -290,18 +360,18 @@ def cmd_review(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
     try:
         staged = subprocess.run(
             ["git", "diff", "--cached", "--stat"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
         )
         staged_names = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
         )
         staged_files = set(f.strip() for f in staged_names.stdout.split("\n") if f.strip())
         files_cmd = ["git", "diff", "--name-only"]
         if arg:
             files_cmd = ["git", "diff", "--name-only", "--", arg]
         files_result = subprocess.run(
-            files_cmd, capture_output=True, text=True, timeout=10,
+            files_cmd, capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
         )
         diff_files = [f.strip() for f in files_result.stdout.split("\n") if f.strip()]
         if staged_files:
@@ -331,13 +401,13 @@ def cmd_review(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
         if arg:
             diff_cmd = ["git", "diff", "HEAD", "--", arg]
         diff_result = subprocess.run(
-            diff_cmd, capture_output=True, text=True, timeout=10,
+            diff_cmd, capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         out.write(f"  \u2717 git diff failed: {e}\n")
         return "handled"
 
-    diff_text = diff_result.stdout
+    diff_text = diff_result.stdout or ""
 
     if hasattr(out, "isatty") and out.isatty():
         c = _shared_console(out)
@@ -387,6 +457,9 @@ def cmd_review(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
         )
         loop.add_user_message(f"/review: {review_prompt}")
         out.write("  \u2192 review prompt injected for deep analysis\n")
+
+        # v0.5.1: 第二 agent 独立评审 (使用独立上下文, 不污染主对话)
+        _do_second_agent_review(out, loop, diff_text, diff_files, added_lines, deleted_lines)
     return "handled"
 
 
@@ -455,6 +528,238 @@ def cmd_update(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
     success = perform_update(out)
     if success:
         out.write("  restart zall to use the new version\n")
+    return "handled"
+
+
+@slash_command("/forget-permissions", aliases=("/forget-allow",),
+              description="clear all persistent always-allow permissions",
+              category=_CATEGORY_NAV)
+def cmd_forget_permissions(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """E4: Clear all persistent always-allow permissions.
+
+    Removes all tool_ids from the always_allow.json file and clears
+    the in-memory allow sets. After this command, all greylist tools
+    will prompt for confirmation again.
+    """
+    from zall.cli.responder import CliUserResponder
+    # The responder is accessible via the loop's user_responder attribute
+    responder = getattr(loop, "_user_responder", None) if loop else None
+    if isinstance(responder, CliUserResponder):
+        responder.clear_always_allow()
+        out.write("  \u2713 all persistent permissions cleared\n")
+    else:
+        # Fallback: clear the file directly
+        from zall.cli.responder import _always_allow_path
+        try:
+            path = _always_allow_path()
+            if path.exists():
+                path.unlink()
+            out.write("  \u2713 all persistent permissions cleared\n")
+        except Exception as e:
+            out.write(f"  \u2717 failed to clear permissions: {e}\n")
+    return "handled"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# §12.1 Verifiability: /verify 命令 (第三方独立复核)
+# ──────────────────────────────────────────────────────────────────────
+
+
+# M2 fix: 移除重复的 /verify 注册 (与下方同名 cmd_verify 冲突, 后者静默覆盖前者)。
+# 本旧实现已停用 @slash_command 注册并改为私有名; 下方 cmd_verify 为唯一 /verify 实现。
+def _cmd_verify_legacy_unused(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """[DEPRECATED · 未注册] 旧版 /verify, 由下方 cmd_verify 取代 (§12.1 Verifiability).
+
+    用法:
+      /verify            验证当前活跃 loop 的 recorder
+      /verify <run_id>   验证指定 session 的 timeline (从磁盘加载)
+
+    输出: valid/broken + 事件数 + tail hash + anchor 状态。
+    这是 zall 对外宣称的杀手场景: 第三方独立复核 run 完整性。
+    """
+    parts = arg.split() if arg else []
+    run_id = parts[0] if parts else None
+
+    recorder = None
+    # 优先用当前活跃 loop 的 recorder (实时验证)
+    if loop is not None and hasattr(loop, "recorder"):
+        recorder = loop.recorder
+
+    # 若指定了 run_id 且与当前 loop 不同, 从磁盘加载
+    if run_id and (recorder is None or getattr(recorder, "run_id", None) != run_id):
+        try:
+            from zall.cli.session import _load_timeline_for_run
+            recorder = _load_timeline_for_run(run_id)
+        except (ImportError, AttributeError, FileNotFoundError):
+            pass
+
+    if recorder is None:
+        out.write("  no active run and no run_id specified\n")
+        out.write("  usage: /verify [run_id]\n")
+        return "handled"
+
+    try:
+        is_valid = recorder.verify_chain()
+    except Exception as e:
+        out.write(f"  \u2717 verify_chain error: {e}\n")
+        return "handled"
+
+    events = getattr(recorder, "events", ()) or ()
+    tail_hash = getattr(recorder, "tail_hash", "unknown")
+    rid = getattr(recorder, "run_id", "unknown")
+    anchor_id = getattr(recorder, "anchor_id", None)
+
+    if is_valid:
+        out.write("  \u2713 timeline chain VALID\n")
+    else:
+        out.write("  \u2715 timeline chain BROKEN (tampering detected)\n")
+    out.write(f"    run_id:    {rid}\n")
+    out.write(f"    events:    {len(events)}\n")
+    out.write(f"    tail_hash: {tail_hash[:16]}...\n")
+    if anchor_id:
+        out.write(f"    anchored:  yes ({anchor_id[:16]}...)\n")
+    else:
+        out.write("    anchored:  no\n")
+    return "handled"
+
+
+def _load_timeline_events(session_dir: Path) -> list[dict] | None:
+    """从 session 目录加载 timeline.jsonl, 返回 event dict 列表。
+
+    返回 None 表示 timeline 不存在或无任何可读事件。
+    G12: 版本头行自动过滤; 坏行 skip 不再一坏全弃。
+    """
+    from zall._util.jsonl import read_jsonl
+    events = read_jsonl(session_dir / "timeline.jsonl")
+    return events if events else None
+
+
+def _reconstruct_recorder_from_events(run_id: str, events: list[dict]) -> RunRecorder:
+    """从 event dict 列表重建 RunRecorder 并验证链完整性。
+
+    IPR-3: stdlib only. 使用 TimelineEvent + RunRecorder.append 重建,
+    自动计算 prev_hash 链式关系。
+    """
+    recorder = RunRecorder(run_id)
+    for ev in events:
+        recorder.append(
+            event_id=ev["event_id"],
+            ts=ev["ts"],
+            event_type=EventType(ev["event_type"]),
+            payload=ev.get("payload", {}),
+        )
+    return recorder
+
+
+def _find_latest_session() -> Path | None:
+    """返回最近一个 session 的目录路径 (±1s 精度)。"""
+    from zall.cli.session import _get_cached_sessions
+    sessions = _get_cached_sessions()
+    if not sessions:
+        return None
+    return sessions[0][0]  # 第一个是最近保存的
+
+
+def _get_anchor_status(session_dir: Path) -> str:
+    """检查 session 目录下是否有锚点 ack 事件。
+
+    读取 timeline.jsonl 最后一条 ANCHOR_ACK 事件, 返回状态描述。
+    """
+    tl_path = session_dir / "timeline.jsonl"
+    if not tl_path.exists():
+        return "no timeline"
+    try:
+        last_anchor = None
+        for line in tl_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+                if ev.get("event_type") == "anchor_ack":
+                    last_anchor = ev
+            except json.JSONDecodeError:
+                continue
+        if last_anchor:
+            return (
+                f"anchored (anchor_id={last_anchor['payload'].get('anchor_id', '?')[:8]}..., "
+                f"sig={last_anchor['payload'].get('sig', '?')[:16]}...)"
+            )
+        return "not anchored"
+    except OSError:
+        return "unreadable"
+
+
+@slash_command("/verify", description="verify timeline chain integrity of a run",
+              category=_CATEGORY_TOOLS)
+def cmd_verify(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """验证指定 run 的 timeline 链完整性 (§12.1 Verifiability, 第三方独立复核)。
+
+    Usage:
+        /verify [run_id]     — 验证指定 run 的 timeline 链完整性
+        /verify              — 验证最近一个 session 的 run
+
+    Output:
+        - chain: valid | broken
+        - event count
+        - tail hash (前16位)
+        - anchor status (若已锚点)
+    """
+    if loop is not None and not arg:
+        # 当前 loop 中有活跃 recorder, 直接验证
+        recorder = loop.recorder
+        if recorder.events:
+            valid = recorder.verify_chain()
+            out.write(f"  verify {recorder.run_id[:16]}...\n")
+            out.write(f"    chain:     {'valid' if valid else 'BROKEN'}\n")
+            out.write(f"    events:    {len(recorder.events)}\n")
+            out.write(f"    tail_hash: {recorder.tail_hash[:16]}...\n")
+            out.write(f"    anchored:  {'yes' if any(e.event_type == EventType.ANCHOR_ACK for e in recorder.events) else 'no'}\n")
+        else:
+            out.write("  (no timeline events recorded in current run)\n")
+        return "handled"
+
+    # 从持久化 session 加载
+    from zall.cli.session import _get_sessions_dir
+
+    session_dir: Path | None = None
+    run_id = arg.strip() if arg else ""
+
+    if run_id:
+        # 按 run_id 前缀查找
+        sd = _get_sessions_dir()
+        if sd.exists():
+            for d in sd.iterdir():
+                if d.name.startswith(run_id):
+                    session_dir = d
+                    break
+        if session_dir is None:
+            out.write(f"  session not found: {run_id}\n")
+            return "handled"
+    else:
+        # 不传 run_id => 用最近一个 session
+        latest = _find_latest_session()
+        if latest is None:
+            out.write("  (no sessions found)\n")
+            return "handled"
+        session_dir = latest
+        run_id = session_dir.name
+
+    events = _load_timeline_events(session_dir)
+    if events is None:
+        out.write(f"  session {run_id[:16]}... has no timeline.jsonl\n")
+        return "handled"
+
+    recorder = _reconstruct_recorder_from_events(run_id, events)
+    valid = recorder.verify_chain()
+    tail_hash = recorder.tail_hash
+    anchor_status = _get_anchor_status(session_dir)
+
+    out.write(f"  verify {run_id[:16]}...\n")
+    out.write(f"    chain:     {'valid' if valid else 'BROKEN'}\n")
+    out.write(f"    events:    {len(events)}\n")
+    out.write(f"    tail_hash: {tail_hash[:16]}...\n")
+    out.write(f"    anchor:    {anchor_status}\n")
     return "handled"
 
 

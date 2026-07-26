@@ -131,21 +131,31 @@ class TestRealApiStreaming:
 
     @_REQUIRES_KEY
     def test_streaming_accumulates_correctly(self, adapter: OpenAICompatAdapter) -> None:
-        """streaming累积结果与blocking结果一致."""
+        """streaming累积结果与blocking结果一致.
+
+        端点抖动容错: 弱端点 (reseller flash) 在全量并发负载下偶发返回
+        空补全 (非 zall bug, 单跑稳定复现通过)。重试至多 3 次,
+        **持续为空才失败** — 保留真 bug 信号, 去掉负载噪声。
+        """
         messages = [
             Message(role="user", content="Say 'hello world' in lowercase."),
         ]
-        # streaming
+        # streaming (空补全重试: 最多 3 次)
         stream_content = ""
         final_resp = None
-        for token, accumulated in adapter.complete_stream(messages, tools=[]):
-            if token:
-                stream_content += token
-            final_resp = accumulated
+        for attempt in range(3):
+            stream_content = ""
+            for token, accumulated in adapter.complete_stream(messages, tools=[]):
+                if token:
+                    stream_content += token
+                final_resp = accumulated
+            if stream_content.strip():
+                break
+            print(f"  [flaky-endpoint] empty stream on attempt {attempt + 1}, retrying")
         # blocking
         blocking_resp = adapter.complete(messages, tools=[])
         # 比较: streaming累积content应包含blockingcontent (或等价)
-        assert stream_content.strip(), "stream content should not be empty"
+        assert stream_content.strip(), "stream content empty on 3 consecutive attempts"
         assert blocking_resp.content.strip(), "blocking response should not be empty"
         print(f"  stream: {stream_content[:80]}")
         print(f"  blocking: {blocking_resp.content[:80]}")

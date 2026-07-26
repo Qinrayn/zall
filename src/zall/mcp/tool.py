@@ -92,6 +92,11 @@ class MCPTool:
     @property
     def tool_id(self) -> str:
         return self._tool_id
+    @property
+    def capabilities(self):
+        from zall.core.tool import ToolCapabilities, ToolScope
+        return ToolCapabilities(is_read_only=False, tool_scope=ToolScope.Write)
+
 
     @functools.cached_property
     def schema(self) -> dict[str, Any]:

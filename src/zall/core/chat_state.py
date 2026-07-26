@@ -36,6 +36,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Protocol
 
+# C5 (perf): module-level import of Message (was lazily imported inside 7 hot-path
+# methods, each doing a sys.modules dict lookup on every message append/query).
+# No circular import: model.py does not import chat_state.
+from zall.core.model import Message
+
 
 # ═══════════════════════════════════════════════════════════════════
 # §1  Event System
@@ -308,11 +313,6 @@ class ChatState:
         """当前消息列表 (只读快照)。"""
         return list(self._messages)
 
-    @messages.setter
-    def messages(self, value: list[Any]) -> None:
-        """替换整个消息列表 (供 AgentLoop 兼容)。"""
-        self._messages = list(value)
-
     @property
     def message_count(self) -> int:
         return len(self._messages)
@@ -333,7 +333,6 @@ class ChatState:
         last = self.get_last_message()
         if last is None:
             return False
-        from zall.core.model import Message
         if isinstance(last, Message) and last.role == "assistant" and last.tool_calls:
             return True
         return False
@@ -341,14 +340,12 @@ class ChatState:
     def get_last_assistant_text(self) -> str:
         """获取最后一条 assistant 消息的文本 (避免完整克隆)。"""
         for msg in reversed(self._messages):
-            from zall.core.model import Message
             if isinstance(msg, Message) and msg.role == "assistant":
                 return msg.content
         return ""
 
     def push_user_message(self, content: str) -> None:
         """添加用户消息。"""
-        from zall.core.model import Message
         self._messages.append(Message.user(content))
         self._record_event(
             StateEventKind.USER_MESSAGE,
@@ -361,7 +358,6 @@ class ChatState:
         tool_calls: tuple[Any, ...] = (),
     ) -> None:
         """添加 assistant 回复。"""
-        from zall.core.model import Message
         self._messages.append(
             Message.assistant(content=content, tool_calls=tool_calls)
         )
@@ -378,7 +374,6 @@ class ChatState:
         tool_id: str = "",
     ) -> None:
         """添加工具结果回灌。"""
-        from zall.core.model import Message
         self._messages.append(
             Message.tool_result(
                 tool_call_id=tool_call_id,
@@ -395,7 +390,6 @@ class ChatState:
 
     def push_system_message(self, content: str) -> None:
         """添加系统消息 (用于 nudge, 注入等)。"""
-        from zall.core.model import Message
         self._messages.append(Message(role="system", content=content))
         self._record_event(
             StateEventKind.SYSTEM_INJECTION,
@@ -403,9 +397,16 @@ class ChatState:
         )
 
     def replace_messages(self, new_messages: list[Any]) -> None:
-        """替换消息列表 (用于压缩/回退)。"""
+        """替换消息列表 (用于压缩/回退)。
+
+        若 turn capture 正在进行, 重置 offset 为新消息尾部
+        (压缩后旧 offset 失效, 后续 capture 从尾部开始新消息)。
+        """
         old_count = len(self._messages)
         self._messages = list(new_messages)
+        # 压缩/回退后 capture offset 失效 — 重置为新消息尾部
+        if self._capture_offset is not None:
+            self._capture_offset = len(self._messages)
         self._record_event(
             StateEventKind.REPLACE,
             old_count=old_count,
@@ -535,7 +536,6 @@ class ChatState:
     def estimate_tokens(self) -> int:
         """估算当前消息的 token 数量 (字符数/4 的粗略估计)。"""
         total = 0
-        from zall.core.model import Message
         for msg in self._messages:
             if isinstance(msg, Message):
                 total += len(msg.content) + 50  # 50 tokens overhead per message

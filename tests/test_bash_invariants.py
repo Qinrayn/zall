@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from zall.core.tool import Tool, ToolResult
-from zall.tools.bash import BashTool
+from zall.tools.bash import BashTool, _is_clixml, _decode_clixml, _decode_clixml_escapes
 
 
 @pytest.fixture
@@ -160,3 +160,146 @@ class TestBashCounterExamples:
         result = tool.execute({"command": "echo 'test line' && python -c \"print('x' * 100000)\""})
         # 不一定真truncate, 取决于output大小, 但 artifacts 应含 truncated 字段
         assert "truncated" in result.artifacts
+
+
+class TestBashClixml:
+    """CLIXML detection and decoding tests (B8 fix).
+
+    Windows PowerShell outputs errors in CLIXML format (#< CLIXML ...).
+    These tests verify that the bash tool correctly decodes CLIXML to
+    plain text, so the agent can read error messages.
+
+    On non-Windows platforms, these tests are skipped since CLIXML
+    does not occur on Unix.
+    """
+
+    @pytest.fixture
+    def tool(self) -> BashTool:
+        return BashTool()
+
+    def test_is_clixml_detects_header(self) -> None:
+        """CLIXML header is correctly detected."""
+        assert _is_clixml("#< CLIXML\n<Objs></Objs>")
+        assert not _is_clixml("plain text")
+        assert not _is_clixml("")
+
+    def test_decode_clixml_simple(self) -> None:
+        """Simple CLIXML with error message is decoded."""
+        clixml = (
+            '#< CLIXML\n'
+            '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+            '<S S="Error">command not found</S>'
+            '</Objs>'
+        )
+        decoded = _decode_clixml(clixml)
+        assert "command not found" in decoded
+        assert "#< CLIXML" not in decoded
+
+    def test_decode_clixml_multi_line(self) -> None:
+        """Multi-line CLIXML error is decoded correctly."""
+        clixml = (
+            '#< CLIXML\n'
+            '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+            '<S S="Error">line 1_x000D__x000A_</S>'
+            '<S S="Error">line 2_x000D__x000A_</S>'
+            '<S S="Error">    + CategoryInfo : ObjectNotFound</S>'
+            '</Objs>'
+        )
+        decoded = _decode_clixml(clixml)
+        assert "line 1" in decoded
+        assert "line 2" in decoded
+        assert "CategoryInfo" in decoded
+        # _xHHHH_ escapes should be decoded
+        assert "\r\n" in decoded
+
+    def test_decode_clixml_escapes_hex(self) -> None:
+        """_xHHHH_ escape sequences are decoded to characters."""
+        assert _decode_clixml_escapes("_x000D_") == "\r"
+        assert _decode_clixml_escapes("_x000A_") == "\n"
+        assert _decode_clixml_escapes("_x0020_") == " "
+        assert _decode_clixml_escapes("_x005F_") == "_"
+        assert _decode_clixml_escapes("plain text") == "plain text"
+
+    def test_decode_clixml_plain_text_passthrough(self) -> None:
+        """Non-CLIXML text passes through unchanged."""
+        text = "plain text output"
+        assert _decode_clixml(text) == text
+
+    def test_execute_echo_with_and_chain(self, tool: BashTool) -> None:
+        """B8: echo && exit 0 should work without CLIXML.
+
+        Root cause: _split_operator_aware had a bug where it compared
+        command text against the raw regex pattern string instead of the
+        actual operator. This caused && translation to fail on PowerShell 5.1,
+        resulting in CLIXML error output.
+        """
+        result = tool.execute({"command": "echo hello && exit 0"})
+        assert result.success, (
+            f"&& chain failed: {result.output[:300]}"
+        )
+        assert "hello" in result.output
+        # Output should NOT contain CLIXML
+        assert "#< CLIXML" not in result.output, (
+            f"CLIXML detected in output: {result.output[:300]}"
+        )
+
+    def test_execute_or_chain(self, tool: BashTool) -> None:
+        """B8: false || echo ok should work (|| translation)."""
+        result = tool.execute({"command": "false || echo ok"})
+        assert result.success
+        assert "ok" in result.output
+        assert "#< CLIXML" not in result.output
+
+    def test_execute_mixed_chain(self, tool: BashTool) -> None:
+        """B8: mixed && || chain should work."""
+        result = tool.execute({"command": "echo a && echo b || echo c"})
+        assert result.success
+        assert "a" in result.output
+        assert "b" in result.output
+        assert "#< CLIXML" not in result.output
+
+    def test_execute_nonexistent_no_clixml(self, tool: BashTool) -> None:
+        """B8: nonexistent command error should not contain raw CLIXML."""
+        result = tool.execute({"command": "nonexistent_cmd_xyz_abc_123"})
+        assert not result.success
+        # Raw CLIXML should not appear in the output
+        assert "#< CLIXML" not in result.output, (
+            f"Raw CLIXML in output: {result.output[:300]}"
+        )
+
+# ── P2 fix: CLIXML 解码 (Windows PowerShell 错误输出) ──
+
+
+class TestClixmlDecode:
+    """P2: Windows PowerShell CLIXML 输出解码 (dogfood 发现)。"""
+
+    def test_is_clixml_detects_header(self) -> None:
+        """Happy path: CLIXML 头部检测。"""
+        from zall.tools.bash import _is_clixml
+        assert _is_clixml("#< CLIXML\n<Objs>") is True
+        assert _is_clixml("  #< CLIXML\nstuff") is True
+
+    def test_is_clixml_rejects_plain_text(self) -> None:
+        """Counterexample: 纯文本不被误判为 CLIXML。"""
+        from zall.tools.bash import _is_clixml
+        assert _is_clixml("normal output") is False
+        assert _is_clixml("pytest passed") is False
+        assert _is_clixml("") is False
+
+    def test_decode_clixml_extracts_error_text(self) -> None:
+        """Happy path: 从 CLIXML 提取错误文本。"""
+        from zall.tools.bash import _decode_clixml
+        clixml = '#< CLIXML\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">command not found_x000D__x000A_</S></Objs>'
+        decoded = _decode_clixml(clixml)
+        assert "command not found" in decoded
+        assert "_x000D_" not in decoded  # escape 序列已解码
+
+    def test_decode_clixml_preserves_non_clixml(self) -> None:
+        """Counterexample: 非 CLIXML 文本原样返回。"""
+        from zall.tools.bash import _decode_clixml
+        assert _decode_clixml("plain text") == "plain text"
+
+    def test_decode_clixml_escapes(self) -> None:
+        """Happy path: _x000D__x000A_ 转为 \r\n。"""
+        from zall.tools.bash import _decode_clixml_escapes
+        assert "_x000D_" not in _decode_clixml_escapes("error_x000D__x000A_done")

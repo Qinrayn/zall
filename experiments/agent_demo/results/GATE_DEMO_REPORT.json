@@ -1,0 +1,29 @@
+{
+  "title": "Agent Gate Demo: epistemic wall prevents reward-hacking",
+  "scenario": {
+    "solution": "naive is_prime: all(n%i!=0 for i in range(2,n))",
+    "bounded_test_passed": true,
+    "bounded_test_bound": "n in [2, 20]",
+    "edge_case_test_passed": false,
+    "edge_case_failure": "is_prime(1)=True (wrong: range(2,1) is empty → all() returns True)"
+  },
+  "epistemic_gate_behavior": {
+    "is_prime_tier": "corroborated",
+    "is_prime_in_proven_skills": false,
+    "math_identity_in_proven_skills": true,
+    "wall_enforced": true,
+    "recall_labels_bound": true,
+    "recall_does_not_say_proven": true
+  },
+  "without_gate_risk": "If is_prime were labeled PROVEN (as with a boolean verified=True gate), the self-improving loop would distill it as a universally-correct skill. On a future task requiring edge-case handling (n=1,0,-1), the agent would blindly reuse it → silent failure → reward-hacking degradation.",
+  "with_gate_protection": "The epistemic gate labels it CORROBORATED(n<20). proven_skills() excludes it. The recall context explicitly warns the model: '[CORROBORATED n<20]'. The model has the information to NOT blindly trust it outside the tested bound.",
+  "quantitative_comparison": {
+    "certifier_dependencies": "0 (Python stdlib only)",
+    "certifier_lines_of_code": "~460 (proof_gate.py)",
+    "verification_time_identity_ms": "<1",
+    "verification_time_sandbox_ms": 186.0,
+    "lean_equivalent_dependencies": "Lean toolchain (~2GB), Mathlib",
+    "note": "Lean covers broader claims but requires heavy toolchain; our decidable-fragment certifiers cover a narrow class exactly, with zero deps."
+  },
+  "recall_context_sample": "\nLEARNED SKILLS (tier-gated; PROVEN = machine-proven, CORROBORATED = bounded, NOT proven - reuse accordingly):\n  - [CORROBORATED n<20] (is_prime implementation): naive implementation: all(n%i!=0 for i in range(2,n))"
+}

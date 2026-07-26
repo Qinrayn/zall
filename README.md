@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.4.10-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
-  <img alt="zall" src="https://img.shields.io/badge/zall-v0.4.10-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+  <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.1.0-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+  <img alt="zall" src="https://img.shields.io/badge/zall-v0.1.0-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
 </picture>
 
 <p align="center">
@@ -34,11 +34,14 @@ pip install zall
 Requires Python 3.10+. For optional features:
 
 ```bash
+pip install "zall[tui]"       # inline/full-screen Textual UI (recommended)
 pip install "zall[bs4]"      # web_fetch with BeautifulSoup HTML parsing
 pip install "zall[images]"    # read_image with Pillow
 pip install "zall[dev]"       # development tools (pytest, mypy, ruff)
 pip install "zall[all]"       # everything
 ```
+
+Works on Windows, macOS and Linux (pure-Python wheel, `py3-none-any`).
 
 ## 🚀 Quick Start
 
@@ -100,6 +103,8 @@ zall
 | **PR-0 Hallucination Detection** | Architectural detection — `stop_reason=STOP` with no tool calls gets flagged |
 | **Chain-hash Timeline** | Every session is cryptographically chained and replayable |
 | **ConfirmGate** | Three-layer safety: rule engine + gate + override audit |
+| **Sensitive-file Protection** | `.env`, SSH private keys, cloud credentials are never read into model context — enforced in `read_file`, `grep` (both engines) and `@file` injection |
+| **Type-ahead Guard** | Keystrokes buffered while the model runs can never auto-approve a confirmation menu (grace window in TUI, stdin flush in REPL) |
 | **Sandbox** | Process isolation with worktree/process/bwrap/container modes |
 | **ToolKind Classification** | 19 semantic tool kinds with read/write detection |
 
@@ -117,10 +122,78 @@ zall
 
 | Feature | Description |
 |---------|-------------|
+| **Six-Dimension Ontology** | Every `AgentLoop` implements all six dimensions — Identity / Commitment / Perception / Authority / Accountability / Verifiability — enforced by the I-0/I-7 completeness invariants (`tests/test_ontology_invariants.py`) |
 | **ChatState** | Actor-based message management with events, usage tracking, compaction |
 | **AgentBuilder** | Fluent builder for AgentLoop construction |
-| **Subagent** | Typed sub-agents (general-purpose, explore, plan) with capability isolation |
-| **Self-Evolution** | Extension hooks for auto-learning, usage tracking, pattern discovery; `/suggest` and `/learn` commands for insight and application; high-confidence K-value auto-adjustment; cross-session learned memory injection |
+| **Subagent & Coordinator** | Typed sub-agents (general-purpose, explore, plan) with capability isolation; thread-parallel spawning + `Coordinator` primitive for dispatch-and-aggregate multi-agent orchestration |
+| **Self-Evolution** | Pi-style extension/lifecycle hooks for auto-learning, usage tracking, pattern discovery; `/suggest` and `/learn` commands for insight and application; high-confidence K-value auto-adjustment; cross-session learned memory injection |
+
+## 🎬 Demo
+
+### One-shot: Create a Snake game
+
+```bash
+zall "Create a classic Snake game in Python with pygame"
+```
+
+zall writes the code, tests it, and fixes any issues automatically:
+
+```
+❯ zall "Create a classic Snake game in Python with pygame"
+● read_file(file_path="snake.py")
+  └ File does not exist yet — will create new
+● write_file(file_path="snake.py", content="...")
+  └ 142 lines written
+● bash(command="python -c 'import pygame; print(pygame.version.ver)'")
+  └ pygame 2.6.1
+● bash(command="python snake.py")
+  └ Process exited with code 0 (game window opened successfully)
+● bash(command="pytest test_snake.py -q")
+  └ 5 passed in 0.32s
+✓ Task completed (8 steps, 2 model calls)
+```
+
+### Interactive Bug Fixing
+
+```bash
+zall  # Start interactive REPL
+```
+
+```
+> /model gpt-4o
+> /lsp status
+  ✓ pyright: active (2 errors, 3 warnings)
+> fix the off-by-one error in binary_search.py
+  ● read_file(src/binary_search.py)
+  ● edit_file(old_string="...", new_string="...")
+  ● bash(command="pytest tests/test_search.py -x -q")
+  └ 12 passed in 0.45s
+✓ Bug fixed in 3 steps
+```
+
+### @file Reference (Claude Code-style)
+
+```bash
+zall "Refactor the auth module @src/auth.py to use async/await"
+```
+
+Files referenced with `@` are automatically injected into the model context — no need for the agent to `read_file` first.
+
+### Multi-step Research Task
+
+```bash
+zall --yes -j "Study the Collatz stopping time for numbers up to 100000"
+```
+
+The agent runs a full research pipeline: write code → execute → analyze → report → detect and fix its own errors:
+
+```
+✓ Collatz study complete: max stopping time=350 (n=77031),
+  mean=107.54 (corrected after agent self-detected its initial
+  mean=114.98 included out-of-range memo keys)
+```
+
+> **PR-0 Hallucination Detection**: The agent independently caught its own mistake — the mean calculation included intermediate memo keys outside the study range. It diagnosed the root cause, fixed the code, and re-ran. This is not a prompt-based guard; it's architectural (IPR-0).
 
 ## 🏗️ Architecture
 
@@ -249,15 +322,16 @@ egress = loop.run(system_prompt="You are a coding assistant...")
 zall [task] [options]
 
 Options:
-  --model TEXT       Model name (overrides config)
-  --yes, -y          Auto-accept greylist actions
-  --judge MODE       Judge mode: none (default), system
-  --json             Output events as NDJSON
-  --no-stream        Disable token streaming
-  --max-steps N      Maximum steps before termination
-  --init             Initialize .zall/ config in current directory
-  --verbose          Show full tool output
-  --version, -V      Show version
+	  --model TEXT       Model name (overrides config)
+	  --yes, -y          Auto-accept greylist actions
+	  --strict, -S       Strict mode: enable full confirm/downgrade gates
+	  --judge MODE       Judge mode: none (default), system
+	  --json             Output events as NDJSON
+	  --no-stream        Disable token streaming
+	  --max-steps N      Maximum steps before termination
+	  --init             Initialize .zall/ config in current directory
+	  --verbose          Show full tool output
+	  --version, -V      Show version
 
 Commands in REPL:
   /help, /model, /plan, /lsp, /codegraph, /sandbox,
@@ -279,6 +353,7 @@ Commands in REPL:
 | Model independence | 4 adapters (Protocol) | Anthropic-only | OpenAI/Gemini | OpenAI/Anthropic |
 | Code intelligence | LSP + CodeGraph | Limited | Built-in | Built-in |
 | Sandbox isolation | Process/Worktree modes | None | None | None |
+| Multi-agent orchestration | Parallel subagents + Coordinator | Task/subagent | None | None |
 | Plugin system | Manifest-based | None | Extensions | Extensions |
 | Audit trail | Chain-hash + ed25519 | None | None | None |
 | Open source | ✅ MIT | ❌ | ❌ | ❌ |
@@ -335,7 +410,7 @@ Contributions are welcome! See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for gu
 
 ## 📄 License
 
-[MIT](LICENSE) © 2026 zall contributors
+[MIT](LICENSE) © 2026 qinrayn (Yuhan Zhang)
 
 ## 🙏 Acknowledgements
 

@@ -236,7 +236,8 @@ class WatermarkMonitor:
         return _get_window_size(model_name)
 
     def check_watermark(
-        self, messages: list[Message], model_name: str, step: int
+        self, messages: list[Message], model_name: str, step: int,
+        real_tokens: int | None = None,
     ) -> str | None:
         """check当前水位, return建议的operation。
 
@@ -246,6 +247,8 @@ class WatermarkMonitor:
             "force"       — 强制压缩 (水位 > 阈值+15%)
 
         v0.4.8: 使用 CompactionPolicy.auto_compact_threshold_percent。
+        PARADIGM Step 0: real_tokens (来自上次 model 响应的真实 prompt tokens) 可用时
+        以它为准 (ground truth, Pi 教训), 否则回退字符估算。
 
         防抖: 每 _min_compaction_interval 步只触发一次建议压缩。
         """
@@ -253,7 +256,11 @@ class WatermarkMonitor:
             # 刚压缩过, 等水位稳定
             return None
 
-        tokens = self.estimate_tokens(messages, model_name=model_name)
+        # 真实 usage 优先 (更准); 无则回退语言感知字符估算
+        if real_tokens and real_tokens > 0:
+            tokens = real_tokens
+        else:
+            tokens = self.estimate_tokens(messages, model_name=model_name)
         window = self.get_window_size(model_name)
         ratio = tokens / window if window > 0 else 0
 
@@ -292,22 +299,6 @@ class WatermarkMonitor:
             ),
         }
 
-
-# ──────────────────────────────────────────────────────────────────────────
-# 压缩prompt词
-# ──────────────────────────────────────────────────────────────────────────
-
-_COMPACT_PROMPT = """\
-Summarize the conversation so far between a developer and a coding agent.
-Focus on:
-1. What the developer asked for (goal)
-2. What files were examined or modified (paths)
-3. What was accomplished or decided
-4. Any unresolved issues or next steps
-
-Be concise. Write as a structured summary, not a narrative.
-Do NOT include tool outputs verbatim — just describe what was found/done.
-"""
 
 # 压缩后preserve的最近message数
 _KEEP_RECENT = 4
@@ -374,27 +365,32 @@ class ModelCompactor:
         to_compact = others[: -self._keep_recent]
         recent = others[-self._keep_recent:]
 
-        # v2 fix (B1): 用 tool_call_id 配对算法确保不split tool_call/result。
-        # 收集 recent 中所有 tool_result reference的 tool_call_id
+        # v2 fix (B1): 双向配对完整性 — 确保不拆分 tool_call/result 配对 (§9.2.9)。
+        # 方向1: recent 中的 tool_result 引用 → 在 to_compact 中找对应的 tool_call
+        # 方向2: recent 中的 tool_call → 在 to_compact 中找对应的 tool_result
         orphaned_tool_ids: set[str] = set()
+        recent_tool_call_ids: set[str] = set()
         for m in recent:
             if m.role == "tool" and m.tool_call_id:
                 orphaned_tool_ids.add(m.tool_call_id)
+            if m.role == "assistant" and m.tool_calls:
+                for tc in m.tool_calls:
+                    recent_tool_call_ids.add(tc.id)
 
-        if orphaned_tool_ids:
-            # 从边界向前找, 找出包含这些 tool_call_id 的最早 assistant message
+        if orphaned_tool_ids or recent_tool_call_ids:
+            # 从边界双向扫描, 确保任意配对不被拆分
             recent_start_idx = len(others) - self._keep_recent
             adjusted_start = recent_start_idx
             for i in range(recent_start_idx - 1, -1, -1):
                 msg = others[i]
+                # 方向1: recent 中 tool_result 引用的 tool_call 在 to_compact 中 → 扩展 recent 包含它
                 if msg.role == "assistant" and msg.tool_calls:
-                    # check这个 assistant 的 tool_calls 是否包含 orphaned tool_call_id
-                    has_match = any(tc.id in orphaned_tool_ids for tc in msg.tool_calls)
-                    if has_match:
+                    if any(tc.id in orphaned_tool_ids for tc in msg.tool_calls):
                         adjusted_start = i
-                        # 继续向前找, 确保包含所有中间message (可能多个 assistant 块交错)
-                    # 即使不匹配也要继续向前扫描, 因为 tool_result 可能跨多条 assistant
-                # 还要check tool message: 如果找到另一个 tool_result reference了不同的 id 集, 继续向前
+                # 方向2: recent 中 tool_call 对应的 tool_result 在 to_compact 中 → 扩展 recent 包含它
+                if msg.role == "tool" and msg.tool_call_id:
+                    if msg.tool_call_id in recent_tool_call_ids:
+                        adjusted_start = i
             # 重新切分
             to_compact = others[:adjusted_start]
             recent = others[adjusted_start:]

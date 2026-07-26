@@ -98,7 +98,7 @@ class PluginManifest:
             import tomllib  # Python 3.11+
         except ImportError:
             try:
-                import tomli as tomllib  # noqa: N813
+                import tomli as tomllib  # type: ignore[no-redef]  # noqa: N813
             except ImportError:
                 raise ImportError(
                     "tomli/tomllib required for plugin manifest parsing. "
@@ -543,7 +543,7 @@ class PluginSystem:
             try:
                 subprocess.run(
                     ["git", "-C", str(dest), "pull", "origin", branch],
-                    capture_output=True, text=True, timeout=60,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                 )
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
                 print(f"  [plugin] git pull failed: {e}", file=sys.stderr)
@@ -553,7 +553,7 @@ class PluginSystem:
             try:
                 subprocess.run(
                     ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(dest)],
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
                 )
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
                 print(f"  [plugin] git clone failed: {e}", file=sys.stderr)

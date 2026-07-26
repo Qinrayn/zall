@@ -26,7 +26,7 @@ from zall.cli.commands._common import (
     category=_CATEGORY_TOOLS,
     description="Show LSP diagnostics or start language server",
 )
-def cmd_lsp(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
+def cmd_lsp(args: str, out: Any, loop: Any, state: dict[str, Any]) -> str:
     """显示 LSP 诊断信息或启动语言服务器。
 
     Usage:
@@ -34,16 +34,15 @@ def cmd_lsp(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
         /lsp <file>    — 显示指定文件的诊断
         /lsp <file> error — 只显示错误
     """
-    loop = state.get("loop")
     if loop is None:
-        _print_err(err, "No active session. Start a session first.")
-        return 1
+        _print_err(out, "No active session. Start a session first.")
+        return "handled"
 
     lsp = getattr(loop, "_lsp_manager", None)
     if lsp is None:
-        _print_err(err, "LSP manager not initialized.")
-        _print_hint(err, "Set up LSP with: /lsp start <language>")
-        return 1
+        _print_err(out, "LSP manager not initialized.")
+        _print_hint(out, "Set up LSP with: /lsp start <language>")
+        return "handled"
 
     parts = args.strip().split()
     file_path = parts[0] if len(parts) >= 1 else ""
@@ -56,18 +55,18 @@ def cmd_lsp(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
             try:
                 lsp.start_server(lang)
                 _print_ok(out, f"Started LSP server for {lang}")
-                return 0
+                return "handled"
             except KeyError:
-                _print_err(err, f"Unknown language: {lang}")
-                return 1
+                _print_err(out, f"Unknown language: {lang}")
+                return "handled"
             except RuntimeError as e:
-                _print_err(err, str(e))
-                return 1
+                _print_err(out, str(e))
+                return "handled"
 
         if file_path == "stop":
             lsp.shutdown_all()
             _print_ok(out, "Stopped all LSP servers")
-            return 0
+            return "handled"
 
         if file_path == "status":
             summary = lsp.summary()
@@ -77,7 +76,7 @@ def cmd_lsp(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
                 f"Diagnostics: {summary['diagnostics_errors']} errors, "
                 f"{summary['diagnostics_warnings']} warnings"
             ))
-            return 0
+            return "handled"
 
         # Show diagnostics
         if file_path:
@@ -87,17 +86,17 @@ def cmd_lsp(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
             for fpath, diags in all_diags.items():
                 if file_path in fpath:
                     display_diags(out, {fpath: diags}, severity)
-                    return 0
+                    return "handled"
             _print_ok(out, f"No diagnostics for {file_path}")
-            return 0
+            return "handled"
 
         # All diagnostics
         display_diags(out, lsp.all_diagnostics, severity)
-        return 0
+        return "handled"
 
     except Exception as e:
-        _print_err(err, f"LSP command failed: {e}")
-        return 1
+        _print_err(out, f"LSP command failed: {e}")
+        return "handled"
 
 
 def display_diags(out: Any, all_diags: dict[str, list[Any]], severity: str) -> None:
@@ -150,7 +149,7 @@ def display_diags(out: Any, all_diags: dict[str, list[Any]], severity: str) -> N
     category=_CATEGORY_TOOLS,
     description="Control sandbox isolation mode",
 )
-def cmd_sandbox(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
+def cmd_sandbox(args: str, out: Any, loop: Any, state: dict[str, Any]) -> str:
     """控制沙箱隔离模式。
 
     Usage:
@@ -170,19 +169,19 @@ def cmd_sandbox(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
     if not args or args == "status":
         if sandbox is None:
             _print_ok(out, "Sandbox: not active (none mode)")
-            return 0
+            return "handled"
         mode = getattr(sandbox, "mode", "?")
         path = sandbox.get_path()
         status = f"Sandbox mode: {mode}"
         if path:
             status += f"\n  Workspace: {path}"
         _print_ok(out, status)
-        return 0
+        return "handled"
 
     if args == "none":
         state["sandbox"] = Sandbox(mode=SandboxMode.NONE)
         _print_ok(out, "Sandbox: none mode (no isolation)")
-        return 0
+        return "handled"
 
     if args == "process":
         state["sandbox"] = Sandbox(
@@ -190,32 +189,32 @@ def cmd_sandbox(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
             project_dir=state.get("cwd", "."),
         )
         _print_ok(out, "Sandbox: process mode (isolated subprocess)")
-        return 0
+        return "handled"
 
     if args == "apply":
         if sandbox is None:
-            _print_err(err, "No active sandbox")
-            return 1
+            _print_err(out, "No active sandbox")
+            return "handled"
         if sandbox.apply_changes():
             _print_ok(out, "Changes applied to main project")
         else:
-            _print_err(err, "Failed to apply changes")
-        return 0
+            _print_err(out, "Failed to apply changes")
+        return "handled"
 
     if args == "diff":
         if sandbox is None:
-            _print_err(err, "No active sandbox")
-            return 1
+            _print_err(out, "No active sandbox")
+            return "handled"
         diff = sandbox.get_diff()
         if diff:
             _print_ok(out, diff)
         else:
             _print_ok(out, "[No changes in sandbox]")
-        return 0
+        return "handled"
 
-    _print_err(err, f"Unknown sandbox command: {args}")
-    _print_hint(err, "Usage: /sandbox [none|process|status|apply|diff]")
-    return 1
+    _print_err(out, f"Unknown sandbox command: {args}")
+    _print_hint(out, "Usage: /sandbox [none|process|status|apply|diff]")
+    return "handled"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -228,7 +227,7 @@ def cmd_sandbox(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
     category=_CATEGORY_TOOLS,
     description="Manage codebase index for symbol search",
 )
-def cmd_codegraph(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
+def cmd_codegraph(args: str, out: Any, loop: Any, state: dict[str, Any]) -> str:
     """管理代码图索引。
 
     Usage:
@@ -240,9 +239,9 @@ def cmd_codegraph(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
     cg = state.get("codegraph")
 
     if cg is None:
-        _print_err(err, "CodeGraph not initialized.")
-        _print_hint(err, "Initialize with: /codegraph index")
-        return 1
+        _print_err(out, "CodeGraph not initialized.")
+        _print_hint(out, "Initialize with: /codegraph index")
+        return "handled"
 
     args = args.strip()
 
@@ -255,7 +254,7 @@ def cmd_codegraph(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
             f"  Symbols: {stats.get('symbol_count', 0)}\n"
             f"  Errors: {stats.get('error_count', 0)}"
         ))
-        return 0
+        return "handled"
 
     if args == "index":
         import time
@@ -269,14 +268,14 @@ def cmd_codegraph(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
             f"{stats.get('symbol_count', 0)} symbols "
             f"in {elapsed:.1f}s"
         ))
-        return 0
+        return "handled"
 
     if args.startswith("search "):
         query = args[7:]
         results = cg.search(query)
         if not results:
             _print_ok(out, f"No symbols found matching '{query}'")
-            return 0
+            return "handled"
         lines = [f"Symbols matching '{query}' ({len(results)}):"]
         for sym in results:
             loc = getattr(sym, "location", None)
@@ -286,14 +285,14 @@ def cmd_codegraph(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
             kind_label = kind.value if hasattr(kind, "value") else str(kind)
             lines.append(f"  {kind_label} {sym.name} @ {fn}:{ln}")
         _print_ok(out, "\n".join(lines))
-        return 0
+        return "handled"
 
     if args.startswith("outline "):
         file_path = args[8:]
         outline = cg.get_outline(file_path)
         if not outline:
             _print_ok(out, f"No symbols in {file_path}")
-            return 0
+            return "handled"
         lines = [f"Outline of {file_path}:"]
         for entry in outline:
             name = entry.get("name", "?")
@@ -306,10 +305,10 @@ def cmd_codegraph(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
                 c_line = child.get("line", 0)
                 lines.append(f"    {c_kind} {c_name} @ {c_line}")
         _print_ok(out, "\n".join(lines))
-        return 0
+        return "handled"
 
-    _print_err(err, f"Unknown codegraph command: {args}")
-    return 1
+    _print_err(out, f"Unknown codegraph command: {args}")
+    return "handled"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -322,17 +321,16 @@ def cmd_codegraph(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
     category=_CATEGORY_SESSION,
     description="Show ChatState diagnostics",
 )
-def cmd_chatstate(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
+def cmd_chatstate(args: str, out: Any, loop: Any, state: dict[str, Any]) -> str:
     """显示 ChatState 诊断信息。"""
-    loop = state.get("loop")
     if loop is None:
-        _print_err(err, "No active session")
-        return 1
+        _print_err(out, "No active session")
+        return "handled"
 
     cs = getattr(loop, "chat_state", None)
     if cs is None:
         _print_ok(out, "ChatState: not active (using legacy message list)")
-        return 0
+        return "handled"
 
     lines = ["[ChatState Diagnostics]"]
     lines.append(f"  Messages: {cs.message_count}")
@@ -342,7 +340,7 @@ def cmd_chatstate(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
     lines.append(f"  Compactions: {cs.compaction_count}")
     lines.append(f"  Prompt index: {cs.prompt_index}")
     _print_ok(out, "\n".join(lines))
-    return 0
+    return "handled"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -355,7 +353,7 @@ def cmd_chatstate(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
     category=_CATEGORY_TOOLS,
     description="Manage plugins",
 )
-def cmd_plugin(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
+def cmd_plugin(args: str, out: Any, loop: Any, state: dict[str, Any]) -> str:
     """管理插件。
 
     Usage:
@@ -376,36 +374,36 @@ def cmd_plugin(args: str, out: Any, err: Any, state: dict[str, Any]) -> int:
         discovered = system.discover()
         if not discovered:
             _print_ok(out, "[No plugins found]")
-            return 0
+            return "handled"
 
         lines = ["[Discovered plugins:]"]
         for p in discovered:
             status = "loaded" if system.get_plugin(p.name) else "discovered"
             lines.append(f"  {p.name} ({p.scope.value}) — {status}")
         _print_ok(out, "\n".join(lines))
-        return 0
+        return "handled"
 
     if args.startswith("load "):
         name = args[5:]
         loaded = system.load_plugin(name)
         if loaded is None:
-            _print_err(err, f"Plugin '{name}' not found")
-            return 1
+            _print_err(out, f"Plugin '{name}' not found")
+            return "handled"
         _print_ok(out, f"Loaded plugin: {name}")
-        return 0
+        return "handled"
 
     if args.startswith("install "):
         url = args[8:]
         _print_ok(out, f"Installing plugin from {url}...")
         loaded = system.install_from_git(url)
         if loaded is None:
-            _print_err(err, "Installation failed. Check the URL and try again.")
-            return 1
+            _print_err(out, "Installation failed. Check the URL and try again.")
+            return "handled"
         _print_ok(out, f"Installed and loaded plugin: {loaded.name}")
-        return 0
+        return "handled"
 
-    _print_err(err, f"Unknown plugin command: {args}")
-    return 1
+    _print_err(out, f"Unknown plugin command: {args}")
+    return "handled"
 
 
 # ═══════════════════════════════════════════════════════════════════

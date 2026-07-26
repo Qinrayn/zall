@@ -20,6 +20,7 @@ from enum import Enum
 from fnmatch import translate
 from functools import lru_cache
 import re
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -253,12 +254,22 @@ class RuleSet(BaseModel):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def context_judge(action: Action, context: Context, rules: RuleSet) -> Judgement:
+def context_judge(
+    action: Action, context: Context, rules: RuleSet,
+    tool_registry: Any = None,
+) -> Judgement:
     """声明式rule引擎 (DESIGN.md §4.2.1)。
 
     不解语义, 不引模型, 不调外部服务 (§4.2.2)。
     两趟扫描: core_deny 先扫, user/domain 后扫。
-    无匹配 → greylist + sub_status=greylist_unresolvable_no_rule_matched。
+    无匹配时根据工具能力决定:
+      - 只读工具 → WHITELIST (除非被显式规则拒绝)
+      - 写工具 → GREYLIST (prompt 用户确认)
+    无 tool_registry 时回退到默认 GREYLIST。
+
+    v0.5.1: 引入 ToolCapabilities 决定默认权限。
+    替换了「无匹配默认 greylist」的保守策略。
+    只读工具在无规则匹配时自动放行, 减少不必要弹窗。
 
     返回 Judgement (不是裸 SafeLevel)。
     """
@@ -308,7 +319,27 @@ def context_judge(action: Action, context: Context, rules: RuleSet) -> Judgement
             sub_status="greylist_deny_hit",
         )
 
-    # ── 无匹配 → default greylist (不default whitelist)
+    # ── v0.5.1: 无规则匹配时, 根据工具能力决定默认权限
+    if tool_registry is not None:
+        tool = tool_registry.get(action.tool_id) if hasattr(tool_registry, 'get') else None
+        if tool is not None:
+            from zall.core.tool import get_tool_capabilities
+            caps = get_tool_capabilities(tool)
+            if caps.is_read_only:
+                # 只读工具 → 默认放行 (除非被显式规则拒绝)
+                return Judgement(
+                    level=SafeLevel.WHITELIST,
+                    matched_rule_ids=(),
+                    sub_status="read_only_default_allow",
+                )
+            # 写工具 → 默认询问 (greylist)
+            return Judgement(
+                level=SafeLevel.GREYLIST,
+                matched_rule_ids=(),
+                sub_status="write_default_ask",
+            )
+
+    # ── 无 tool_registry / 找不到工具 → default greylist (保守)
     return Judgement(
         level=SafeLevel.GREYLIST,
         matched_rule_ids=(),
