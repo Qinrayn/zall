@@ -23,8 +23,8 @@ from .client import ProcessTrustAnchor, start_anchor_server
 from .protocol import AnchorRequest, AnchorResponse
 
 __all__ = [
-    "ProcessTrustAnchor",
-    "start_anchor_server",
     "AnchorRequest",
     "AnchorResponse",
+    "ProcessTrustAnchor",
+    "start_anchor_server",
 ]

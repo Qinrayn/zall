@@ -18,9 +18,9 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
-from zall.core.tool import ToolResult
 from zall._util import is_noise
 from zall._util.path import resolve_path
+from zall.core.tool import ToolResult
 
 MAX_RESULTS = 500  # 最大结果数 (prevents context pollution)
 

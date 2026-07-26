@@ -24,26 +24,26 @@ import os
 import sys
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from rich.text import Text
-from textual.app import App, ComposeResult
-from textual.reactive import reactive
-from textual.widgets import Footer
-from textual.binding import Binding
-from textual.theme import Theme
 from textual import work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.reactive import reactive
+from textual.theme import Theme
+from textual.widgets import Footer
 
-from zall.core.loop_events import LoopEvent
 from zall.cli.render import _C, _G, _key_arg, _unicode_supported, use_ascii_glyphs
 from zall.cli.tui.widgets import (
     ChatMessage,
-    MessageList,
-    LiveRegion,
     InputBar,
+    LiveRegion,
+    MessageList,
     StatusBar,
 )
-
+from zall.core.loop_events import LoopEvent
 
 # ── Terminal capability detection (cross-platform) ──
 
@@ -413,9 +413,10 @@ class TuiApp(App):
 
     def _build_welcome_renderable(self) -> Any:
         """简洁欢迎屏 (kimi 风格: 纯文字 + 克制色彩, 无图形方块噪声)。"""
+        from rich import box
         from rich.console import Group
         from rich.panel import Panel
-        from rich import box
+
         from zall import __version__
         A, DIM, SUB, INFO = _C.ACCENT, _C.DIM, _C.SUBTLE, _C.INFO
         # 标识 + 版本
@@ -471,6 +472,7 @@ class TuiApp(App):
     def _resume_prior_session(self, session_id: str) -> None:
         """恢复指定会话的上下文到 state (agent 首个回合可见历史); 显示系统提示。"""
         import io as _io
+
         from zall.cli.session import _run_resume
         try:
             _run_resume(_io.StringIO(), session_id, self._state)
@@ -611,6 +613,7 @@ class TuiApp(App):
         命令输出捕获到 StringIO 后以系统消息呈现。
         """
         import io
+
         from zall.cli.commands import handle_slash
         msg_list = self._get_msg_list()
         if msg_list is None:
@@ -665,8 +668,8 @@ class TuiApp(App):
         # Build the loop if needed
         if self._agent_loop is None:
             # We need to import these here to avoid circular imports
-            from zall.skills import load_skills
             from zall.cli.orchestrator import build_mcp_tools
+            from zall.skills import load_skills
 
             mcp_tools = build_mcp_tools(sys.stderr)
             skills = load_skills()
@@ -1262,6 +1265,7 @@ class TuiApp(App):
         在 worker 线程执行, sleep 不阻 UI; 状态栏 spinner 照常动。
         """
         import time as _t
+
         from zall._util.backoff import backoff_delay
         from zall.cli.repl_ui import is_transient_error
         _err0 = (result.egress.error if result.egress else "") or ""

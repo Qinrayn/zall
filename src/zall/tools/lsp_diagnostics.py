@@ -14,7 +14,6 @@ from typing import Any
 
 from zall.core.tool import ToolResult
 
-
 _DESCRIPTION = (
     "Check for code errors and warnings in the project. "
     "Returns diagnostics (errors, warnings, hints) from the language server. "

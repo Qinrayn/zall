@@ -21,13 +21,13 @@ from __future__ import annotations
 import json
 import random
 import time
-from typing import Any, Callable, ClassVar
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 import httpx
 
 from zall.core.model import ModelResponse, StopReason
 from zall.safety.config import load_config
-
 
 # Common HTTP error codes -> user-friendly messages
 _ERROR_MAP: dict[int, str] = {
@@ -283,7 +283,6 @@ class BaseAdapter:
 
     def close(self) -> None:
         """Close the HTTP client. Subclasses should override."""
-        pass
 
     def set_retry_callback(
         self, cb: Callable[[str, float, int, int], None] | None,

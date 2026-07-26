@@ -29,13 +29,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from cryptography.exceptions import InvalidSignature
 from pydantic import BaseModel, ConfigDict
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # §6.1 EventType (eventtype)
@@ -526,7 +525,7 @@ def _build_sign_message(last_event_hash: str, ts: int, run_id: str) -> bytes:
     变更此函数时, 必须同步更新 verify() 中对应的签名验证格式。
     添加自检测试: 确保 sign 和 verify 使用相同格式。
     """
-    return f"{last_event_hash}|{ts}|{run_id}".encode("utf-8")
+    return f"{last_event_hash}|{ts}|{run_id}".encode()
 
 
 def _verify_sign_message(

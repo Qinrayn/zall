@@ -26,10 +26,12 @@ from typing import Any
 
 from zall._util.logging import get_zall_logger as _get_zall_logger
 from zall.cli import config as _cli_config
+from zall.cli.environment import CwdMeta, build_system_prompt
 from zall.cli.judge import SystemJudge, UndecidableJudge
-from zall.cli.render import CliRenderer, render_goal_card, clear_console_cache
+from zall.cli.render import CliRenderer, clear_console_cache, render_goal_card
 from zall.cli.responder import CliUserResponder
-from zall.cli.environment import build_system_prompt, CwdMeta
+from zall.core.checkpoint import CheckpointManager
+from zall.core.compactor import ModelCompactor
 from zall.core.context import Context
 from zall.core.goal import (
     AcceptanceContract,
@@ -40,30 +42,28 @@ from zall.core.goal import (
     TerminationState,
 )
 from zall.core.loop_events import RunEgress
+from zall.core.plugin_loader import discover_tools, merge_tools_with_builtins
 from zall.core.refiner import GoalRefiner
 from zall.core.tool import ToolRegistry, ToolResult
-from zall.core.plugin_loader import discover_tools, merge_tools_with_builtins
-from zall.core.compactor import ModelCompactor
-from zall.core.checkpoint import CheckpointManager
+from zall.mcp.config import MCPServerSpec, load_mcp_config
+from zall.mcp.tool import MCPTool
 from zall.safety.rules_file import load_rules
+from zall.tools.apply_patch import ApplyPatchTool
 from zall.tools.bash import BashTool
 from zall.tools.batch_edit import BatchEditTool
 from zall.tools.edit_file import EditFileTool
-from zall.tools.apply_patch import ApplyPatchTool
 from zall.tools.git_protect import GitProtect
 from zall.tools.glob import GlobTool
 from zall.tools.grep import GrepTool
 from zall.tools.list_dir import ListDirTool
 from zall.tools.read_file import ReadFileTool
+from zall.tools.read_image import ReadImageTool
+from zall.tools.science import ScienceTool
+from zall.tools.search import SearchTool
 from zall.tools.spawn_subagent import SpawnSubagentTool
-from zall.tools.write_file import WriteFileTool
 from zall.tools.todo import TodoListTool
 from zall.tools.web_fetch import WebFetchTool
-from zall.tools.read_image import ReadImageTool
-from zall.tools.search import SearchTool
-from zall.tools.science import ScienceTool
-from zall.mcp.config import load_mcp_config, MCPServerSpec
-from zall.mcp.tool import MCPTool
+from zall.tools.write_file import WriteFileTool
 
 _log = _get_zall_logger(__name__)
 
@@ -108,6 +108,7 @@ def build_adapter(provider: str, model: str | None = None) -> Any:
     环境变量 ZALL_TIMEOUT 优先级最高，可覆盖 config.toml。
     """
     import os as _os
+
     from zall.safety.config import load_config as _load_cfg
     cfg = _load_cfg()
     timeout = float(_os.environ.get("ZALL_TIMEOUT") or cfg.get("timeout", 300.0))

@@ -23,9 +23,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from zall.core.tool import ToolResult
-from zall._util import is_binary, NOISE_DIRS
+from zall._util import NOISE_DIRS, is_binary
 from zall._util.path import resolve_path
+from zall.core.tool import ToolResult
 
 MAX_MATCHES = 200  # 最大匹配数 (prevents context pollution)
 _MAX_REGEX_TIMEOUT = 5  # seconds, prevents ReDoS in Python fallback

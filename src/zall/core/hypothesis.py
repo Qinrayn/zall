@@ -22,7 +22,6 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, field_validator, model_validator
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # §2.1 HypothesisStatus Enum
 # ──────────────────────────────────────────────────────────────────────────

@@ -27,7 +27,6 @@ from typing import Any
 
 from zall.core.perception.sensor import Observation, Sensor
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # FileSensor — 文件系统传感器
 # ──────────────────────────────────────────────────────────────────────────
@@ -452,8 +451,7 @@ class CompositeSensor:
             try:
                 obs = sensor.observe()
                 merged_data[obs.sensor_id] = obs.data
-                if obs.confidence < min_confidence:
-                    min_confidence = obs.confidence
+                min_confidence = min(min_confidence, obs.confidence)
             except Exception:
                 merged_data[sensor.sensor_id] = {"error": "sensor_failed"}
                 min_confidence = 0.0

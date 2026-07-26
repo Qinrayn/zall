@@ -28,9 +28,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from zall.core.safety import Rule, RuleSet, SafeLevel
 from zall._util.toml import unquote_value
-
+from zall.core.safety import Rule, RuleSet, SafeLevel
 
 # P8: 模块级常量, 避免每次 _parse_level 调用创建 dict
 _LEVEL_MAP: dict[str, SafeLevel] = {

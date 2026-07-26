@@ -258,7 +258,7 @@ class CodeGraphStatsTool:
             },
         }
 
-    def execute(self, args: dict[str, Any]) -> ToolResult:  # noqa: ARG002
+    def execute(self, args: dict[str, Any]) -> ToolResult:
         if self._cg is None:
             return ToolResult(
                 success=False, output="",
@@ -325,7 +325,7 @@ class CodeGraphIndexTool:
             },
         }
 
-    def execute(self, args: dict[str, Any]) -> ToolResult:  # noqa: ARG002
+    def execute(self, args: dict[str, Any]) -> ToolResult:
         if self._cg is None:
             return ToolResult(
                 success=False, output="",

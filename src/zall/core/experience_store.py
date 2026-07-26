@@ -309,8 +309,7 @@ class ExperienceStore:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.parent / f".experience_{os.getpid()}.tmp"
             with open(tmp, "w", encoding="utf-8", newline="") as f:
-                for r in self._records:
-                    f.write(json.dumps(r.to_json(), ensure_ascii=False) + "\n")
+                f.writelines(json.dumps(r.to_json(), ensure_ascii=False) + "\n" for r in self._records)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(str(tmp), str(self._path))

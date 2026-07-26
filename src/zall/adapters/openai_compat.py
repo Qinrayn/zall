@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import httpx
 
+from zall.adapters.base import BaseAdapter, RetryBudget
 from zall.core.model import (
     Message,
     ModelResponse,
@@ -24,7 +25,6 @@ from zall.core.model import (
     ToolCall,
     ToolChoice,
 )
-from zall.adapters.base import BaseAdapter, RetryBudget
 
 
 @dataclass
@@ -90,7 +90,7 @@ class OpenAICompatAdapter(BaseAdapter):
     def __enter__(self) -> OpenAICompatAdapter:
         return self
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(self, *args: object) -> None:
         self.close()
 
     @property
@@ -371,7 +371,7 @@ class OpenAICompatAdapter(BaseAdapter):
             }
         return current
 
-    def _process_stream_delta(self, delta: dict[str, Any], state: "_StreamState") -> Any:
+    def _process_stream_delta(self, delta: dict[str, Any], state: _StreamState) -> Any:
         """Process a single delta block, update state, yield intermediate token events.
 
         Yield order: reasoning -> content (ensures reasoning is updated before
@@ -442,7 +442,7 @@ class OpenAICompatAdapter(BaseAdapter):
             raw={"error": str(error)},
         )
 
-    def _build_partial_response(self, state: "_StreamState", error: Exception) -> tuple[str, ModelResponse]:
+    def _build_partial_response(self, state: _StreamState, error: Exception) -> tuple[str, ModelResponse]:
         """Build a partial response on stream interruption."""
         if state.has_any_content:
             stop_reason = (
@@ -464,7 +464,7 @@ class OpenAICompatAdapter(BaseAdapter):
             raw={"error": str(error)},
         ))
 
-    def _build_final_stream_response(self, state: "_StreamState") -> tuple[str, ModelResponse]:
+    def _build_final_stream_response(self, state: _StreamState) -> tuple[str, ModelResponse]:
         """Build the final ModelResponse after a successful stream."""
         stop_reason = self._map_finish_reason(state.finish_reason or "stop")
         # Degradation: finish_reason=tool_calls but no tool_call deltas -> STOP

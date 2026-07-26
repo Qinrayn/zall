@@ -160,8 +160,7 @@ def _analyze_single_command(cmd_str: str) -> CommandSemantics:
     if "/" in cmd:
         cmd = cmd.rsplit("/", 1)[-1]
     # Windows: 去除 .exe 后缀
-    if cmd.endswith(".exe"):
-        cmd = cmd[:-4]
+    cmd = cmd.removesuffix(".exe")
     cmd_lower = cmd.lower()
 
     # 检测子command (git, npm, pip 等)

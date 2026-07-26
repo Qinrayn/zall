@@ -25,10 +25,10 @@ IPR constraints:
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable, Protocol, runtime_checkable
-
+from typing import Any, Protocol, runtime_checkable
 
 # ──────────────────────────────────────────────────────────────────────────
 # §5.1 VerificationTier — 认识论状态 (一等公民)
@@ -103,7 +103,7 @@ class Poly:
         return acc
 
     # ── 运算 (精确, 返回新实例) ──
-    def __add__(self, other: "Poly") -> "Poly":
+    def __add__(self, other: Poly) -> Poly:
         a, b = self.coeffs, other.coeffs
         n = max(len(a), len(b))
         return Poly([
@@ -111,7 +111,7 @@ class Poly:
             for i in range(n)
         ])
 
-    def __sub__(self, other: "Poly") -> "Poly":
+    def __sub__(self, other: Poly) -> Poly:
         a, b = self.coeffs, other.coeffs
         n = max(len(a), len(b))
         return Poly([
@@ -119,7 +119,7 @@ class Poly:
             for i in range(n)
         ])
 
-    def __mul__(self, other: "Poly") -> "Poly":
+    def __mul__(self, other: Poly) -> Poly:
         a, b = self.coeffs, other.coeffs
         if not a or not b:
             return Poly([])  # 零多项式
@@ -132,7 +132,7 @@ class Poly:
         return Poly(out)
 
 
-def _as_poly(p: "Poly | Iterable[int]") -> Poly:
+def _as_poly(p: Poly | Iterable[int]) -> Poly:
     return p if isinstance(p, Poly) else Poly(p)
 
 
@@ -216,9 +216,9 @@ def unknown(claim: str, detail: str = "") -> ProofCertificate:
 def verify_egyptian_identity(
     q: int,
     r: int,
-    x: "Poly | Iterable[int]",
-    y: "Poly | Iterable[int]",
-    z: "Poly | Iterable[int]",
+    x: Poly | Iterable[int],
+    y: Poly | Iterable[int],
+    z: Poly | Iterable[int],
     *,
     claim: str = "",
 ) -> ProofCertificate:
@@ -355,7 +355,7 @@ def poly_sqrt(p: Poly) -> Poly | None:
 
 
 def verify_square_identity(
-    p: "Poly | Iterable[int]", *, search_bound: int = 64, claim: str = "",
+    p: Poly | Iterable[int], *, search_bound: int = 64, claim: str = "",
 ) -> ProofCertificate:
     """Certify (or refute) that P(t) is a perfect square for all integer t>=0.
 
@@ -376,7 +376,7 @@ def verify_square_identity(
                     f"perfect square for every integer t."),
             data={"p": list(P.coeffs), "q": list(Q.coeffs)},
         )
-    for t in range(0, max(1, search_bound)):
+    for t in range(max(1, search_bound)):
         v = P.at(t)
         if _isqrt_exact(v) is None:
             return refuted(
@@ -398,7 +398,7 @@ def verify_square_identity(
 
 
 def verify_covering_system(
-    congruences: "list[tuple[int, int]]", *, claim: str = "",
+    congruences: list[tuple[int, int]], *, claim: str = "",
 ) -> ProofCertificate:
     """Certify whether {a_i (mod m_i)} is a covering system (every integer is
     covered by at least one congruence).

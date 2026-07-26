@@ -16,17 +16,16 @@ IPR constraints:
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 from fnmatch import translate
 from functools import lru_cache
-import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from zall.core.action import Action
 from zall.core.context import Context
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # §4.2.1 SafeLevel (three-state, 不开 4 态 over-engineering)
@@ -226,7 +225,7 @@ class RuleSet(BaseModel):
     greylist_deny_rules: tuple[Rule, ...] = ()  # Item F: 中等危险规则
 
     @model_validator(mode="after")
-    def _core_deny_must_be_blacklist(self) -> "RuleSet":
+    def _core_deny_must_be_blacklist(self) -> RuleSet:
         """Core deny-rules can only be BLACKLIST (§4.2.1 priority chain)."""
         for rule in self.core_deny_rules:
             if rule.level != SafeLevel.BLACKLIST:
@@ -237,7 +236,7 @@ class RuleSet(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _greylist_deny_ids_must_be_unique(self) -> "RuleSet":
+    def _greylist_deny_ids_must_be_unique(self) -> RuleSet:
         """Item F: greylist_deny_rules 的 rule_id 不能与 core_deny 重复。"""
         core_ids = {r.rule_id for r in self.core_deny_rules}
         for rule in self.greylist_deny_rules:

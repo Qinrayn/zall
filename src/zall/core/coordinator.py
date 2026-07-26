@@ -22,9 +22,10 @@ IPR constraints:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -154,7 +155,7 @@ class Coordinator:
         spawn_tool: Any,
         *,
         max_workers: int = DEFAULT_MAX_WORKERS,
-    ) -> "Coordinator":
+    ) -> Coordinator:
         """用既有 SpawnSubagentTool 构造 Coordinator (真实消费者接线)。
 
         每个任务同步跑一个 subagent (parallel=False, 由 Coordinator 自己并行调度),

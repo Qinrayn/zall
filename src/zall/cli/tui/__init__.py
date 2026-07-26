@@ -14,23 +14,23 @@ Exports:
 
 from __future__ import annotations
 
-from zall.cli.tui.app import TuiApp, run_tui, _check_tui_supported, _detect_terminal_capabilities
+from zall.cli.tui.app import TuiApp, _check_tui_supported, _detect_terminal_capabilities, run_tui
 from zall.cli.tui.widgets import (
     ChatMessage,
-    MessageList,
     InputBar,
+    MessageList,
     StatusBar,
-    ToolPanel,
     ThinkingPanel,
+    ToolPanel,
 )
 
 __all__ = [
+    "ChatMessage",
+    "InputBar",
+    "MessageList",
+    "StatusBar",
+    "ThinkingPanel",
+    "ToolPanel",
     "TuiApp",
     "run_tui",
-    "ChatMessage",
-    "MessageList",
-    "InputBar",
-    "StatusBar",
-    "ToolPanel",
-    "ThinkingPanel",
 ]

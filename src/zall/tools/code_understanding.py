@@ -254,5 +254,5 @@ class CodeUnderstandingTool:
                 parts.append(f"  {line}")
             if len(content.split("\n")) > 60:
                 parts.append("  ... (truncated)")
-        except (OSError, IOError) as e:
+        except OSError as e:
             parts.append(f"\n  ⚠ Could not read file: {e}")

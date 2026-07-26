@@ -24,7 +24,8 @@ IPR constraints:
 
 from __future__ import annotations
 
-from typing import Any, Callable, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
 
 from zall._util.logging import get_zall_logger as _get_zall_logger
 
@@ -165,7 +166,7 @@ class ExtensionRegistry:
         Returns:
             List of SelfSuggestion objects (may be empty)
         """
-        from zall.core.lifecycle import SuggestionAccumulator, SelfSuggestion
+        from zall.core.lifecycle import SelfSuggestion, SuggestionAccumulator
 
         accumulator = SuggestionAccumulator()
 

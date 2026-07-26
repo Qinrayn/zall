@@ -22,11 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from zall.core.verifiability import AckEvent, TrustAnchor
+
 from .protocol import (
-    AnchorRequest,
-    AnchorResponse,
     DEFAULT_SOCKET_PATH,
     NONCE_BYTES,
+    AnchorRequest,
+    AnchorResponse,
     decode_message,
     encode_message,
 )

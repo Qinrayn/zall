@@ -45,7 +45,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-
 # ── 请求/响应 model ──
 
 
@@ -61,7 +60,7 @@ class AnchorRequest(BaseModel):
     nonce: str
 
     @classmethod
-    def build(cls, run_id: str, last_event_hash: str, ts: int, nonce: str) -> "AnchorRequest":
+    def build(cls, run_id: str, last_event_hash: str, ts: int, nonce: str) -> AnchorRequest:
         return cls(
             method="write_run_tail",
             run_id=run_id,

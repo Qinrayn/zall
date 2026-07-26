@@ -11,16 +11,16 @@ Available adapters:
   - OllamaAdapter          — Ollama local models (llama, qwen, etc.)
 """
 
-from zall.adapters.base import BaseAdapter
-from zall.adapters.openai_compat import OpenAICompatAdapter
 from zall.adapters.anthropic import AnthropicAdapter
+from zall.adapters.base import BaseAdapter
 from zall.adapters.gemini import GeminiAdapter
 from zall.adapters.ollama import OllamaAdapter
+from zall.adapters.openai_compat import OpenAICompatAdapter
 
 __all__ = [
-    "BaseAdapter",
-    "OpenAICompatAdapter",
     "AnthropicAdapter",
+    "BaseAdapter",
     "GeminiAdapter",
     "OllamaAdapter",
+    "OpenAICompatAdapter",
 ]

@@ -23,22 +23,31 @@ from __future__ import annotations
 
 import copy
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from uuid import uuid4
 
-
-
-from zall.core.action import Action
+from zall._util.logging import get_zall_logger as _get_zall_logger
+from zall.core import loop_checkpoint, loop_perception
 from zall.core.accountability import AccountabilityResult
+from zall.core.action import Action
 from zall.core.chat_state import ChatState
+from zall.core.checkpoint import CheckpointManager
+from zall.core.compactor import Compactor
 from zall.core.context import Context
+from zall.core.context_manager import ContextManager
 from zall.core.events import EventBus
+from zall.core.executor import ToolExecutor
 from zall.core.extension import ExtensionRegistry
 from zall.core.gate import (
     UserResponder,
     UserResponseType,
 )
 from zall.core.goal import GoalTriple, TerminationState
+
+# ── Import from sibling modules (Phase 1 refactoring) ──
+from zall.core.loop_config import AgentConfig, _GitProtectProtocol
+from zall.core.loop_events import MAX_STEPS, LoopEvent, RunEgress, StepResult
 from zall.core.model import (
     Message,
     ModelAdapter,
@@ -46,23 +55,12 @@ from zall.core.model import (
     StopReason,
     ToolCall,
 )
+from zall.core.plan_mode import PlanModeState, PlanModeTracker
 from zall.core.prompt_template import render as _render_template
 from zall.core.refiner import GoalRefiner
 from zall.core.safety import Judgement, RuleSet, SafeLevel
-from zall.core.plan_mode import PlanModeTracker, PlanModeState
 from zall.core.tool import ToolRegistry
 from zall.core.verifiability import EventType, RunRecorder
-from zall.core.compactor import Compactor
-from zall.core.checkpoint import CheckpointManager
-from zall._util.logging import get_zall_logger as _get_zall_logger
-from zall.core.executor import ToolExecutor
-from zall.core.context_manager import ContextManager
-from zall.core import loop_checkpoint, loop_perception
-
-# ── Import from sibling modules (Phase 1 refactoring) ──
-from zall.core.loop_config import AgentConfig, _GitProtectProtocol
-from zall.core.loop_events import MAX_STEPS, LoopEvent, RunEgress, StepResult
-
 
 _log = _get_zall_logger(__name__)
 

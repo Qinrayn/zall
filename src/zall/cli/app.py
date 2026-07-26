@@ -16,7 +16,8 @@ import argparse
 import sys
 from typing import TYPE_CHECKING, Any
 
-from zall._util.win32 import ensure_utf8_stdio as _ensure_utf8_stdio, set_console_title as _set_console_title
+from zall._util.win32 import ensure_utf8_stdio as _ensure_utf8_stdio
+from zall._util.win32 import set_console_title as _set_console_title
 
 # B-启动提速: 重型核心依赖仅作类型注解 (from __future__ import annotations 下不求值),
 # 运行时用到处再懒加载 — 让 --version/--help/--init 不拖整个 core 链 (~0.4s)。

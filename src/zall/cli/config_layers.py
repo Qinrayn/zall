@@ -34,7 +34,6 @@ from typing import Any
 from zall._util.toml import load_toml_simple
 from zall._util.win32 import resolve_home_dir
 
-
 # ── Path helpers ──
 
 def _system_config_path() -> Path | None:

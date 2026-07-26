@@ -16,10 +16,8 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
-
 
 # ---------------------------------------------------------------------------
 # §0  AgentIdentity — 六维本体论 ① Identity (MASTER.md §1.2 + §4.2.1)
@@ -45,7 +43,7 @@ class AgentIdentity(BaseModel):
     capabilities: tuple[str, ...] = ()
 
     @classmethod
-    def default(cls, agent_id: Optional[str] = None) -> "AgentIdentity":
+    def default(cls, agent_id: str | None = None) -> AgentIdentity:
         """构造默认身份 (未显式提供 Identity 时的兜底, 保证 I-0 六维完整)。"""
         import uuid as _uuid
 
@@ -260,11 +258,11 @@ class AgentDefinition(BaseModel):
     """工具集预设"""
     permission_mode: PermissionMode = PermissionMode.DEFAULT
     """权限模式"""
-    capability_mode: Optional[SubagentCapabilityMode] = None
+    capability_mode: SubagentCapabilityMode | None = None
     """能力模式限制 (用于子 agent 场景)"""
 
     # ── 模型 ──
-    model: Optional[str] = None
+    model: str | None = None
     """模型名称, None=inherit (继承父 agent)"""
 
     # ── 技能 ──
@@ -286,21 +284,21 @@ class AgentDefinition(BaseModel):
     """工具白名单 (空=继承全部)"""
 
     # ── 子 agent ──
-    allowed_subagent_types: Optional[list[str]] = None
+    allowed_subagent_types: list[str] | None = None
     """允许的子 agent 类型, None=无限制, []=禁止"""
 
     # ── 元数据 ──
-    source_path: Optional[str] = None
+    source_path: str | None = None
     """定义文件路径"""
     scope: AgentScope = AgentScope.BUILTIN
     """定义来源范围"""
-    prompt_body: Optional[str] = None
+    prompt_body: str | None = None
     """Markdown 主体 (agent 行为提示)"""
 
     # ── 解析 ──
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "AgentDefinition":
+    def from_file(cls, path: str | Path) -> AgentDefinition:
         """从 .md 文件解析 AgentDefinition (YAML frontmatter + body)。
 
         File format:
@@ -319,7 +317,7 @@ class AgentDefinition(BaseModel):
         return def_
 
     @classmethod
-    def parse_yaml(cls, yaml_content: str) -> "AgentDefinition":
+    def parse_yaml(cls, yaml_content: str) -> AgentDefinition:
         """仅从 YAML 字符串解析 AgentDefinition (无 body)。"""
         import yaml as _yaml
         data = _yaml.safe_load(yaml_content)
@@ -329,7 +327,7 @@ class AgentDefinition(BaseModel):
         return cls(**data)
 
     @classmethod
-    def _parse(cls, content: str) -> "AgentDefinition":
+    def _parse(cls, content: str) -> AgentDefinition:
         """解析完整内容 (YAML frontmatter + body)。"""
         trimmed = content.strip()
         if not trimmed.startswith("---"):
@@ -386,7 +384,7 @@ class AgentDefinition(BaseModel):
     @classmethod
     def builtin_defaults(
         cls, name: str, description: str = "",
-    ) -> "AgentDefinition":
+    ) -> AgentDefinition:
         """内置 agent 的默认值。"""
         return cls(
             name=name,
@@ -405,7 +403,7 @@ class AgentDefinition(BaseModel):
         )
 
     @classmethod
-    def default_zall(cls) -> "AgentDefinition":
+    def default_zall(cls) -> AgentDefinition:
         """默认 zall agent — 全功能。"""
         return cls.builtin_defaults(
             "zall",
@@ -413,7 +411,7 @@ class AgentDefinition(BaseModel):
         )
 
     @classmethod
-    def explore(cls) -> "AgentDefinition":
+    def explore(cls) -> AgentDefinition:
         """Explore subagent — 快速只读探索。"""
         return cls(
             name="explore",
@@ -431,7 +429,7 @@ class AgentDefinition(BaseModel):
         )
 
     @classmethod
-    def plan(cls) -> "AgentDefinition":
+    def plan(cls) -> AgentDefinition:
         """Plan subagent — 只读规划。"""
         return cls(
             name="plan",
@@ -448,7 +446,7 @@ class AgentDefinition(BaseModel):
         )
 
     @classmethod
-    def general_purpose(cls) -> "AgentDefinition":
+    def general_purpose(cls) -> AgentDefinition:
         """General-purpose subagent — 全功能实现。"""
         return cls(
             name="general-purpose",

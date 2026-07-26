@@ -10,12 +10,12 @@ IPR constraints:
 from __future__ import annotations
 
 import difflib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from zall.cli.render import _shared_console
 from zall.skills import Skill, find_skill
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # SlashCommand registry
@@ -597,7 +597,7 @@ def _suggest_command(name: str) -> str | None:
     避免 /mode 与 /model 名称相近时误建议。
     """
     target = name.lstrip("/").lower()
-    candidates = [c.lstrip("/").lower() for c in _COMMANDS.keys()]
+    candidates = [c.lstrip("/").lower() for c in _COMMANDS]
     matches = difflib.get_close_matches(target, candidates, n=5, cutoff=0.6)
     if not matches:
         return None
@@ -869,6 +869,7 @@ def _check_mcp_health(project_dir: str | None = None) -> tuple[str, str]:
     """
     import shutil
     from pathlib import Path
+
     from zall.mcp.config import load_mcp_config
 
     project_path = project_dir or str(Path.cwd())
@@ -1236,4 +1237,4 @@ def _generate_agents_md(cwd: str) -> str:
 
 
 # Lazy import to avoid circular dependency
-from zall.core.verifiability import EventType  # noqa: E402, F401
+from zall.core.verifiability import EventType  # noqa: E402

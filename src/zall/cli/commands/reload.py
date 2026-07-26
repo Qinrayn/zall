@@ -55,7 +55,12 @@ def cmd_reload(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
 
     # 3. Reload MCP tools (close old connections, open new ones)
     try:
-        from zall.cli.orchestrator import build_mcp_tools, build_tools, merge_tools, inject_subagent_context
+        from zall.cli.orchestrator import (
+            build_mcp_tools,
+            build_tools,
+            inject_subagent_context,
+            merge_tools,
+        )
         old_mcp = state.get("_mcp_tools", [])
         for t in old_mcp:
             try:

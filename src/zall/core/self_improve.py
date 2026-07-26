@@ -24,8 +24,9 @@ zall 的版本坚持 IPR-0 精神做出**差异化**: 每个候选改进必须�
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 # 类型别名
 Candidate = Any  # 鸭子类型: .kind/.target/.value/.confidence/.evidence

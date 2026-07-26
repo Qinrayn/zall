@@ -22,9 +22,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+
 from zall.core.goal import TerminationState
 from zall.core.verifiability import EventType, TimelineEvent
-
 
 # ── 评估结果数据结构 ──
 
@@ -354,9 +354,9 @@ def format_core_eval_report(report: CoreEvalReport) -> str:
 __all__ = [
     "CoreEvalMetric",
     "CoreEvalReport",
-    "load_timeline",
     "compute_goal_achievement_rate",
     "compute_timeline_integrity_rate",
     "evaluate_from_timeline",
     "format_core_eval_report",
+    "load_timeline",
 ]

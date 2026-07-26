@@ -19,15 +19,15 @@ IPR constraints:
 
 from __future__ import annotations
 
-import os
 import itertools
+import os
 from typing import Any
 
-from zall.core.tool import ToolResult
-from zall.core.tool_kind import ToolKind
 from zall._util import is_binary
 from zall._util.file import detect_text_encoding as _detect_encoding
 from zall._util.path import resolve_path
+from zall.core.tool import ToolResult
+from zall.core.tool_kind import ToolKind
 
 # 单次最大行数 (超过此数truncate, prevents context pollution)
 MAX_LINES = 2000

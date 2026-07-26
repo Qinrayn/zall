@@ -1,8 +1,11 @@
 """zall.core.loop_events — LoopEvent, RunEgress, StepResult + constants."""
 
 from __future__ import annotations
+
 from typing import Any
+
 from pydantic import BaseModel, ConfigDict
+
 from zall.core.goal import GoalTriple, TerminationState
 
 MAX_STEPS = 50

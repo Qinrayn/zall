@@ -21,8 +21,9 @@ IPR constraints:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 def _home_dir() -> Path:
@@ -88,6 +89,7 @@ def _build_custom_completer(
         return None
 
     import html as _html
+
     from zall.cli.commands import get_command_meta as _get_command_meta
     meta = command_meta if command_meta is not None else _get_command_meta()
     all_cmds = list(commands or meta.keys())
@@ -314,6 +316,7 @@ def make_prompt_fn(
             return None
         try:
             import html as _h
+
             from prompt_toolkit.formatted_text import HTML
             return HTML(_h.escape(txt))
         except Exception:
@@ -323,6 +326,7 @@ def make_prompt_fn(
         """prompt_toolkit input with slash completion + history + multi-line."""
         try:
             import html as _html
+
             from prompt_toolkit.formatted_text import HTML
             from prompt_toolkit.shortcuts import CompleteStyle
 

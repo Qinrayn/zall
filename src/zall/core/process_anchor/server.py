@@ -36,14 +36,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from zall.core.verifiability import AckEvent, _compute_ack_hash
+
 from .protocol import (
+    DEFAULT_SOCKET_PATH,
     AnchorRequest,
     AnchorResponse,
-    DEFAULT_SOCKET_PATH,
     decode_message,
     encode_message,
 )
-
 
 # ── 持久化 ──
 
@@ -206,7 +206,7 @@ class AnchorState:
 
 def _build_sign_message(last_event_hash: str, ts: int, run_id: str) -> bytes:
     """构造签名消息 (与 verifiability._build_sign_message 必须一致)。"""
-    return f"{last_event_hash}|{ts}|{run_id}".encode("utf-8")
+    return f"{last_event_hash}|{ts}|{run_id}".encode()
 
 
 def _compute_key_fingerprint(pubkey: Ed25519PublicKey) -> str:

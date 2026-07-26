@@ -37,7 +37,7 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          pip install ruff
+          pip install ruff==0.15.22
           ruff check src/
 
       - name: IPR-3 — core is model-agnostic (no model SDK imports)

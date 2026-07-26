@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from zall.core.tool import ToolResult, ToolCapabilities, ToolScope
+from zall.core.tool import ToolCapabilities, ToolResult, ToolScope
 
 
 class ApplyPatchTool:

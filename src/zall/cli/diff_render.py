@@ -411,9 +411,18 @@ def preview_from_texts(path: str, old_text: str, new_text: str,
 
 
 __all__ = [
-    "DiffLine", "DiffLineKind",
-    "build_hunks", "parse_unified_hunks", "count_changes", "should_summarize",
-    "render_diff_panel", "render_diff_preview", "render_diff_summary",
-    "panel_from_texts", "preview_from_texts",
-    "INLINE_DIFF_MIN_RATIO", "MAX_PREVIEW_CHANGED_LINES", "MAX_INLINE_DIFF_LINES",
+    "INLINE_DIFF_MIN_RATIO",
+    "MAX_INLINE_DIFF_LINES",
+    "MAX_PREVIEW_CHANGED_LINES",
+    "DiffLine",
+    "DiffLineKind",
+    "build_hunks",
+    "count_changes",
+    "panel_from_texts",
+    "parse_unified_hunks",
+    "preview_from_texts",
+    "render_diff_panel",
+    "render_diff_preview",
+    "render_diff_summary",
+    "should_summarize",
 ]

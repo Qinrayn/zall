@@ -23,13 +23,20 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from zall.cli.commands._common import (
-    _CATEGORY_NAV, _CATEGORY_TOOLS, _CATEGORY_CONTEXT, _CATEGORY_SESSION,
+    _CATEGORY_CONTEXT,
+    _CATEGORY_NAV,
+    _CATEGORY_SESSION,
+    _CATEGORY_TOOLS,
+    _auto_step_loop,
+    _cmd_init_simple,
+    _print_about,
+    _print_advanced_help,
+    _print_help,
     slash_command,
-    _print_about, _print_help, _print_advanced_help,
-    _auto_step_loop, _cmd_init_simple,
 )
 from zall.cli.render import _shared_console
 from zall.core.verifiability import EventType, RunRecorder
+
 
 # Extracted from _legacy.py lines 335-379
 @slash_command("/help", aliases=("/h",), description="show this help", category=_CATEGORY_NAV)
@@ -494,7 +501,7 @@ def cmd_update(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
         /update          - check and upgrade to latest version
         /update check    - check only, do not upgrade
     """
-    from zall.cli.update import check_for_update, perform_update, get_current_version
+    from zall.cli.update import check_for_update, get_current_version, perform_update
 
     current = get_current_version()
     out.write(f"  current: zall {current}\n")

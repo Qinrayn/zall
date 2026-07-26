@@ -24,7 +24,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # §3.5 GoalType Enum (BaseTypes 11 种, for coding agent, SETTLED-fornow)
 # ──────────────────────────────────────────────────────────────────────────

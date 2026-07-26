@@ -50,7 +50,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-
 # ═══════════════════════════════════════════════════════════════════
 # §1  Symbol Types
 # ═══════════════════════════════════════════════════════════════════
@@ -103,7 +102,7 @@ class Symbol:
     name: str
     kind: SymbolKind
     location: SymbolLocation
-    parent: Optional[str] = None
+    parent: str | None = None
     """父符号名 (如类的成员方法)"""
     docstring: str = ""
     signature: str = ""

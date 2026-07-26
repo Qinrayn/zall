@@ -98,5 +98,5 @@ def resolve_code_bg(bg: str) -> str | None:
     return bg or None
 
 
-__all__ = ["ANSI_THEME_NAME", "ZALL_ANSI_THEME", "resolve_code_theme", "resolve_code_bg"]
+__all__ = ["ANSI_THEME_NAME", "ZALL_ANSI_THEME", "resolve_code_bg", "resolve_code_theme"]
 

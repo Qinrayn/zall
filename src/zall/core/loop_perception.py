@@ -94,14 +94,8 @@ def run_perception(loop: Any) -> None:
         _prev = loop._prev_perception_snapshot
         _changed = False
         # 条件: git modified 文件数变化
-        if _current_snapshot.get("modified_count") != _prev.get("modified_count"):
-            _changed = True
-        # 条件: lsp_errors 从 0 变非 0
-        elif (_prev.get("lsp_errors", 0) == 0
-              and _current_snapshot.get("lsp_errors", 0) != 0):
-            _changed = True
-        # 条件: confidence 下降超过 0.3
-        elif (_prev.get("confidence", 1.0) - _current_snapshot.get("confidence", 1.0)
+        if _current_snapshot.get("modified_count") != _prev.get("modified_count") or (_prev.get("lsp_errors", 0) == 0
+              and _current_snapshot.get("lsp_errors", 0) != 0) or (_prev.get("confidence", 1.0) - _current_snapshot.get("confidence", 1.0)
               > 0.3):
             _changed = True
 

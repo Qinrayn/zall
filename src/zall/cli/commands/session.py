@@ -15,18 +15,23 @@ from typing import Any
 
 from zall.cli.commands._common import (
     _CATEGORY_SESSION,
-    slash_command,
     _recalc_usage_from_timeline,
+    slash_command,
 )
 from zall.cli.render import _shared_console
 from zall.cli.session import (
     _get_cached_sessions,
-    _list_sessions, _run_replay, _run_resume,
-    _search_sessions, _tag_session, _prune_sessions,
+    _list_sessions,
+    _prune_sessions,
+    _run_replay,
+    _run_resume,
+    _search_sessions,
+    _tag_session,
 )
 from zall.core.compactor import ModelCompactor
 from zall.core.loop import AgentLoop
 from zall.core.verifiability import EventType
+
 
 # Extracted from _legacy.py lines 527-769
 @slash_command("/sessions", description="list recent sessions", category=_CATEGORY_SESSION)

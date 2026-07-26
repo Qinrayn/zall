@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from zall.cli.commands._common import slash_command, _CATEGORY_MODEL
+from zall.cli.commands._common import _CATEGORY_MODEL, slash_command
 
 _CATEGORY_CONFIG = _CATEGORY_MODEL  # 归入 model 配置类
 

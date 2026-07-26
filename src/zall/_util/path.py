@@ -5,16 +5,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import difflib
+from pathlib import Path
 
 # 统一noisedirectory集 (并集: glob.py + grep.py + list_dir.py + loop.py)
 NOISE_DIRS: frozenset[str] = frozenset({
     ".git", "node_modules", ".venv", "venv", "__pycache__",
     ".tox", ".eggs", ".egg-info", ".svn", ".hg",
     ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    "dist", "build", "target", ".tox",
-    "lib", "include",
+    "dist", "build", "target", "lib", "include",
 })
 
 

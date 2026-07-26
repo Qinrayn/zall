@@ -31,7 +31,8 @@ IPR constraints:
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # Listener sign: (kind: str, payload: dict) -> None
 EventListener = Callable[[str, dict[str, Any]], None]

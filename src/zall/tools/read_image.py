@@ -25,7 +25,6 @@ import os
 from typing import Any
 
 from zall._util.path import resolve_path
-
 from zall.core.tool import ToolResult
 
 # 图片最大大小 (超过此数reject, prevents context pollution)

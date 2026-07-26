@@ -15,6 +15,7 @@ from typing import Any
 
 from zall.cli.commands._common import _CATEGORY_TOOLS, slash_command
 
+
 # Extracted from _legacy.py lines 1254-1400
 @slash_command("/git", description="git operations", category=_CATEGORY_TOOLS)
 def cmd_git(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:

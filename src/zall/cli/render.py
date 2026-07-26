@@ -19,7 +19,8 @@ import shutil
 import sys
 import threading
 import time
-from typing import Any, Callable, TextIO
+from collections.abc import Callable
+from typing import Any, TextIO
 
 from rich.ansi import AnsiDecoder
 from rich.console import Console
@@ -28,12 +29,11 @@ from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.text import Text
 
-from zall._util.string import shorten as _shorten, truncate as _truncate  # G11: cell-width 截断
-
+from zall._util.string import shorten as _shorten  # G11: cell-width 截断
+from zall._util.string import truncate as _truncate
 from zall.core.accountability import base_judge
 from zall.core.goal import GoalTriple
 from zall.core.loop_events import LoopEvent
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # Semantic color slots — 值由 cli/theme.py 在模块尾部 apply() 注入 (G6 单一色源)。
@@ -186,11 +186,11 @@ class _ModeColor:
 
 
 # Shared Console (performance): avoid creating a new Console per render call.
-_CONSOLE_CACHE: dict[int, "Console"] = {}
+_CONSOLE_CACHE: dict[int, Console] = {}
 _CONSOLE_CACHE_MAX = 8
 
 
-def _shared_console(out: Any) -> "Console":
+def _shared_console(out: Any) -> Console:
     key = id(out)
     c = _CONSOLE_CACHE.get(key)
     if c is not None and getattr(c, "file", None) is out:
@@ -239,7 +239,7 @@ _RE_THINK_CLOSE = re.compile(r"\s*</think>\s*", re.IGNORECASE)
 
 
 def _strip_think_tags(text: str) -> str:
-    """Remove <think>/<​/think> wrapper tags from reasoning/text content."""
+    """Remove <think>/<\u200b/think> wrapper tags from reasoning/text content."""
     if not text:
         return text
     low = text.lower()

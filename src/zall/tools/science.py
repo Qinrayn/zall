@@ -30,11 +30,11 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
-from zall.core.tool import ToolCapabilities, ToolKind, ToolNamespace, ToolScope, ToolResult
 from zall.core.evidence import Evidence, EvidenceType
 from zall.core.experiment import ExperimentGoal
 from zall.core.hypothesis import Hypothesis
 from zall.core.provenance import ScienceProvenance
+from zall.core.tool import ToolCapabilities, ToolKind, ToolNamespace, ToolResult, ToolScope
 from zall.extensions.science.store import ScienceStore
 
 

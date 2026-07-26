@@ -21,7 +21,6 @@ import threading
 import time
 from typing import Any
 
-
 # PyPI JSON API URL (无需认证)
 _PYPI_URL = "https://pypi.org/pypi/zall/json"
 
@@ -98,8 +97,8 @@ def _fetch_latest_version() -> str | None:
     失败时返回 None (静默降级)。
     """
     try:
-        import urllib.request
         import urllib.error
+        import urllib.request
         req = urllib.request.Request(_PYPI_URL, headers={"User-Agent": "zall/update-check"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))

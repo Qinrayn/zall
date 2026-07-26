@@ -32,15 +32,15 @@ IPR constraints:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 # C5 (perf): module-level import of Message (was lazily imported inside 7 hot-path
 # methods, each doing a sys.modules dict lookup on every message append/query).
 # No circular import: model.py does not import chat_state.
 from zall.core.model import Message
-
 
 # ═══════════════════════════════════════════════════════════════════
 # §1  Event System
@@ -177,7 +177,7 @@ class SummaryCompaction:
     def compact(
         self,
         messages: list[Any],
-        events: list[StateEvent],  # noqa: ARG002
+        events: list[StateEvent],
     ) -> CompactionResult:
         if len(messages) <= self._keep_last:
             return CompactionResult(
@@ -219,7 +219,7 @@ class ChatPersistence(Protocol):
 
 class NullPersistence:
     """空持久化 — 不保存任何内容。"""
-    def save(self, snapshot: Snapshot) -> None:  # noqa: ARG002
+    def save(self, snapshot: Snapshot) -> None:
         pass
 
     def load(self) -> Snapshot | None:

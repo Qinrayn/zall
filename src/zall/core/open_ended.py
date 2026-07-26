@@ -22,8 +22,8 @@ CLI 层接模型)。可选 llm_fn 提供更丰富的生成 (留待增强)。IPR-
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from zall.core.experience_store import ExperienceStore, get_experience_store
 
@@ -130,7 +130,7 @@ def run_open_ended_round(
     check: str | None = None,
     max_rounds: int = 1,
     proposals_per_round: int = 1,
-    on_event: "Callable[[str, dict], None] | None" = None,
+    on_event: Callable[[str, dict], None] | None = None,
 ) -> OpenEndedReport:
     """永续自改进一轮: 生成新任务 → 红蓝提议+沙盒证伪 → verified 解写回经验库。
 

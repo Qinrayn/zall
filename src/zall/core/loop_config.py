@@ -1,16 +1,20 @@
 """zall.core.loop_config — AgentConfig + _GitProtectProtocol."""
 
 from __future__ import annotations
+
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+
+from zall.core.accountability import Judge
+from zall.core.chat_state import ChatState
 from zall.core.checkpoint import CheckpointManager
 from zall.core.compactor import Compactor
 from zall.core.events import EventBus
 from zall.core.extension import ExtensionRegistry
-from zall.core.accountability import Judge
-from zall.core.chat_state import ChatState
-from zall.core.verifiability import TrustAnchor
 from zall.core.policies import CompactionPolicy, ReminderPolicy
+from zall.core.verifiability import TrustAnchor
+
 
 @runtime_checkable
 class _GitProtectProtocol(Protocol):

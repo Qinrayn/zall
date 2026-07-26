@@ -49,7 +49,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-
 # ═══════════════════════════════════════════════════════════════════
 # §1  Plugin Manifest
 # ═══════════════════════════════════════════════════════════════════
@@ -98,7 +97,7 @@ class PluginManifest:
             import tomllib  # Python 3.11+
         except ImportError:
             try:
-                import tomli as tomllib  # type: ignore[no-redef]  # noqa: N813
+                import tomli as tomllib  # type: ignore[no-redef]
             except ImportError:
                 raise ImportError(
                     "tomli/tomllib required for plugin manifest parsing. "
@@ -132,7 +131,6 @@ class PluginManifest:
 
 class PluginOrigin(str):
     """插件来源路径。"""
-    pass
 
 
 class PluginScope(Enum):

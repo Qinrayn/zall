@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import Any
 
 from zall._util.path import resolve_path
-
 from zall.core.tool import ToolResult
 from zall.core.tool_kind import ToolKind
 

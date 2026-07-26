@@ -23,7 +23,6 @@ from pydantic import BaseModel, ConfigDict
 
 from zall.core.goal import GoalType, TerminationState
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # §5.4 CaveatType (v0.0.3 立的两个subtype)
 # ──────────────────────────────────────────────────────────────────────────

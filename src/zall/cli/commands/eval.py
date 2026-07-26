@@ -165,6 +165,7 @@ def _render_report(out: Any, report: CoreEvalReport) -> None:
     is_tty = hasattr(out, "isatty") and out.isatty()
     try:
         from rich.table import Table
+
         from zall.cli.render import _shared_console
         has_rich = True
     except ImportError:

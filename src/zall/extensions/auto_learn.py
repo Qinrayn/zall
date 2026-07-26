@@ -36,7 +36,6 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from zall._util.logging import get_zall_logger as _get_zall_logger
-
 from zall.core.lifecycle import (
     SelfSuggestion,
     ToolResultInput,

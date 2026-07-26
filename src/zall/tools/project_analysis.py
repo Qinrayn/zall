@@ -15,7 +15,6 @@ from typing import Any
 
 from zall.core.tool import ToolResult
 
-
 # 语言 -> 扩展名映射
 _LANG_EXT: dict[str, set[str]] = {
     "Python": {".py"},
@@ -42,7 +41,7 @@ _SKIP_DIRS = frozenset({
     ".tox", "dist", "build", ".egg-info", "target",
     ".pytest_cache", ".ruff_cache", ".mypy_cache",
     ".zall", ".zcode", ".idea", ".vscode",
-    "vendor", "bundle", ".bundle", ".git",
+    "vendor", "bundle", ".bundle",
 })
 
 

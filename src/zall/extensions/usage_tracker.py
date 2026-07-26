@@ -13,8 +13,8 @@ Provides a /stats command for displaying usage data.
 
 from __future__ import annotations
 
-from typing import Any
 from collections import defaultdict
+from typing import Any
 
 from zall.core.lifecycle import ToolResultInput, TurnStartInput
 

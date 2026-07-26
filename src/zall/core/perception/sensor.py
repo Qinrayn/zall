@@ -23,7 +23,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # Observation — 原始观测数据
 # ──────────────────────────────────────────────────────────────────────────

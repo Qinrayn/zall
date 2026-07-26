@@ -24,8 +24,8 @@ blue/red 在 CLI 层用 adapter 组装, 核心保持可离线单测。
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 # blue_fn(inspiration: str) -> content: str
 BlueFn = Callable[[str], str]

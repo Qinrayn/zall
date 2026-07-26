@@ -73,7 +73,7 @@ class MCPClient:
     # 生命周期
     # ──────────────────────────────────────────────────────────────────────
 
-    def connect(self) -> "MCPClient":
+    def connect(self) -> MCPClient:
         """spawn server + initialize + return self; 失败抛 MCPConnectionError。"""
         try:
             self._proc = subprocess.Popen(

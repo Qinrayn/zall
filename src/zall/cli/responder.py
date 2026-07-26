@@ -20,8 +20,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from zall._util.string import shorten
 from zall.core.action import Action
@@ -295,9 +296,8 @@ class CliUserResponder(UserResponder):
     def _print_panel_group(self, header, renderables: list, border_color: str) -> None:
         """渲染 header + diff 预览组合 Panel (降级安全)。"""
         try:
-            from rich.console import Group
+            from rich.console import Console, Group
             from rich.panel import Panel
-            from rich.console import Console
             console = Console(stderr=True)
             console.print(Panel(
                 Group(header, *renderables),
@@ -309,8 +309,8 @@ class CliUserResponder(UserResponder):
     def _print_panel(self, text, border_color: str) -> None:
         """渲染 rich Panel (降级安全)。"""
         try:
-            from rich.panel import Panel
             from rich.console import Console
+            from rich.panel import Panel
             console = Console(stderr=True)
             console.print(Panel(text, border_style=border_color, padding=(0, 1)))
         except Exception:

@@ -17,7 +17,7 @@ IPR constraints:
 from __future__ import annotations
 
 import random
-from typing import Callable
+from collections.abc import Callable
 
 DEFAULT_INITIAL = 2.0
 DEFAULT_MAXIMUM = 8.0
@@ -38,8 +38,7 @@ def backoff_delay(
     期望值 = base; jitter=0 时退化为确定性指数退避。
     attempt < 1 按 1 处理 (防御)。
     """
-    if attempt < 1:
-        attempt = 1
+    attempt = max(attempt, 1)
     base = min(initial * (2.0 ** (attempt - 1)), maximum)
     if jitter <= 0:
         return base

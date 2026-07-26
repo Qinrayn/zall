@@ -17,7 +17,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 # ── Template registry ──
 
 _TEMPLATES: dict[str, str] = {

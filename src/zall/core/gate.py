@@ -24,7 +24,6 @@ from pydantic import BaseModel, ConfigDict
 from zall.core.action import Action
 from zall.core.safety import Judgement, SafeLevel
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # §4.5 GateState (state machine)
 # ──────────────────────────────────────────────────────────────────────────

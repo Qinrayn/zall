@@ -44,7 +44,7 @@ class TuiUserResponder(CliUserResponder):
         )
 
     # 父类的 _print (选项提示等) → 静默 (确认 UI 自带说明, 避免污染)
-    def _tui_print(self, s: str) -> None:  # noqa: D401
+    def _tui_print(self, s: str) -> None:
         return None
 
     def _render_permission_panel(self, action: Action, level: str) -> None:

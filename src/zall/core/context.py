@@ -20,7 +20,6 @@ from pydantic import BaseModel, ConfigDict
 
 from zall.core.goal import GoalStatement
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # 子结构 Protocol placeholder (concrete形态 deferred, 后续轮次落码)
 # ──────────────────────────────────────────────────────────────────────────
@@ -48,7 +47,6 @@ class RunEgressSummary(Protocol):
     """
 
     # placeholder: 最小interface为空, 后续extension
-    ...
 
 
 @runtime_checkable

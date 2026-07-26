@@ -12,9 +12,10 @@ import sys
 from typing import Any
 
 from zall.cli.commands._common import (
-    _CATEGORY_TOOLS, _CATEGORY_SESSION, slash_command,
+    _CATEGORY_SESSION,
+    _CATEGORY_TOOLS,
+    slash_command,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════
 # /lsp — LSP 诊断信息

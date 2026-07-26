@@ -102,6 +102,11 @@ class PasteFolder:
 
 
 __all__ = [
-    "PasteFolder", "should_fold", "normalize_pasted_text",
-    "sanitize_surrogates", "count_lines", "CHAR_THRESHOLD", "LINE_THRESHOLD",
+    "CHAR_THRESHOLD",
+    "LINE_THRESHOLD",
+    "PasteFolder",
+    "count_lines",
+    "normalize_pasted_text",
+    "sanitize_surrogates",
+    "should_fold",
 ]

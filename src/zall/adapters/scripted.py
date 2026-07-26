@@ -30,8 +30,9 @@ IPR constraints:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from zall.core.model import (
     Message,
@@ -98,7 +99,7 @@ class ScriptedAdapter:
         self.calls: list[tuple[int, int]] = []
 
     @classmethod
-    def from_file(cls, path: str | Path, *, model: str | None = None) -> "ScriptedAdapter":
+    def from_file(cls, path: str | Path, *, model: str | None = None) -> ScriptedAdapter:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         if not isinstance(data, dict) or "responses" not in data:
             raise ValueError(f"scripted: {path} 缺 'responses' 键")

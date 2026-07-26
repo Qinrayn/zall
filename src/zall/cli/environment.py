@@ -13,6 +13,7 @@ IPR constraints:
 
 from __future__ import annotations
 
+import os as _os
 import re
 import shutil
 import subprocess
@@ -22,8 +23,6 @@ from typing import Any
 
 from zall.core.context import Context
 from zall.mcp.tool import MCPTool
-
-import os as _os
 
 # ──────────────────────────────────────────────────────────────────────────
 # CwdMeta

@@ -25,11 +25,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from zall.core.tool import ToolResult
-from zall._util.path import resolve_path
 from zall._util.file import detect_text_encoding as _detect_encoding
+from zall._util.path import resolve_path
+from zall.core.tool import ToolResult
 from zall.tools._diff import unified_diff as _unified_diff
-
 
 _MAX_EDITS = 50  # 单次最大编辑数 (防 context 膨胀)
 

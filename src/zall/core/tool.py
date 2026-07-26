@@ -25,7 +25,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from zall.core.tool_kind import ToolKind, ToolNamespace
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # ToolResult (统一returntype)
 # ──────────────────────────────────────────────────────────────────────────

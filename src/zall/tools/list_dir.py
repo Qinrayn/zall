@@ -17,9 +17,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from zall.core.tool import ToolResult
 from zall._util import NOISE_DIRS as _SKIP_DIRS
 from zall._util.path import resolve_path
+from zall.core.tool import ToolResult
 
 MAX_DEPTH = 3  # 最大深度 (prevents context pollution)
 MAX_ENTRIES = 500  # 最大条目数

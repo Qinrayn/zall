@@ -23,14 +23,13 @@ IPR constraints:
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable, Any
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
-from zall.core.model import Message, ModelAdapter
 from zall._util.model_registry import get_window_size as _get_window_size
+from zall.core.model import Message, ModelAdapter
 from zall.core.policies import CompactionPolicy
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # Compactor Protocol (§7 "contextstrategy可换")

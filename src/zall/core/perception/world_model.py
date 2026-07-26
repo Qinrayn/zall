@@ -22,9 +22,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from zall.core.perception.sensor import Observation, StateEstimate
 from zall.core.action import Action
-
+from zall.core.perception.sensor import Observation, StateEstimate
 
 # ──────────────────────────────────────────────────────────────────────────
 # WorldModel Protocol — 世界模型接口
@@ -128,7 +127,6 @@ class NullWorldModel:
 
     def update(self, observation: Observation) -> None:
         """空更新: 什么也不做。"""
-        pass
 
     def anomaly(self, state: StateEstimate) -> bool:
         """空异常检测: 永远返回 False (无异常)。"""

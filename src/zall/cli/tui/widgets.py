@@ -23,25 +23,26 @@ from typing import Any
 
 from rich.console import Group
 from rich.markdown import Markdown
+from rich.markup import escape as _markup_escape
 from rich.panel import Panel
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
-from textual.reactive import reactive
-from textual.widgets import RichLog, TextArea
-from textual.widget import Widget
-from textual.message import Message
 from textual import events
 from textual.app import ComposeResult
-
-from rich.markup import escape as _markup_escape
+from textual.message import Message
+from textual.reactive import reactive
+from textual.widget import Widget
+from textual.widgets import RichLog, TextArea
 
 from zall._util.string import shorten  # G11: cell-width 截断
 from zall.cli import render as _render_mod  # G6: CODE_THEME/CODE_BG 随主题变, 须模块属性访问
-from zall.cli.render import _C, _G, _display_tool_name, _key_arg
 from zall.cli.paste_fold import PasteFolder  # G5: 大段粘贴折叠
+from zall.cli.render import _C, _G, _display_tool_name, _key_arg
 from zall.cli.syntax_theme import (  # G7: ANSI-16 语法主题解析
     resolve_code_bg as _resolve_code_bg,
+)
+from zall.cli.syntax_theme import (
     resolve_code_theme as _resolve_code_theme,
 )
 

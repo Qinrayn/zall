@@ -9,7 +9,10 @@ from zall._util.path import NOISE_DIRS, is_noise, skip_noise_dirs
 from zall._util.string import unquote
 
 __all__ = [
-    "is_binary", "read_text_file",
-    "NOISE_DIRS", "is_noise", "skip_noise_dirs",
+    "NOISE_DIRS",
+    "is_binary",
+    "is_noise",
+    "read_text_file",
+    "skip_noise_dirs",
     "unquote",
 ]

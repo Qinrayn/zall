@@ -14,7 +14,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from zall._util.toml import extract_section_name, load_toml_simple as _load_toml_simple
+from zall._util.toml import extract_section_name
+from zall._util.toml import load_toml_simple as _load_toml_simple
 from zall._util.win32 import resolve_home_dir
 
 # v2 fix: Windows 中文用户名时 Path.home() 可能因encoding问题returnerrorpath,

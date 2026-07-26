@@ -213,7 +213,8 @@ def _check_repl_autosave(out: Any, state: dict[str, Any]) -> bool:
     if ans not in ("y", "yes"):
         _clear_repl_autosave()
         return False
-    from zall.core.model import ToolCall as _ToolCall, Message as _Msg
+    from zall.core.model import Message as _Msg
+    from zall.core.model import ToolCall as _ToolCall
     msgs = []
     for m in msgs_raw:
         tool_calls = tuple(
@@ -264,15 +265,14 @@ def _save_session(run_id: str, loop: Any, egress: Any, anchor: Any = None) -> Pa
             make_metadata(run_id=run_id, saved_at=datetime.now().isoformat(timespec="seconds")),
             ensure_ascii=False,
         ) + "\n")
-        for ev in events:
-            f_tl.write(json.dumps({
+        f_tl.writelines(json.dumps({
                 "event_id": ev.event_id,
                 "ts": ev.ts,
                 "event_type": ev.event_type.value,
                 "payload": ev.payload,
                 "prev_hash": ev.prev_hash,
                 "hash": ev.compute_hash(),
-            }, ensure_ascii=False) + "\n")
+            }, ensure_ascii=False) + "\n" for ev in events)
 
     msgs_serialized = []
     for m in loop.messages:
@@ -336,7 +336,7 @@ def _load_session_messages(session_dir: Path) -> tuple[list[Any] | None, dict[st
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None, None
-    from zall.core.model import ToolCall, Message
+    from zall.core.model import Message, ToolCall
     msgs: list[Any] = []
     for m in data:
         tool_calls = tuple(
@@ -616,7 +616,7 @@ def _prune_sessions(days: int, out: Any) -> None:
 
 def _run_eval(out: Any, session_filter: str = "") -> None:
     """/eval: Evaluate sessions."""
-    from zall.eval.metrics import load_all_sessions, evaluate
+    from zall.eval.metrics import evaluate, load_all_sessions
     sessions = load_all_sessions(base_dir=_get_sessions_dir())
     if session_filter:
         sessions = [s for s in sessions if session_filter in s.run_id]
@@ -660,7 +660,7 @@ def _run_eval(out: Any, session_filter: str = "") -> None:
 
 def _run_replay(out: Any, session_id: str) -> None:
     """/replay <id>: Replay a session for reproducibility verification."""
-    from zall.cli.replay import replay_session, compare_egress
+    from zall.cli.replay import compare_egress, replay_session
     if not _get_sessions_dir().exists():
         out.write("  (no sessions)\n")
         return

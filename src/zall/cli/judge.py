@@ -14,7 +14,6 @@ from zall.core.accountability import Evidence, JudgeVerdict
 from zall.core.goal import TerminationState
 from zall.core.judge import SystemJudge as _SystemJudge
 
-
 # ── UndecidableJudge (保持不变, 核心不变量) ──
 
 
@@ -62,4 +61,4 @@ class SystemJudge(_SystemJudge):
         super().__init__(cwd=cwd, test_cmd=test_cmd, run_tests=run_tests, run_lint=False)
 
 
-__all__ = ["UndecidableJudge", "SystemJudge"]
+__all__ = ["SystemJudge", "UndecidableJudge"]

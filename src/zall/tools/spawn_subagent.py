@@ -50,7 +50,6 @@ from zall.core.loop_config import AgentConfig
 from zall.core.safety import Judgement, Rule, RuleSet, SafeLevel
 from zall.core.tool import ToolRegistry, ToolResult
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # 子 agent Authority: 更严格的securityrule
 # ──────────────────────────────────────────────────────────────────────────

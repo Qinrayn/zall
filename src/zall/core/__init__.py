@@ -26,7 +26,21 @@ constraints:
 # ──────────────────────────────────────────────────────────────────────────
 # §4.2.1 Identity — 身份 + 能力声明
 # ──────────────────────────────────────────────────────────────────────────
-from zall.core.agent import (  # noqa: F401
+# ──────────────────────────────────────────────────────────────────────────
+# §4.2.5 Accountability — 判定 + 证据
+# ──────────────────────────────────────────────────────────────────────────
+from zall.core.accountability import (
+    AccountabilityResult,
+    CaveatType,
+    Evidence,
+    Judge,
+    JudgeVerdict,
+    LintResult,
+    TestCaseResult,
+    base_judge,
+)
+from zall.core.action import Action
+from zall.core.agent import (
     AgentDefinition,
     AgentScope,
     PermissionMode,
@@ -38,107 +52,92 @@ from zall.core.agent import (  # noqa: F401
 )
 
 # ──────────────────────────────────────────────────────────────────────────
+# 跨维模块 (不专属某一维度)
+# ──────────────────────────────────────────────────────────────────────────
+from zall.core.extension import Extension, ExtensionRegistry
+from zall.core.gate import (
+    ConfirmGate,
+    EquivalenceRequest,
+    GateResult,
+    GateState,
+    OverrideEvent,
+    UserResponse,
+    UserResponseType,
+)
+
+# ──────────────────────────────────────────────────────────────────────────
 # §4.2.2 Commitment — 目标 + 终止 + 验收
 # ──────────────────────────────────────────────────────────────────────────
-from zall.core.goal import (  # noqa: F401
-    GoalTriple,
-    GoalStatement,
-    GoalType,
-    GoalDowngrade,
-    TerminationCriterion,
-    TerminationState,
+from zall.core.goal import (
     AcceptanceContract,
-    RefinedGoal,
     DeclineTask,
     DowngradeGateState,
     Escalation,
-)
-from zall.core.refiner import GoalRefiner  # noqa: F401
-from zall.core.plan_mode import PlanModeTracker, PlanModeState  # noqa: F401
-
-# ──────────────────────────────────────────────────────────────────────────
-# §4.2.3 Perception — 感知 + 世界模型 (v0.6.0)
-# ──────────────────────────────────────────────────────────────────────────
-from zall.core.perception import (  # noqa: F401
-    Sensor,
-    Observation,
-    Percept,
-    StateEstimate,
-    WorldModel,
-    PerceptionEngine,
-)
-
-# ──────────────────────────────────────────────────────────────────────────
-# §4.2.4 Authority — 权限 + 安全门
-# ──────────────────────────────────────────────────────────────────────────
-from zall.core.safety import (  # noqa: F401
-    RuleSet,
-    SafeLevel,
-    Judgement,
-    Rule,
-    context_judge,
-)
-from zall.core.gate import (  # noqa: F401
-    ConfirmGate,
-    GateState,
-    GateResult,
-    UserResponse,
-    UserResponseType,
-    OverrideEvent,
-    EquivalenceRequest,
-)
-from zall.core.action import Action  # noqa: F401
-
-# ──────────────────────────────────────────────────────────────────────────
-# §4.2.5 Accountability — 判定 + 证据
-# ──────────────────────────────────────────────────────────────────────────
-from zall.core.accountability import (  # noqa: F401
-    Judge,
-    JudgeVerdict,
-    Evidence,
-    AccountabilityResult,
-    CaveatType,
-    TestCaseResult,
-    LintResult,
-    base_judge,
+    GoalDowngrade,
+    GoalStatement,
+    GoalTriple,
+    GoalType,
+    RefinedGoal,
+    TerminationCriterion,
+    TerminationState,
 )
 
 # ──────────────────────────────────────────────────────────────────────────
 # §12.3 E3 Science Kit — 假设生命周期 + 证据管理
 # ──────────────────────────────────────────────────────────────────────────
-from zall.core.hypothesis import (  # noqa: F401
+from zall.core.hypothesis import (
     Hypothesis,
     HypothesisStatus,
 )
+from zall.core.loop_config import AgentConfig, _GitProtectProtocol
+from zall.core.loop_errors import AgentRunaway, ToolNotFound
+from zall.core.loop_events import MAX_STEPS, LoopEvent, RunEgress, StepResult
 
 # ──────────────────────────────────────────────────────────────────────────
-# §4.2.6 Verifiability — 审计 + 可复现
+# §4.2.3 Perception — 感知 + 世界模型 (v0.6.0)
 # ──────────────────────────────────────────────────────────────────────────
-from zall.core.verifiability import (  # noqa: F401
-    RunRecorder,
-    TimelineEvent,
-    EventType,
-    TrustAnchor,
-    FileTrustAnchor,
-    AckEvent,
-    TrustAnchorInit,
+from zall.core.perception import (
+    Observation,
+    Percept,
+    PerceptionEngine,
+    Sensor,
+    StateEstimate,
+    WorldModel,
 )
+from zall.core.plan_mode import PlanModeState, PlanModeTracker
+from zall.core.policies import CompactionPolicy, ReminderPolicy
+from zall.core.refiner import GoalRefiner
 
 # ──────────────────────────────────────────────────────────────────────────
-# 跨维模块 (不专属某一维度)
+# §4.2.4 Authority — 权限 + 安全门
 # ──────────────────────────────────────────────────────────────────────────
-from zall.core.extension import Extension, ExtensionRegistry  # noqa: F401
-from zall.core.toolset import (  # noqa: F401
+from zall.core.safety import (
+    Judgement,
+    Rule,
+    RuleSet,
+    SafeLevel,
+    context_judge,
+)
+from zall.core.tool_kind import ToolKind, ToolNamespace
+from zall.core.toolset import (
     build_native_tools_for_preset,
     filter_tools_by_ids,
     get_tool_ids_for_preset,
     list_presets,
 )
-from zall.core.loop_errors import ToolNotFound, AgentRunaway  # noqa: F401
-from zall.core.loop_events import LoopEvent, RunEgress, StepResult, MAX_STEPS  # noqa: F401
-from zall.core.loop_config import AgentConfig, _GitProtectProtocol  # noqa: F401
-from zall.core.tool_kind import ToolKind, ToolNamespace  # noqa: F401
-from zall.core.policies import CompactionPolicy, ReminderPolicy  # noqa: F401
+
+# ──────────────────────────────────────────────────────────────────────────
+# §4.2.6 Verifiability — 审计 + 可复现
+# ──────────────────────────────────────────────────────────────────────────
+from zall.core.verifiability import (
+    AckEvent,
+    EventType,
+    FileTrustAnchor,
+    RunRecorder,
+    TimelineEvent,
+    TrustAnchor,
+    TrustAnchorInit,
+)
 
 __all__ = [
     # ── Identity (§4.2.1) ──

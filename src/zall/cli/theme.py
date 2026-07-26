@@ -301,7 +301,18 @@ def list_themes() -> list[str]:
 
 
 __all__ = [
-    "Theme", "THEMES", "DEFAULT_THEME", "OBSIDIAN", "ATTIC", "ANSI",
-    "active", "active_name", "current", "apply", "switch", "list_themes",
-    "ansi_code", "build_ansi_map",
+    "ANSI",
+    "ATTIC",
+    "DEFAULT_THEME",
+    "OBSIDIAN",
+    "THEMES",
+    "Theme",
+    "active",
+    "active_name",
+    "ansi_code",
+    "apply",
+    "build_ansi_map",
+    "current",
+    "list_themes",
+    "switch",
 ]

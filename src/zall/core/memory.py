@@ -27,7 +27,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 # Memory type constants
 MEMORY_TYPES = ("user_profile", "project_knowledge", "error_patterns", "decisions")
 
@@ -186,8 +185,7 @@ class SessionMemory:
             import tempfile as _tf
             tmp_path = self._path.parent / f".memory_{_tf._get_default_tempdir().replace('/', '_')}.tmp"  # type: ignore[attr-defined]
             with open(tmp_path, "w", encoding="utf-8", newline="") as f:
-                for m in self._memories:
-                    f.write(json.dumps(m, ensure_ascii=False) + "\n")
+                f.writelines(json.dumps(m, ensure_ascii=False) + "\n" for m in self._memories)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(str(tmp_path), str(self._path))

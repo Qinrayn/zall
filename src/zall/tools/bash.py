@@ -15,6 +15,7 @@ IPR constraints:
 
 from __future__ import annotations
 
+import base64
 import locale
 import os
 import re
@@ -23,7 +24,6 @@ import subprocess
 import sys
 import threading
 import time
-import base64
 from typing import Any, Protocol, runtime_checkable
 
 from zall.core.tool import ToolResult

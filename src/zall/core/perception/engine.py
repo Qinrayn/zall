@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from zall.core.action import Action
 from zall.core.perception.sensor import (
     Observation,
     Sensor,
@@ -33,7 +34,6 @@ from zall.core.perception.world_model import (
     NullWorldModel,
     WorldModel,
 )
-from zall.core.action import Action
 
 
 class PerceptionEngine:

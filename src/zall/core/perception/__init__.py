@@ -33,15 +33,15 @@ Usage:
 
 from __future__ import annotations
 
-from .sensor import Sensor, Observation, Percept, StateEstimate
-from .world_model import WorldModel
 from .engine import PerceptionEngine
+from .sensor import Observation, Percept, Sensor, StateEstimate
+from .world_model import WorldModel
 
 __all__ = [
-    "Sensor",
     "Observation",
     "Percept",
+    "PerceptionEngine",
+    "Sensor",
     "StateEstimate",
     "WorldModel",
-    "PerceptionEngine",
 ]

@@ -14,22 +14,6 @@ import platform
 from pathlib import Path
 from typing import Any
 
-from zall.cli.commands._common import (
-    _CATEGORY_MODEL,
-    slash_command,
-    _check_network_basic,
-    _check_network_http,
-    _check_git_health,
-    _check_mcp_health,
-    _check_dependency_version,
-    _check_path_tools,
-    _check_trust_anchor,
-    _check_disk_space,
-)
-from zall.cli.config import (
-    _config_status, _detect_provider, _persist_model_to_config,
-    _resolve_model_alias, _PROVIDER_DISPLAY,
-)
 from zall._util.model_registry import (
     _MODEL_PRESETS,
     _PROVIDER_REGISTRY,
@@ -38,13 +22,31 @@ from zall._util.model_registry import (
     get_provider_tag,
     list_providers,
 )
+from zall.cli.commands._common import (
+    _CATEGORY_MODEL,
+    _check_dependency_version,
+    _check_disk_space,
+    _check_git_health,
+    _check_mcp_health,
+    _check_network_basic,
+    _check_network_http,
+    _check_path_tools,
+    _check_trust_anchor,
+    slash_command,
+)
+from zall.cli.config import (
+    _PROVIDER_DISPLAY,
+    _config_status,
+    _detect_provider,
+    _persist_model_to_config,
+    _resolve_model_alias,
+)
 from zall.cli.environment import CwdMeta as _CwdMeta
 from zall.cli.environment import build_system_prompt as _build_system_prompt
 from zall.cli.render import _shared_console
 from zall.core.context import Context as _Context
 from zall.core.model import Message, ToolChoice
-from zall.safety.config import load_config, CONFIG_DIR
-
+from zall.safety.config import CONFIG_DIR, load_config
 
 # ── Dynamic model discovery ──
 
@@ -341,8 +343,9 @@ def cmd_doctor(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
         model_name = cfg.get("model", "") if not cfg_err_str else ""
         if model_name and dns_check[0] == "ok" and tcp_check[0] == "ok":
             try:
-                from zall.adapters.openai_compat import OpenAICompatAdapter
                 import os as _os
+
+                from zall.adapters.openai_compat import OpenAICompatAdapter
                 test_adapter = OpenAICompatAdapter(
                     model=model_name,
                     api_key=cfg.get("api_key") or _os.environ.get("ZALL_API_KEY", ""),
@@ -893,7 +896,7 @@ def cmd_stats(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
 
     # ── Render ──
     if hasattr(out, "isatty") and out.isatty():
-        from zall.cli.render import _shared_console, _C
+        from zall.cli.render import _C, _shared_console
         c = _shared_console(out)
         # Model info
         model_name = usage_stats.get("model", "") or state.get("model", "?")

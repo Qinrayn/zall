@@ -264,7 +264,7 @@ class WorktreeSandbox:
     def __enter__(self) -> Path:
         return self.create()
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(self, *args: object) -> None:
         self.cleanup()
 
 
@@ -382,7 +382,7 @@ class ProcessSandbox:
         self.create_workspace()
         return self
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(self, *args: object) -> None:
         self.cleanup()
 
 
@@ -573,7 +573,7 @@ class Sandbox:
         self,
         path: str,
         content: str,
-        tool_id: str,  # noqa: ARG002
+        tool_id: str,
     ) -> SandboxResult:
         cwd = self.get_path()
         if cwd is None:
@@ -616,7 +616,7 @@ class Sandbox:
     def __enter__(self) -> Sandbox:
         return self
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(self, *args: object) -> None:
         self.cleanup()
 
 
@@ -626,5 +626,5 @@ class _NullSandbox:
     def __enter__(self) -> str:
         return os.getcwd()
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(self, *args: object) -> None:
         pass

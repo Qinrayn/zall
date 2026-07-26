@@ -82,5 +82,9 @@ def sensitive_refusal(path: str) -> str:
     )
 
 
-__all__ = ["SENSITIVE_PATTERNS", "SENSITIVE_EXEMPTIONS",
-           "is_sensitive_file", "sensitive_refusal"]
+__all__ = [
+    "SENSITIVE_EXEMPTIONS",
+    "SENSITIVE_PATTERNS",
+    "is_sensitive_file",
+    "sensitive_refusal",
+]

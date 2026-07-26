@@ -22,7 +22,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # StopReason (three-state, 与 §3.2.2 TerminationState 哲学一致)
 # ──────────────────────────────────────────────────────────────────────────
@@ -137,7 +136,7 @@ class Message(BaseModel):
     tool_calls: tuple[ToolCall, ...] = ()
 
     @model_validator(mode="after")
-    def _tool_role_requires_call_id(self) -> "Message":
+    def _tool_role_requires_call_id(self) -> Message:
         """role="tool" 时 tool_call_id must非空 (回灌须指明corresponds to哪个 tool_call)。
 
         Counterexample: role="tool" 但 tool_call_id=None → 须 raise (回灌歧义)。

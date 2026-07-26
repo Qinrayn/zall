@@ -33,7 +33,6 @@ from zall.core.accountability import (
 )
 from zall.core.goal import GoalType, TerminationState
 
-
 # ── SystemJudge: system subject ──
 
 
@@ -454,8 +453,8 @@ def default_judges_for_goal_type(goal_type: GoalType) -> tuple[Judge, Judge | No
 
 
 __all__ = [
+    "ModelSelfJudge",
     "SystemJudge",
     "UserJudge",
-    "ModelSelfJudge",
     "default_judges_for_goal_type",
 ]

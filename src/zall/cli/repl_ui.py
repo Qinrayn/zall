@@ -16,26 +16,26 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from zall._util.logging import get_zall_logger as _get_zall_logger
+from zall._util.term import ensure_new_line as _ensure_new_line  # G10: 提示符行首保证
 from zall.cli.commands import (
     _route_skill,
     _setup_completion,
     get_known_commands,
     handle_slash,
 )
-from zall.cli.config import _onboarding, _detect_provider
+from zall.cli.config import _detect_provider, _onboarding
 from zall.cli.file_complete import expand_at_references
-from zall.cli.orchestrator import make_usage_observer as _make_usage_observer
 from zall.cli.orchestrator import build_mcp_tools
+from zall.cli.orchestrator import make_usage_observer as _make_usage_observer
 from zall.cli.prompt import make_prompt_fn
-from zall.cli.render import CliRenderer, _shared_console, _C, clear_console_cache
+from zall.cli.render import _C, CliRenderer, _shared_console, clear_console_cache
 from zall.cli.responder import CliUserResponder
+from zall.core.builder import AgentBuilder
 from zall.core.checkpoint import CheckpointManager
 from zall.core.compactor import ModelCompactor
 from zall.core.context import Context
-from zall._util.logging import get_zall_logger as _get_zall_logger
-from zall._util.term import ensure_new_line as _ensure_new_line  # G10: 提示符行首保证
-from zall.core.builder import AgentBuilder
-from zall.core.loop import AgentLoop, TRANSIENT_KEYWORDS, is_transient_error
+from zall.core.loop import TRANSIENT_KEYWORDS, AgentLoop, is_transient_error
 from zall.core.model import Message
 from zall.mcp.tool import MCPTool
 from zall.safety.rules_file import load_rules
@@ -45,14 +45,14 @@ from zall.tools.git_protect import GitProtect
 _log = _get_zall_logger(__name__)
 
 __all__ = [
-    "repl",
-    "build_repl_loop",
-    "_print_banner",
-    "_prompt",
-    "_make_usage_observer",
     "REPL_MAX_STEPS",
     "TRANSIENT_KEYWORDS",
+    "_make_usage_observer",
+    "_print_banner",
+    "_prompt",
+    "build_repl_loop",
     "is_transient_error",
+    "repl",
 ]
 
 # REPL 对话态步数max: 100000 等价"无max"
@@ -173,8 +173,14 @@ def build_repl_loop(
 ) -> AgentLoop | None:
     """Construct a REPL AgentLoop (delegates to orchestrator)."""
     from zall.cli import config as _cli_config
-    from zall.cli.orchestrator import build_tools, merge_tools, inject_subagent_context, refine_goal, build_perception_engine
-    from zall.cli.environment import build_system_prompt, CwdMeta
+    from zall.cli.environment import CwdMeta, build_system_prompt
+    from zall.cli.orchestrator import (
+        build_perception_engine,
+        build_tools,
+        inject_subagent_context,
+        merge_tools,
+        refine_goal,
+    )
 
     try:
         model_name = state.get("model")
@@ -351,7 +357,7 @@ def repl(
     _onboarding(out, input_fn)
     _setup_completion(skills)
 
-    from zall.cli.session import _check_repl_autosave, _save_repl_state, _clear_repl_autosave
+    from zall.cli.session import _check_repl_autosave, _clear_repl_autosave, _save_repl_state
     _check_repl_autosave(out, state)
 
     _print_banner(out, model=state.get("model") or model,
@@ -363,7 +369,7 @@ def repl(
 
     # v2: background update check (non-blocking)
     try:
-        from zall.cli.update import start_background_check, get_update_hint
+        from zall.cli.update import get_update_hint, start_background_check
         start_background_check()
         # lazy 3 秒后check结果 (给后台thread时间完成)
         import threading as _th
@@ -495,6 +501,7 @@ def repl(
                     # Record user_interrupt event in timeline
                     try:
                         import time as _time
+
                         from zall.core.verifiability import EventType as _EventType
                         loop.recorder.append(
                             event_id=f"user_interrupt_{loop.step_count}",
@@ -514,6 +521,7 @@ def repl(
                             out.write(f"  \u26a0 {err[:100]}\n")
                             # auto-retry up to 3 times with backoff
                             import time as _time
+
                             from zall._util.backoff import backoff_delay
                             retried = False
                             for attempt in range(1, 4):

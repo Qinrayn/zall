@@ -25,21 +25,28 @@ from pathlib import Path
 from typing import Any
 
 from zall.core.accountability import JudgeVerdict
+from zall.core.action import Action
 from zall.core.context import Context
+from zall.core.gate import UserResponse, UserResponseType
 from zall.core.goal import (
-    AcceptanceContract, GoalStatement, GoalTriple, GoalType, TerminationState,
+    AcceptanceContract,
+    GoalStatement,
+    GoalTriple,
+    GoalType,
+    TerminationState,
 )
 from zall.core.loop import AgentLoop
 from zall.core.loop_config import AgentConfig
 from zall.core.loop_events import RunEgress
 from zall.core.model import (
-    Message, ModelResponse, StopReason, ToolCall, ToolChoice,
+    Message,
+    ModelResponse,
+    StopReason,
+    ToolCall,
+    ToolChoice,
 )
 from zall.core.safety import RuleSet, SafeLevel
 from zall.core.tool import Tool, ToolRegistry, ToolResult
-from zall.core.gate import UserResponse, UserResponseType
-from zall.core.action import Action
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # ReplayAdapter: 从 timeline 读 recorded model_call, return recorded ModelResponse

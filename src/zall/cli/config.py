@@ -52,8 +52,8 @@ _MODEL_ALIASES: dict[str, str] = {
 
 def _config_status() -> dict[str, Any]:
     """Return config readiness status (reused by onboarding / doctor, does not raise)."""
-    from zall.safety.config import load_config
     from zall._util.logging import get_zall_logger
+    from zall.safety.config import load_config
 
     _logger = get_zall_logger(__name__)
     try:
@@ -392,8 +392,8 @@ def _clear_provider_registry_cache() -> None:
 
 def _persist_model_to_config(model_name: str) -> None:
     """将model名write ~/.zall/config.toml，preserve现有其他段 (fix B1: 不再全量覆写)。"""
-    from zall.safety.config import CONFIG_DIR
     from zall._util.toml import load_toml_simple as _load_toml_simple
+    from zall.safety.config import CONFIG_DIR
     config_path = CONFIG_DIR / "config.toml"
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)

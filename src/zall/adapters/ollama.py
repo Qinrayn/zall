@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from zall.core.model import (
     Message,

@@ -19,4 +19,4 @@ IPR constraints:
 from zall.mcp.config import MCPServerSpec, load_mcp_config
 from zall.mcp.tool import MCPTool
 
-__all__ = ["MCPServerSpec", "load_mcp_config", "MCPTool"]
+__all__ = ["MCPServerSpec", "MCPTool", "load_mcp_config"]

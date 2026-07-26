@@ -22,14 +22,13 @@ IPR constraints:
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import hashlib
 import json
 import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from zall._util.logging import get_zall_logger as _get_zall_logger
 
@@ -424,7 +423,6 @@ class _BackupRestore:
         # Cleanup backup dir regardless
         shutil.rmtree(self._backup_dir, ignore_errors=True)
         # Implicit None return — does not suppress exception (same as False)
-        return None
 
     def backup_file(self, rel: Path, target: Path) -> None:
         """备份一个将被覆盖的file。"""

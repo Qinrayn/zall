@@ -50,7 +50,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-
 # ═══════════════════════════════════════════════════════════════════
 # §1  LSP Types
 # ═══════════════════════════════════════════════════════════════════
@@ -781,9 +780,7 @@ class LspManager:
         """处理 LSP 推送的诊断 (publishDiagnostics)。"""
         path = uri.replace("file://", "")
         # Windows path normalization: /C:/... -> C:/...
-        if os.name == "nt" and path.startswith("/") and len(path) > 2 and path[2] == ":":
-            path = path[1:]
-        elif os.name == "nt" and path.startswith("/"):
+        if os.name == "nt" and path.startswith("/") and len(path) > 2 and path[2] == ":" or os.name == "nt" and path.startswith("/"):
             path = path[1:]
 
         entries = []

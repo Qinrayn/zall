@@ -16,7 +16,8 @@ Gemini API quirks:
 from __future__ import annotations
 
 import os
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from zall.core.model import (
     Message,
@@ -68,7 +69,6 @@ class GeminiAdapter:
 
     def close(self) -> None:
         """释放 HTTP 资源 (当前无持久化 client, 留interface供未来使用)。"""
-        pass
 
     # ── Non-streaming ──
 
