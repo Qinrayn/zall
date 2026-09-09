@@ -189,6 +189,22 @@ class TestSteerAndQueue:
         app._do_steer("")
         assert app._pop_steer_messages() == []
 
+    def test_enter_while_running_steers_not_queues(self) -> None:
+        """真实使用反馈: 运行中按 Enter 必须立即 steer 注入当前回合。
+
+        反例孪生: 若回归到旧行为 (进 pending 队列等回合结束),
+        steer 队列为空断言失败 — 慢端点下排队等于回车无反应。
+        """
+        from types import SimpleNamespace
+        from zall.cli.tui import TuiApp
+        from zall.cli.tui.widgets import InputBar
+        app = TuiApp()
+        app._agent_running = True
+        app._cached_msg_list = SimpleNamespace(add_message=lambda m: None)
+        app.on_input_bar_submitted(InputBar.Submitted("do it now"))
+        assert app._pop_steer_messages() == ["do it now"]
+        assert app._pop_pending() is None  # 不再默默排队
+
     def test_steer_bindings_and_messages(self) -> None:
         from zall.cli.tui import TuiApp
         from zall.cli.tui.widgets import ChatTextArea, InputBar

@@ -24,6 +24,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -248,6 +249,7 @@ class TuiApp(App):
         Binding("shift+tab", "toggle_plan", "Plan mode", show=True, priority=True),
         Binding("ctrl+o", "external_editor", "Editor", show=True, priority=True),
         Binding("ctrl+s", "steer", "Steer", show=True, priority=True),
+        Binding("question_mark", "toggle_help", "Help", show=True, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
     ]
 
@@ -301,11 +303,16 @@ class TuiApp(App):
         }
         self._loop_thread: threading.Thread | None = None
         self._interrupt_requested = False
-        self._event_queue: list[LoopEvent] = []
+        # M-fix: 事件队列有界化 — 若 TuiApp 被作为 observer 直连 (legacy 路径),
+        # 每条 LoopEvent (含 model_call 全量 content) 都会进队且从不消费;
+        # 生产路径走 EventBus _tui_listener, 队列实际不增长, 但把保险带上:
+        # deque(maxlen) 自动丢弃最旧事件, 防止路径复活时复刻一遍内存峰值。
+        self._event_queue: deque[LoopEvent] = deque(maxlen=256)
         self._event_lock = threading.Lock()
         # v2.x (kimi parity): steer/queue — Ctrl+S 注入当前回合, Enter(流式中) 排队
         self._pending_queue: list[str] = []
         self._steer_queue: list[str] = []
+        self._echoed_pending: set[str] = set()  # 已显过气泡的降级 steer (防双气泡)
         self._queue_lock = threading.Lock()
         self._agent_running: bool = False
         # v2.x: 确认门 (greylist/blacklist) — 输入路由到确认回答, 解除 worker 阻塞
@@ -334,6 +341,8 @@ class TuiApp(App):
         # Widget 引用缓存 (compose 后不变, 避免每事件 query_one 开销)
         self._cached_live: Any = None
         self._cached_msg_list: Any = None
+        # MCP 延迟后台加载器 (kimi 对标; on_mount 启动, 首回合收敛)
+        self._mcp_loader: Any = None
 
         # Lazy import to avoid circular imports at module level
         self._loop_module: Any = None
@@ -441,6 +450,13 @@ class TuiApp(App):
 
     def on_mount(self) -> None:
         """Called when the app is mounted and ready."""
+        # MCP 延迟后台加载: 启动即连, 首个回合收敛 (启动零阻塞)
+        try:
+            from zall.mcp.deferred import DeferredMCPLoader
+            self._mcp_loader = DeferredMCPLoader()
+            self._mcp_loader.start()
+        except Exception:
+            self._mcp_loader = None
         # 填充 widget 缓存 (compose 后立即可用)
         self._cached_msg_list = self.query_one("#message-list", MessageList)
         self._cached_live = self.query_one("#live-region", LiveRegion)
@@ -491,7 +507,9 @@ class TuiApp(App):
     def on_input_bar_submitted(self, event: InputBar.Submitted) -> None:
         """Handle user input submission from InputBar.
 
-        v2.x: 流式中 (agent 正忙) 的普通消息进入队列, 当前回合结束后自动运行 (B)。
+        v2.x: 流式中 (agent 正忙) 的普通消息直接 steer 注入当前回合 —
+        真实使用反馈: 慢端点下回合可能持续数分钟, "排队等回合结束"让回车
+        看起来像没反应, 用户被迫手动点 Ctrl+S steer。现在 Enter 即 steer。
         斜杠命令始终立即执行 (多为显示类)。
         """
         text = event.text
@@ -512,9 +530,13 @@ class TuiApp(App):
                 msg_list.add_message(ChatMessage(role="user", content=text))
             self._handle_slash_command(text)
             return
-        # B (queue): 有回合在跑 → 排队, 不立即显示气泡 (运行时再 echo)
+        # 有回合在跑 → Enter 即 steer: 显示气泡 + 注入当前回合 (下一步可见)
         if self._agent_running:
-            self._enqueue_pending(text)
+            msg_list = self._get_msg_list()
+            if msg_list is not None:
+                msg_list.add_message(ChatMessage(role="user", content=text))
+            self._push_steer(text)
+            self._show_system("↳ injected into current turn")
             return
         # 空闲 → 立即运行
         msg_list = self._get_msg_list()
@@ -643,7 +665,28 @@ class TuiApp(App):
 
         This runs in a textual worker (background thread) and posts events
         back to the main thread via call_from_thread().
+
+        全局 try/finally 守护 _agent_running: 此前只有步循环段有 finally,
+        构建段 (@展开/build_repl_loop/renderer) 抛异常会让 _agent_running 永久
+        卡 True → 此后每次回车都进无人消费的 steer 队列 ("回车无效"真实反馈
+        的可崩溃路径)。
         """
+        try:
+            await self._run_agent_loop_body(user_input)
+        except Exception as e:
+            try:
+                self.call_from_thread(self._show_error, f"agent worker crashed: {e}")
+            except Exception:
+                pass
+        finally:
+            self._agent_running = False
+            try:
+                self.call_from_thread(self._update_queue_status)
+            except Exception:
+                pass
+
+    async def _run_agent_loop_body(self, user_input: str) -> None:
+        """真正的 agent 回合执行体 (被 _run_agent_loop 全局守护包裹)。"""
         # Import lazily to avoid circular imports
         from zall.cli.repl_ui import build_repl_loop, is_transient_error
 
@@ -668,10 +711,14 @@ class TuiApp(App):
         # Build the loop if needed
         if self._agent_loop is None:
             # We need to import these here to avoid circular imports
-            from zall.cli.orchestrator import build_mcp_tools
             from zall.skills import load_skills
 
-            mcp_tools = build_mcp_tools(sys.stderr)
+            # MCP 延迟后台加载收敛 (on_mount 已启动; 未启动时兜底自启)
+            if self._mcp_loader is None:
+                from zall.mcp.deferred import DeferredMCPLoader
+                self._mcp_loader = DeferredMCPLoader()
+                self._mcp_loader.start()
+            mcp_tools = self._mcp_loader.wait()
             skills = load_skills()
 
             # Build state
@@ -828,19 +875,39 @@ class TuiApp(App):
                         break
 
                     if result.kind == "awaiting_input":
+                        # kimi parity (kimisoul “has_steers → continue”): 模型 STOP 时
+                        # 若本步期间已攒下 steer, 不结束回合 — 注入后强制再步,
+                        # 用户消息在同一回合内立即得到回应 (而非降级新回合)。
+                        _steers = self._pop_steer_messages()
+                        if _steers:
+                            for _sm in _steers:
+                                loop.add_user_message(_sm)
+                            self._streaming_content = ""
+                            continue
                         break
 
                 if not turn_ended_cleanly or self._interrupt_requested:
                     break
 
-                # B (queue): 排队消息作为新回合运行
+                # B (queue): 排队消息作为新回合运行; terminal 路径残留的 steer
+                # (awaiting_input 路径已在步循环内消费) 不得丢失 → 降级新回合。
+                # 注: 这些消息的用户气泡在 Enter 时已显示, 降级运行不再重复 echo。
+                _leftover = self._pop_steer_messages()
+                if _leftover:
+                    with self._queue_lock:
+                        self._pending_queue[0:0] = _leftover
+                    self._echoed_pending.update(_leftover)
                 nxt = self._pop_pending()
                 if nxt is None:
                     break
                 _msg, _ = expand_at_references(nxt)  # @file 展开 (气泡仍显原文 nxt)
                 loop.add_user_message(_msg)
                 self._streaming_content = ""
-                self.call_from_thread(self._echo_queued_turn, nxt)
+                if nxt in self._echoed_pending:
+                    self._echoed_pending.discard(nxt)
+                    self.call_from_thread(self._update_queue_status)
+                else:
+                    self.call_from_thread(self._echo_queued_turn, nxt)
         finally:
             self._agent_running = False
             self.call_from_thread(self._update_queue_status)
@@ -933,6 +1000,17 @@ class TuiApp(App):
                     self._flush_live(msg_list)
             msg = ChatMessage(role="assistant", streaming=True)
             live.set_message(msg)
+        # committed boundary (kimi 对标): 超长流式回复把稳定前缀提前固化进
+        # 历史, 活跃块只留尾部 — 重渲染成本 O(尾部), 长回复不再越流越卡。
+        from zall.cli.tui.commit_boundary import find_committed_boundary
+        boundary = find_committed_boundary(self._streaming_content)
+        if boundary > 0:
+            msg_list = self._get_msg_list()
+            if msg_list is not None:
+                prefix = self._streaming_content[:boundary]
+                rest = self._streaming_content[boundary:].lstrip("\n")
+                msg_list.add_message(ChatMessage(role="assistant", content=prefix))
+                self._streaming_content = rest
         msg._streaming_content = self._streaming_content
         self._throttled_live_refresh(live)
 
@@ -1373,6 +1451,53 @@ class TuiApp(App):
         live = self._get_live()
         if live is not None:
             live.clear()
+
+    # ── ? 帮助浮层 (Codex ?overlay / Claude 空输入 ? 同款) ──
+
+    # 输入区固定功能 (不在 App BINDINGS 里, 由 ChatTextArea._on_key 处理) —
+    # 帮助面板合成数据的一部分, 保证"帮助说的一套=实际键位"。
+    _INPUT_HELP_ROWS: list[tuple[str, str]] = [
+        ("enter", "send message"),
+        ("shift+enter", "new line"),
+        ("up/down", "input history"),
+        ("/", "commands"),
+        ("@", "files"),
+        ("tab", "complete"),
+        ("esc", "interrupt / close"),
+    ]
+
+    def _help_rows(self) -> list[tuple[str, str]]:
+        """帮助数据源: BINDINGS 中 show=True 的真实键位 + 输入区固定功能。
+
+        Codex key-hint 思想 — 显示真实绑定而非硬编码文案; 未来换键帮助自动跟随。
+        """
+        rows = [
+            (b.key, b.description)
+            for b in self.BINDINGS
+            if b.show and b.action and b.key != "question_mark"
+        ]
+        return rows + list(self._INPUT_HELP_ROWS)
+
+    def action_toggle_help(self) -> None:
+        """`?` — 切换快捷键帮助浮层 (未挂载/无输入栏时安全 no-op)。"""
+        try:
+            bar = self.query_one("#input-bar", InputBar)
+        except Exception:
+            return
+        bar.set_help_rows(self._help_rows())
+        bar.toggle_help()
+
+    def on_input_bar_toggle_help(self, event: InputBar.ToggleHelp) -> None:
+        """TextArea 键路 (空输入 ?) → 与 App 级绑定同路切换。"""
+        self.action_toggle_help()
+
+    def on_input_bar_help_dismiss(self, event: InputBar.HelpDismiss) -> None:
+        """TextArea 键路 (帮助打开时 Esc) → 只关面板, 不触发 Interrupt。"""
+        try:
+            bar = self.query_one("#input-bar", InputBar)
+        except Exception:
+            return
+        bar.dismiss_help()
 
     def _show_system(self, text: str) -> None:
         """在消息区追加一条系统消息。"""

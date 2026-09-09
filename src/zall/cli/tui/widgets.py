@@ -344,13 +344,26 @@ class MessageList(RichLog):
 
     __test__ = False
 
-    def __init__(self, *, max_lines: int = 10_000, **kwargs: Any) -> None:
+    def __init__(
+        self, *,
+        max_lines: int = 10_000,
+        max_messages: int = 500,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(max_lines=max_lines, markup=True, auto_scroll=True, **kwargs)
         self._messages: list[ChatMessage] = []
+        # M-fix: 消息条数有界 — RichLog.max_lines 只管渲染行, 不管
+        # 每个 ChatMessage 持有的完整 content/thinking 字符串; 旧气泡
+        # 与上下文压缩解耦, 长会话会无界累积。
+        self._max_messages = max(1, int(max_messages))
 
     def add_message(self, msg: ChatMessage) -> None:
         """Add a message to the list and render it."""
         self._messages.append(msg)
+        # M-fix: 超出上限从最旧开始剔除 (只释放 ChatMessage 对象;
+        # RichLog 自身的渲染行独立保留, 视觉不受影响)
+        if len(self._messages) > self._max_messages:
+            del self._messages[:len(self._messages) - self._max_messages]
         renderable = msg.to_rich()
         if renderable:
             # Write a blank line separator before non-system messages
@@ -541,6 +554,96 @@ class CommandMenu(Widget):
         return out
 
 
+# `?` 帮助层的键路由纯函数 (可离线单测, 不依赖 KeyEvent 构造)
+_AID_KEYS = frozenset({"question_mark", "?"})
+
+
+def route_help_key(
+    key: str,
+    text: str,
+    *,
+    select_mode: bool = False,
+    help_open: bool = False,
+) -> str | None:
+    """`?` 帮助浮层的键路由: 返回动作 ("toggle" | "dismiss" | None)。
+
+    IPR-0 反例 (绝不发生):
+      - 非空输入中的 `?` → None (作为字符输入, 不抢键);
+      - select_mode (确认门) 中 `?` → None (决策键由菜单独自处理);
+      - 帮助关闭时 Esc → None (照常命中 Interrupt 中断路径, 不吞 Esc);
+      - 帮助打开时 Esc → "dismiss" (只关面板, 绝不落到 Interrupt)。
+    """
+    if select_mode:
+        return None
+    if key in _AID_KEYS:
+        return "toggle" if not text.strip() else None
+    if key == "escape" and help_open:
+        return "dismiss"
+    return None
+
+
+class HelpOverlay(Widget):
+    """快捷键帮助浮层: 空输入按 `?` 打开, Esc/`?` 关闭 (Codex key-hint 同款)。
+
+    数据不是硬编码文案, 而是 App 从真实 BINDINGS 派生的 [(key, desc)] 行
+    (key_hint.rs 思想: 显示的就是实际可用的绑定; 换绑定帮助自动跟随)。
+    默认 hidden; show()/hide() 切换。纯展示 widget, 不捕获焦点 — 焦点始终
+    留在输入框, 因此 Esc 由 ChatTextArea 键路径处理并转发帮助关闭, 不误触中断。
+    """
+
+    __test__ = False
+
+    DEFAULT_CSS = """
+    HelpOverlay {
+        height: auto;
+        max-height: 12;
+        background: $surface;
+        border: solid $panel;
+        margin: 0 1 1 1;
+        padding: 0 1;
+    }
+    HelpOverlay.hidden {
+        display: none;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._rows: list[tuple[str, str]] = []  # [(key, desc)] 真实绑定对
+        self.add_class("hidden")
+
+    @property
+    def is_open(self) -> bool:
+        return not self.has_class("hidden")
+
+    def set_rows(self, rows: list[tuple[str, str]]) -> None:
+        """注入 (key, desc) 行 — App 从 BINDINGS + 输入区固定功能派生。"""
+        self._rows = list(rows)
+
+    def show(self) -> None:
+        self.remove_class("hidden")
+        self.refresh()
+
+    def hide(self) -> None:
+        self.add_class("hidden")
+        self.refresh()
+
+    def render(self) -> Text:
+        if not self._rows:
+            return Text("", style=_C.SUBTLE)
+        key_width = max(len(k) for k, _ in self._rows) + 2
+        out = Text()
+        for i, (key, desc) in enumerate(self._rows):
+            if i:
+                out.append("\n")
+            out.append(f"  {_G.TOOL} ", style=f"bold {_C.ACCENT}")
+            out.append(key, style=f"bold {_C.INFO}")
+            out.append(" " * (key_width - len(key)), style="")
+            out.append(desc, style=_C.STATUS_BAR_TEXT)
+        out.append("\n  esc close \u00b7 ? toggle", style=_C.SUBTLE)
+        return out
+
+
 class SelectMenu(Widget):
     """通用选择菜单: 标题 + 编号选项 (↑↓ 导航, 1-9 直选, Enter 确认, Esc 取消)。
 
@@ -698,12 +801,21 @@ class ChatTextArea(TextArea):
     class Steer(Message):
         """Ctrl+S — 请求将当前输入注入正在运行的回合 (steer)。"""
 
+    # v2.x (? 帮助层, Codex ?overlay / Claude 空输入 ? 同款)
+    class ToggleHelp(Message):
+        """空输入按 ? — 请求切换帮助浮层。"""
+
+    class HelpDismiss(Message):
+        """帮助浮层打开时按 Esc — 请求只关闭面板 (绝不落成 Interrupt)。"""
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         # v1.8: 菜单模式标志 (由 InputBar 根据输入内容设置)
         self.menu_mode: bool = False
         # 选择菜单模式 (确认门/选型/会话; 完全接管键盘, 禁自由输入)
         self.select_mode: bool = False
+        # ? 帮助浮层打开标志 (Esc 语义切换关键: 打开时 Esc 只关面板)
+        self.help_open: bool = False
         # type-ahead 防护 (kimi 审批面板思想): 菜单打开前滞留在消息泵里的
         # Enter/数字键不得立即成为决策 — 开启后短宽限期内决策键一律吞掉
         # (导航键不受限)。防止模型运行时用户提前敲的回车误批写盘操作。
@@ -767,6 +879,16 @@ class ChatTextArea(TextArea):
         if event.key == "ctrl+s":
             event.stop(); event.prevent_default()
             self.post_message(self.Steer()); return
+        # ? 帮助浮层 (Codex ?overlay 同款): 空输入按 ? 切换; 打开时 Esc 只关面板。
+        # 路由判定是纯函数 (route_help_key), 反例由离线单测锁定:
+        # 非空输入 / select_mode 中的 ? 必须照常走字符输入; 帮助关闭时 Esc 照常中断。
+        decision = route_help_key(event.key, self.text, help_open=self.help_open)
+        if decision == "toggle":
+            event.stop(); event.prevent_default()
+            self.post_message(self.ToggleHelp()); return
+        if decision == "dismiss":
+            event.stop(); event.prevent_default()
+            self.post_message(self.HelpDismiss()); return
         # v1.8: 菜单模式 — 上下键导航菜单, Tab 补全, Esc 关闭
         if self.menu_mode:
             if event.key == "up":
@@ -863,6 +985,13 @@ class InputBar(Widget):
     class Interrupt(Message):
         """Esc 中断请求 (向 App 重投)。"""
 
+    # ? 帮助浮层 (由 ChatTextArea 键路由向上转交)
+    class ToggleHelp(Message):
+        """空输入按 ? — 帮助浮层切换请求。"""
+
+    class HelpDismiss(Message):
+        """帮助打开时 Esc — 只关面板请求 (不落 Interrupt)。"""
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._history: list[str] = []
@@ -881,8 +1010,11 @@ class InputBar(Widget):
         self._file_cache: list[str] | None = None  # @ 补全: 工作区文件缓存 (惰性建)
         # 通用选择菜单 (确认门/选型/会话选择器)
         self._select = SelectMenu()
+        # ? 帮助浮层 (Codex key-hint 同款: 数据=真实绑定, 默认隐藏)
+        self._help = HelpOverlay(id="help-overlay")
 
     def compose(self) -> ComposeResult:
+        yield self._help
         yield self._select
         yield self._menu
         yield self._textarea
@@ -915,6 +1047,29 @@ class InputBar(Widget):
     def close_select(self) -> None:
         self._select.close()
         self._textarea.select_mode = False
+
+    # ── ? 帮助浮层 (App 调用) ──
+    def set_help_rows(self, rows: list[tuple[str, str]]) -> None:
+        """注入 (key, desc) 行 — 真实绑定, 由 App 从 BINDINGS 派生。"""
+        self._help.set_rows(rows)
+
+    def toggle_help(self) -> bool:
+        """切换帮助浮层; 返回切换后的状态 (真=打开)。
+
+        焦点不落入面板 (它不注册 focus 键路由) — 输入框保持聚焦,
+        因此 Esc/? 仍由 ChatTextArea 键路径处理并转发关闭/切换。
+        """
+        self._textarea.help_open = not self._help.is_open
+        if self._help.is_open:
+            self._help.hide()
+        else:
+            self._help.show()
+        return self._help.is_open
+
+    def dismiss_help(self) -> None:
+        """关闭帮助浮层 (App 收到 HelpDismiss 时)。"""
+        self._help.hide()
+        self._textarea.help_open = False
 
     @property
     def select_open(self) -> bool:
@@ -1044,6 +1199,14 @@ class InputBar(Widget):
         self._menu.hide()
         self._textarea.menu_mode = False
         self.post_message(self.Steer(text))
+
+    def on_chat_text_area_toggle_help(self, event: ChatTextArea.ToggleHelp) -> None:
+        """? (空输入) — 向 App 重投帮助浮层切换请求。"""
+        self.post_message(self.ToggleHelp())
+
+    def on_chat_text_area_help_dismiss(self, event: ChatTextArea.HelpDismiss) -> None:
+        """帮助打开时 Esc — 向 App 重投关闭请求 (不落入 Interrupt)。"""
+        self.post_message(self.HelpDismiss())
 
     def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         """Handle Enter submission from ChatTextArea (v1.7: 正确的提交路径)."""
