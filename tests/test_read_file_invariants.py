@@ -129,10 +129,14 @@ class TestReadFileToolCounterExamples:
         assert "Lines 1-50 of 50" in result.output or "Lines 1-100 of 50" in result.output
 
     def test_offset_negative_defaults_to_1(self, tool: ReadFileTool, tmp_file: str) -> None:
-        """Counterexample: offset < 1 → 自动修正for 1."""
+        """kimi 对标语义升级: offset < 0 → 尾部读取 (-5 = 最后 5 行)。
+
+        反例孪生: 尾窗之外的早期行不得出现。
+        """
         result = tool.execute({"path": tmp_file, "offset": -5, "limit": 5})
         assert result.success is True
-        assert "Line 1" in result.output
+        assert "Line 50" in result.output and "Line 46" in result.output
+        assert "Line 1\n" not in result.output
 
     def test_offset_beyond_file_shows_empty(self, tool: ReadFileTool, tmp_file: str) -> None:
         """Counterexample: offset 超过file总行数 → 显示空content."""

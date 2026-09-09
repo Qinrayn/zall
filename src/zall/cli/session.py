@@ -257,7 +257,9 @@ def _save_session(run_id: str, loop: Any, egress: Any, anchor: Any = None) -> Pa
     timeline_path = d / "timeline.jsonl"
     messages_path = d / "messages.json"
 
-    events = loop.recorder.events
+    # M-fix: 流式写出 (spill 模式下 recorder.events 物化全量会顶一次
+    # 内存峰值 — iter_events 让盘头 + 内存尾逐条流出, 不额外驻留)。
+    events_stream = getattr(loop.recorder, "iter_events", lambda: ())
     with open(timeline_path, "w", encoding="utf-8") as f_tl:
         # G12: 首行版本头 (无头旧文件视为 legacy, 读取端向后兼容)
         from zall._util.jsonl import make_metadata
@@ -265,14 +267,24 @@ def _save_session(run_id: str, loop: Any, egress: Any, anchor: Any = None) -> Pa
             make_metadata(run_id=run_id, saved_at=datetime.now().isoformat(timespec="seconds")),
             ensure_ascii=False,
         ) + "\n")
-        f_tl.writelines(json.dumps({
+        for ev in events_stream():
+            f_tl.write(json.dumps({
                 "event_id": ev.event_id,
                 "ts": ev.ts,
                 "event_type": ev.event_type.value,
                 "payload": ev.payload,
                 "prev_hash": ev.prev_hash,
                 "hash": ev.compute_hash(),
-            }, ensure_ascii=False) + "\n" for ev in events)
+            }, ensure_ascii=False) + "\n")
+    # 释放 spill 文件句柄 (幂等; 关闭后 timeline.jsonl 已完整)
+    close_fn = getattr(loop.recorder, "close", None)
+    if close_fn is not None:
+        close_fn()
+    if getattr(loop.recorder, "spill_path", None) is not None:
+        try:
+            getattr(loop.recorder, "spill_path").unlink(missing_ok=True)
+        except OSError:
+            pass  # spill 文件与 timeline.jsonl 内容重复; 删除失败不阻塞
 
     msgs_serialized = []
     for m in loop.messages:

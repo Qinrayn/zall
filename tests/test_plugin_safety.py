@@ -362,6 +362,7 @@ class TestExecutorSchemaValidation:
 
     def _make_mock_loop(self) -> MagicMock:
         """创建一个最小化 mock loop, 支持 executor 调用的所有接口."""
+        from zall.core.repeat_guard import RepeatGuard
         loop = MagicMock()
         loop._tool_call_count = 0
         loop._tool_usage_counts = {}
@@ -372,6 +373,8 @@ class TestExecutorSchemaValidation:
         loop.append_message = MagicMock()
         loop._mark_watermark_dirty = MagicMock()
         loop._ext_registry = None
+        # 真实 RepeatGuard (executor 解包 note_call 返回值, MagicMock 会炸)
+        loop._repeat_guard = RepeatGuard()
         return loop
 
     def test_invalid_args_returns_error_result(self) -> None:

@@ -28,6 +28,13 @@ skill 是**可复用的 Goal 模板** (预填 prompt), 不是"免确认的宏":
 优先级: 项目级 .zall/skills.toml > 用户级 ~/.zall/skills.toml (同名后者覆盖)。
 无配置 / 解析失败 → 返回 [] (失败安全 IPR-0, 不阻断 agent 启动)。
 
+kimi 对标 (多品牌目录兼容): 额外发现目录式 SKILL.md 技能 — 用户已经为
+ Claude Code / Codex 安装的技能直接可用, 不必重复安装:
+  ~/.zall/skills > ~/.claude/skills > ~/.codex/skills > ~/.agents/skills
+  (项目级同理: .zall/skills > .claude/skills > .agents/skills)
+渐进披露: 只解析 frontmatter 的 name/description, prompt 展开为
+"读该 SKILL.md 并遵循" — 正文用时才进上下文 (kimi 同款省 token 策略)。
+
 IPR constraints:
   IPR-3: 仅 stdlib (手写极简 [[skills]] 解析, 含多行 \"\"\" prompt, 不引 toml 库)
   IPR-0: 文件缺失 / 编码错误 / 解析错误都不得让 agent 启动崩溃
@@ -73,8 +80,13 @@ class Skill:
 def load_skills(
     user_path: str | None = None,
     project_path: str | None = None,
+    skill_dirs: list[Path] | None = None,
 ) -> list[Skill]:
-    """load skill 声明 (项目级覆盖用户级同名)。失败security → 最坏return []。"""
+    """load skill 声明 (项目级覆盖用户级同名)。失败security → 最坏return []。
+
+    合并优先级 (低 → 高): 品牌目录 SKILL.md < 用户 toml < 项目 toml。
+    skill_dirs 可注入 (测试用); 缺省扫描 kimi 对标的多品牌目录组。
+    """
     project = (
         _load_one(Path(project_path) / ".zall" / "skills.toml")
         if project_path
@@ -85,12 +97,93 @@ def load_skills(
         if user_path
         else _load_one(Path.home() / ".zall" / "skills.toml")
     )
+    if skill_dirs is None:
+        skill_dirs = _default_skill_dirs(
+            Path(project_path) if project_path else Path.cwd())
     merged: dict[str, Skill] = {}
+    for skill in load_skill_dirs(skill_dirs):
+        merged[skill.name] = skill  # 品牌目录最低优先
     for skill in user:
         merged[skill.name] = skill
     for skill in project:
         merged[skill.name] = skill  # 项目级优先
     return list(merged.values())
+
+
+# ── kimi 对标: 多品牌目录式 SKILL.md 发现 (复用已装 Claude/Codex 技能) ──
+
+
+def _default_skill_dirs(project_root: Path) -> list[Path]:
+    """缺省扫描目录组 (优先序: 自家 > claude > codex > 通用; 项目级在后者胜)。"""
+    home = Path.home()
+    return [
+        home / ".agents" / "skills",
+        home / ".codex" / "skills",
+        home / ".claude" / "skills",
+        home / ".zall" / "skills",
+        project_root / ".agents" / "skills",
+        project_root / ".claude" / "skills",
+        project_root / ".zall" / "skills",
+    ]
+
+
+def load_skill_dirs(dirs: list[Path]) -> list[Skill]:
+    """扫描目录式技能 (<dir>/<name>/SKILL.md); 后扫目录同名覆盖先扫。
+
+    渐进披露: prompt 只指向 SKILL.md 路径, 正文由 agent 用时 read_file
+    (大技能文档不预先占用上下文, kimi "Only read skill details when needed")。
+    IPR-0: 任何 IO/解析失败静默跳过单个技能。
+    """
+    found: dict[str, Skill] = {}
+    for d in dirs:
+        try:
+            if not d.is_dir():
+                continue
+            for sub in sorted(d.iterdir()):
+                md = sub / "SKILL.md"
+                try:
+                    if not md.is_file():
+                        continue
+                    name, desc = _parse_skill_md_frontmatter(md, default_name=sub.name)
+                    if not name:
+                        continue
+                    found[name] = Skill(
+                        name=name,
+                        description=desc,
+                        prompt=(
+                            f"Read the skill instructions at {md} "
+                            "and follow them for this task.\n\nTask input: {input}"
+                        ),
+                    )
+                except (OSError, UnicodeDecodeError):
+                    continue
+        except OSError:
+            continue
+    return list(found.values())
+
+
+def _parse_skill_md_frontmatter(md: Path, *, default_name: str) -> tuple[str, str]:
+    """解析 SKILL.md 首部 `---` frontmatter 的 name/description (极简, 无 yaml 库)。"""
+    name = default_name.strip()
+    desc = ""
+    text = md.read_text(encoding="utf-8", errors="replace")
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return name, desc
+    for line in lines[1:80]:
+        s = line.strip()
+        if s == "---":
+            break
+        key, sep, val = s.partition(":")
+        if not sep:
+            continue
+        key = key.strip().lower()
+        val = val.strip().strip('"').strip("'")
+        if key == "name" and val:
+            name = val
+        elif key == "description" and val:
+            desc = val
+    return name, desc
 
 
 def find_skill(skills: list[Skill], name: str) -> Skill | None:

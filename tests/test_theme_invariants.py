@@ -1,19 +1,15 @@
-"""Theme system invariants (G6: single color source, attic default + obsidian).
+"""Theme system invariants (G6: single color source, attic 单主题).
 
 IPR-0: each test must contain a counterexample.
 
 Protected invariants:
-  I-THEME-1: applying obsidian reproduces the legacy render constants exactly
-             (zero visual regression when switching back to obsidian).
-  I-THEME-2: _ANSI_MAP is derived (rich Color), covers every themed style,
-             and the legacy hand-written table's 4 wrong codes stay fixed.
+  I-THEME-1: the theme registry contains exactly one theme — attic
+             (真实使用反馈: 多主题没啥用; 回归到多主题必须显式改测试).
+  I-THEME-2: _ANSI_MAP is derived (rich Color) and covers every themed style.
   I-THEME-3: switch() rejects unknown names; active_name() falls back to
              default on garbage config/env (self-healing).
-  I-THEME-4: attic provides every semantic slot obsidian does (theme parity —
-             adding a slot to one theme without the other must fail).
-  I-THEME-5: switching themes round-trips: attic then obsidian restores
-             the legacy palette.
-  I-THEME-6: the default theme is attic (希腊美学转正) — regressing the
+  I-THEME-4: attic fills every semantic slot; TUI slots are valid hex.
+  I-THEME-6: the default theme is attic (希腊美学) — regressing the
              default to any other theme must fail.
 """
 
@@ -33,19 +29,16 @@ def _restore_default_theme():
     theme.apply(theme.THEMES[theme.DEFAULT_THEME])
 
 
-# ── I-THEME-1: obsidian == legacy constants ──
+# ── I-THEME-1: 单主题注册表 ──
 
 
-def test_obsidian_reproduces_legacy_palette() -> None:
-    theme.apply(theme.OBSIDIAN)
-    assert render._C.ACCENT == "gold1"
-    assert render._C.SUCCESS == "spring_green3"
-    assert render._C.FAIL == "indian_red"
-    assert render._C.DANGER == "red3 bold"
-    assert render._C.THINKING == "turquoise4"
-    assert render._ModeColor.PLAN == "dark_cyan"
-    assert render.CODE_THEME == "one-dark"
-    assert render.CODE_BG == "#1e1e1e"
+def test_registry_is_single_attic() -> None:
+    assert theme.list_themes() == ["attic"]
+    assert set(theme.THEMES) == {"attic"}
+    assert theme.THEMES["attic"] is theme.ATTIC
+    # 反例孪生: 移除的主题不得残留
+    assert not hasattr(theme, "OBSIDIAN")
+    assert not hasattr(theme, "ANSI")
 
 
 def test_module_import_applies_active_theme() -> None:
@@ -64,22 +57,6 @@ def test_ansi_map_covers_all_theme_styles() -> None:
             assert m[style].startswith("\033["), f"bad escape for '{style}'"
 
 
-def test_ansi_derivation_fixes_legacy_wrong_codes() -> None:
-    """Counterexample: the old hand-written table had 4 wrong 256-codes.
-
-    rich's own tables are authoritative; regressions to the old values fail.
-    """
-    legacy_wrong = {
-        "spring_green3": "\033[38;5;35m",
-        "dark_orange": "\033[38;5;166m",
-        "steel_blue1": "\033[38;5;75m",
-        "grey37": "\033[38;5;240m",
-    }
-    m = theme.build_ansi_map(theme.OBSIDIAN)
-    for style, wrong in legacy_wrong.items():
-        assert m[style] != wrong, f"'{style}' regressed to the wrong legacy code"
-
-
 def test_ansi_code_handles_bold_and_garbage() -> None:
     assert theme.ansi_code("red3 bold").startswith("\033[1;")
     assert theme.ansi_code("") == ""
@@ -94,9 +71,22 @@ def test_switch_rejects_unknown_theme() -> None:
         theme.switch("corinthian")
 
 
+def test_switch_rejects_removed_themes() -> None:
+    """反例: 已移除的 obsidian/ansi 不能再切换。"""
+    for removed in ("obsidian", "ansi"):
+        with pytest.raises(ValueError, match="unknown theme"):
+            theme.switch(removed)
+
+
 def test_active_name_falls_back_on_garbage_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZALL_THEME", "nonexistent-skin")
     assert theme.active_name() == theme.DEFAULT_THEME
+
+
+def test_active_name_falls_back_on_removed_theme(monkeypatch: pytest.MonkeyPatch) -> None:
+    """曾持久化 obsidian/ansi 的旧配置自动自愈回 attic (不崩)。"""
+    monkeypatch.setenv("ZALL_THEME", "obsidian")
+    assert theme.active_name() == "attic"
 
 
 def test_active_name_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,39 +94,33 @@ def test_active_name_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert theme.active_name() == "attic"
 
 
-# ── I-THEME-4: theme parity ──
+# ── I-THEME-4: attic 全槽位 ──
 
 
-def test_all_themes_fill_every_slot() -> None:
+def test_attic_fills_every_slot() -> None:
     hex_re = re.compile(r"^#[0-9a-fA-F]{6}$")
-    for t in theme.THEMES.values():
-        slots = t.repl_slots()
-        # MODEL 允许为空 (markdown 自控); 其余槽位必须有值
-        for slot, value in slots.items():
-            if slot == "MODEL":
-                continue
-            assert value, f"{t.name}: empty slot {slot}"
-        # TUI 槽位必须是合法 hex (Textual 要求)
-        for field in ("tui_primary", "tui_accent", "tui_secondary",
-                      "tui_background", "tui_surface", "tui_panel",
-                      "tui_foreground", "tui_success", "tui_warning", "tui_error"):
-            assert hex_re.match(getattr(t, field)), \
-                f"{t.name}.{field} is not #rrggbb"
+    t = theme.ATTIC
+    slots = t.repl_slots()
+    # MODEL 允许为空 (markdown 自控); 其余槽位必须有值
+    for slot, value in slots.items():
+        if slot == "MODEL":
+            continue
+        assert value, f"{t.name}: empty slot {slot}"
+    # TUI 槽位必须是合法 hex (Textual 要求)
+    for field in ("tui_primary", "tui_accent", "tui_secondary",
+                  "tui_background", "tui_surface", "tui_panel",
+                  "tui_foreground", "tui_success", "tui_warning", "tui_error"):
+        assert hex_re.match(getattr(t, field)), \
+            f"{t.name}.{field} is not #rrggbb"
 
 
-# ── I-THEME-5: round-trip switch ──
-
-
-def test_switch_round_trip_restores_default() -> None:
-    theme.switch("attic")
+def test_apply_attic_populates_render() -> None:
+    theme.apply(theme.ATTIC)
     assert render._C.ACCENT == "#c9a227"          # attic laurel gold
     assert render.CODE_THEME == "nord"
     assert "#c9a227" in render._ANSI_MAP           # ANSI 表随主题重建
-    theme.switch("obsidian")
-    assert render._C.ACCENT == "gold1"             # counterexample twin
-    assert render.CODE_THEME == "one-dark"
-    assert "gold1" in render._ANSI_MAP
-    assert "#c9a227" not in render._ANSI_MAP       # 旧主题条目不得残留
+    # 反例孪生: 旧默认 (obsidian gold1) 不得回归
+    assert render._C.ACCENT != "gold1"
 
 
 def test_tui_theme_builder_follows_active(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,9 +131,6 @@ def test_tui_theme_builder_follows_active(monkeypatch: pytest.MonkeyPatch) -> No
     t = _build_zall_theme()
     assert t.name == "zall"                        # Textual 名固定, CSS 不断裂
     assert t.primary == theme.ATTIC.tui_primary
-    monkeypatch.setenv("ZALL_THEME", "obsidian")
-    t2 = _build_zall_theme()
-    assert t2.primary == theme.OBSIDIAN.tui_primary
 
 
 # ── I-THEME-6: 希腊美学为默认 ──
@@ -162,8 +143,6 @@ def test_default_theme_is_attic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(theme, "_config_theme_name", lambda: "")
     assert theme.active_name() == "attic"
     assert theme.active() is theme.ATTIC
-    # 反例孪生: 若有人把默认改回 obsidian, 本断言必然失败
-    assert theme.active_name() != "obsidian"
 
 
 if __name__ == "__main__":

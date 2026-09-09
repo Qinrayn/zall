@@ -313,7 +313,7 @@ def cmd_config(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
     return "handled"
 
 
-@slash_command("/theme", description="show/switch color theme (obsidian, attic)", category=_CATEGORY_CONFIG)
+@slash_command("/theme", description="show color theme (attic)", category=_CATEGORY_CONFIG)
 def cmd_theme(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
     """G6 主题切换: /theme 列出, /theme <name> 切换+持久化。
 

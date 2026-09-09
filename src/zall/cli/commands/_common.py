@@ -449,7 +449,7 @@ def _print_advanced_help(out: Any) -> None:
             ("/mode [strict|fast]", "switch mode (/strict /fast are shortcuts)"),
             ("/provider [name]", "show/switch model provider"),
             ("/thinking [on|off]", "toggle AI thinking display"),
-            ("/theme [name]", "show/switch color theme (obsidian, attic)"),
+            ("/theme [name]", "show color theme (attic)"),
             ("/init", "initialize .zall/ config in current directory"),
             ("/update", "check for updates"),
             ("/reload", "reload config and skills"),

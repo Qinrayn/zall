@@ -49,8 +49,10 @@ from zall.mcp.config import MCPServerSpec, load_mcp_config
 from zall.mcp.tool import MCPTool
 from zall.safety.rules_file import load_rules
 from zall.tools.apply_patch import ApplyPatchTool
+from zall.tools.ask_user import AskUserTool
 from zall.tools.bash import BashTool
 from zall.tools.batch_edit import BatchEditTool
+from zall.tools.context_rewind import ContextRewindTool
 from zall.tools.edit_file import EditFileTool
 from zall.tools.git_protect import GitProtect
 from zall.tools.glob import GlobTool
@@ -204,6 +206,12 @@ def confirm_goal(
 # toolregister
 # ──────────────────────────────────────────────────────────────────────────
 
+
+def _sessions_dir() -> str:
+    """Sessions 根目录 (timeline spill 目标) — 延迟 import 防环。"""
+    from zall.cli.session import _get_sessions_dir
+    return str(_get_sessions_dir())
+
 # Item A: 惰性construct — tool在首次 build_tools() 调用时instance化,
 # 不在模块导入时创建 (SpawnSubagentTool.__init__ 会启动 5 thread池)。
 _NATIVE_TOOLS_CACHE: tuple[Any, ...] | None = None
@@ -239,6 +247,8 @@ def _get_native_tools() -> tuple[Any, ...]:
             SpawnSubagentTool(),
             TodoListTool(),
             ScienceTool(),
+            ContextRewindTool(),
+            AskUserTool(),
         )
     return _NATIVE_TOOLS_CACHE
 
@@ -364,11 +374,56 @@ def build_mcp_tools(
     return tools
 
 
-def inject_subagent_context(tools: ToolRegistry, model: Any, rules: Any) -> None:
-    """将 model + tools + rules inject SpawnSubagentTool。"""
+def inject_subagent_context(
+    tools: ToolRegistry, model: Any, rules: Any, scope: str | None = None,
+) -> None:
+    """将 model + tools + rules inject SpawnSubagentTool。
+
+    scope: 本轮 run 标识 — 子代理完成通知只投递给同 scope 的主 loop
+    (P2 fix: 跨 run 通知不串味)。
+    """
     spawn = tools.get("spawn_subagent")
     if spawn is not None and hasattr(spawn, "set_context"):
-        spawn.set_context(model, tools, rules)
+        spawn.set_context(model, tools, rules, scope=scope)
+
+
+def inject_ask_user_interaction(
+    tools: ToolRegistry, responder: Any, state: dict[str, Any] | None, out: Any,
+) -> None:
+    """为 ask_user 工具注入交互实现 (kimi AskUserQuestion 面板对标)。
+
+    TUI → TuiUserResponder 线程安全选择菜单桥 (问题文本先投系统消息);
+    REPL → cli.select.select_prompt 数字选择器 (含 type-ahead 冲刷);
+    非交互/未注入 → 工具自动 dismiss (模型自行决策, kimi afk 对标)。
+    """
+    ask = tools.get("ask_user")
+    if ask is None or not hasattr(ask, "set_interaction"):
+        return
+    # TUI 路径: responder 自带阻塞 worker 的选择菜单桥
+    if (responder is not None and hasattr(responder, "_tui_choose")
+            and hasattr(responder, "_tui_ask")):
+        def _tui_choose_titled(title: str, choices: list) -> Any:
+            try:  # 问题文本先显示为系统消息 (选择菜单标题位固定)
+                responder._app.call_from_thread(responder._app._show_system, title)
+            except Exception:
+                pass
+            return responder._tui_choose(list(choices))
+        ask.set_interaction(choose_fn=_tui_choose_titled, text_fn=responder._tui_ask)
+        return
+    # REPL 路径: 真 TTY 或注入 input_fn (测试/prompt_toolkit)
+    input_fn = (state or {}).get("_input_fn")
+    if input_fn is None and not sys.stdin.isatty():
+        return  # 非交互 → 保持未注入 (自动 dismiss)
+    from zall.cli.select import select_prompt
+    _in = input_fn or input
+
+    def _repl_choose(title: str, choices: list) -> Any:
+        from zall.cli.responder import flush_stdin_typeahead
+        if input_fn is None:
+            flush_stdin_typeahead()
+        return select_prompt(out, title, choices, input_fn=_in, default_index=0)
+
+    ask.set_interaction(choose_fn=_repl_choose, text_fn=_in)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -511,7 +566,10 @@ def run(
 
     # 3. rules
     rules = load_rules()
-    inject_subagent_context(tools, adapter, rules)
+    # P2 fix: run 级通知 scope — 子代理完成通知只进本次 run 的主 loop
+    import uuid as _uuid
+    run_scope = f"run_{_uuid.uuid4().hex[:12]}"
+    inject_subagent_context(tools, adapter, rules, scope=run_scope)
 
     # 4. goal
     goal = refine_goal(user_task, judge_mode=judge_mode)
@@ -589,8 +647,15 @@ def run(
         .with_checkpoint(checkpoint_mgr)
         .with_compactor(ModelCompactor())
         .with_strict(strict)
+        .with_timeline_spill_dir(_sessions_dir())   # M-fix: 长 run 内存有界
         .build()
     )
+    # kimi background→notification→inject 闭环: 主 loop 消费进程级通知中心
+    try:
+        from zall.core.notifications import get_notification_center
+        loop.set_notification_center(get_notification_center(), scope=run_scope)
+    except Exception:
+        pass
 
     # 11. Execute
     out_stream.write(f"  {user_task[:100]}\n")

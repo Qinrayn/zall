@@ -151,13 +151,23 @@ class GrepTool:
                 cmd, capture_output=True, text=True, timeout=30, encoding="utf-8",
                 errors="replace",
             )
-        except (subprocess.TimeoutExpired, OSError):
+            stdout = proc.stdout or ""
+            rg_timed_out = False
+            # rg exit code 0=有匹配, 1=无匹配, >1=error
+            if proc.returncode > 1:
+                return self._grep_python(pattern, path, fixed, ignore_case, max_results)
+        except subprocess.TimeoutExpired as te:
+            # kimi 对标: 超时返回**部分结果**而非整体作废 — 已扫到的匹配
+            # 对模型仍有价值 (大仓库模糊模式常见)。无部分输出才退 Python。
+            _partial = te.stdout
+            if isinstance(_partial, bytes):
+                _partial = _partial.decode("utf-8", errors="replace")
+            if not (_partial or "").strip():
+                return self._grep_python(pattern, path, fixed, ignore_case, max_results)
+            stdout = _partial
+            rg_timed_out = True
+        except OSError:
             # rg 失败 → 退化到 Python
-            return self._grep_python(pattern, path, fixed, ignore_case, max_results)
-
-        stdout = proc.stdout or ""
-        # rg exit code 0=有匹配, 1=无匹配, >1=error
-        if proc.returncode > 1:
             return self._grep_python(pattern, path, fixed, ignore_case, max_results)
 
         lines = stdout.rstrip("\n").split("\n") if stdout.strip() else []
@@ -200,6 +210,9 @@ class GrepTool:
         output = "\n".join(lines)
         if truncated:
             output += f"\n... [truncated at {max_results} matches]"
+        if rg_timed_out:
+            output += ("\n[note: search timed out after 30s - PARTIAL results "
+                       "shown; narrow the path or pattern for complete results]")
         output += sensitive_note
         return ToolResult(
             success=True,
@@ -208,6 +221,7 @@ class GrepTool:
                 "match_count": len(lines),
                 "engine": "rg",
                 "truncated": truncated,
+                "timed_out": rg_timed_out,
             },
         )
 

@@ -5,12 +5,8 @@ Design (kimi theme.py 对标, 但保留 zall 语义槽位):
   - 渲染代码只引用语义名 (`_C.ACCENT` / Textual 变量), 不写字面色值
   - `apply()` 把主题写入 render 模块 (_C/_ModeColor/_ANSI_MAP/CODE_THEME),
     _ANSI_MAP 由 rich Color 解析自动派生 — 消灭手工 ANSI 对照表 (原三处色源之一)
-  - 内置主题:
-      attic    — 希腊美学 (默认): 月桂金 / 爱琴海蓝 / 大理石白 / 陶土红 / 橄榄绿
-      obsidian — 旧默认精确复刻 (暖 amber + slate)
-      ansi     — 终端自适应: 只用 ANSI-16 语义色, 浅色终端自动可读 (G7)
-
-切换: env ZALL_THEME > ~/.zall/config.toml [ui].theme > "attic"。
+  - 内置主题 (真实使用反馈后精简为单主题):
+      attic — 希腊美学 (唯一): 月桂金 / 爱琴海蓝 / 大理石白 / 陶土红 / 橄榄绿
 
 IPR constraints:
   IPR-0: tests/test_theme_invariants.py (含反例)
@@ -106,27 +102,6 @@ class Theme:
 # Built-in themes
 # ──────────────────────────────────────────────────────────────────────────
 
-# obsidian — 现状精确复刻 (render._C / _ModeColor / CODE_* / tui._ZALL_THEME 原值)。
-OBSIDIAN = Theme(
-    name="obsidian",
-    accent="gold1", accent2="dark_goldenrod",
-    success="spring_green3", fail="indian_red",
-    warn="dark_orange", danger="red3 bold",
-    info="dodger_blue1", dim="grey50", subtle="grey37",
-    model="", thinking="turquoise4",
-    status_bar="grey50", status_bar_text="grey82",
-    tool_read="steel_blue1", tool_write="gold1",
-    tool_bash="dark_orange", tool_code="spring_green3",
-    queue="steel_blue1", steer="turquoise4", select="dodger_blue1",
-    mode_normal="gold1", mode_plan="dark_cyan",
-    mode_accept="spring_green3", mode_strict="indian_red",
-    code_theme="one-dark", code_bg="#1e1e1e",
-    tui_primary="#e0a83b", tui_accent="#e0a83b", tui_secondary="#3b9dff",
-    tui_background="#1c1c1e", tui_surface="#232326", tui_panel="#2d2d33",
-    tui_foreground="#d6d6d6",
-    tui_success="#7ec98f", tui_warning="#e0a83b", tui_error="#e06c75",
-)
-
 # attic — 希腊美学 (Ἀττική): 克制、比例、和谐。
 # 月桂金 (胜利花冠) 为主强调; 爱琴海蓝为信息与冷静; 大理石白为正文;
 # 陶土红 (黑绘陶器) 为失败; 橄榄绿为成功。低饱和, 如帕特农石面的柔光。
@@ -153,31 +128,8 @@ ATTIC = Theme(
     diff_add_hl="#2e4527", diff_del_hl="#552b22",
 )
 
-# ansi — 终端自适应 (G7): 只用 ANSI-16 语义色名, 跟随用户终端配色,
-# 浅色终端自动可读。code_theme=zall-ansi (ANSISyntaxTheme), code_bg 空 = 跟随终端。
-# TUI (Textual) 需要 hex, 无法真自适应 — 沿用 obsidian 暗色板 (TUI 自带暗底)。
-ANSI = Theme(
-    name="ansi",
-    accent="yellow", accent2="yellow",
-    success="green", fail="red",
-    warn="bright_yellow", danger="bright_red bold",
-    info="blue", dim="bright_black", subtle="bright_black",
-    model="", thinking="cyan",
-    status_bar="bright_black", status_bar_text="white",
-    tool_read="blue", tool_write="yellow",
-    tool_bash="bright_yellow", tool_code="green",
-    queue="blue", steer="cyan", select="blue",
-    mode_normal="yellow", mode_plan="cyan",
-    mode_accept="green", mode_strict="red",
-    code_theme="zall-ansi", code_bg="",
-    tui_primary="#e0a83b", tui_accent="#e0a83b", tui_secondary="#3b9dff",
-    tui_background="#1c1c1e", tui_surface="#232326", tui_panel="#2d2d33",
-    tui_foreground="#d6d6d6",
-    tui_success="#7ec98f", tui_warning="#e0a83b", tui_error="#e06c75",
-)
-
-THEMES: dict[str, Theme] = {t.name: t for t in (OBSIDIAN, ATTIC, ANSI)}
-# 希腊美学为默认 — 克制、比例、和谐 (用户的数学审美); obsidian 保留可切回。
+THEMES: dict[str, Theme] = {ATTIC.name: ATTIC}
+# 单主题 (真实使用反馈: 多主题没啥用, 只保留希腊美学 attic)。
 DEFAULT_THEME = "attic"
 
 
@@ -301,10 +253,8 @@ def list_themes() -> list[str]:
 
 
 __all__ = [
-    "ANSI",
     "ATTIC",
     "DEFAULT_THEME",
-    "OBSIDIAN",
     "THEMES",
     "Theme",
     "active",

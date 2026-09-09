@@ -88,7 +88,11 @@ class ReadFileTool:
                         },
                         "offset": {
                             "type": "integer",
-                            "description": "Starting line number (1-based, default: 1)",
+                            "description": (
+                                "Starting line number (1-based, default: 1). "
+                                "Negative values read from the END of the file "
+                                "(e.g. -100 reads the last 100 lines - ideal for logs)."
+                            ),
                             "default": 1,
                         },
                         "limit": {
@@ -114,6 +118,11 @@ class ReadFileTool:
         # parse offset / limit
         offset = args.get("offset", 1)
         limit = args.get("limit", 500)
+        tail_count = 0
+        if isinstance(offset, int) and offset < 0:
+            # kimi 对标: 负 offset = 尾部读取 (-100 → 最后 100 行, 日志场景常用)
+            tail_count = min(-offset, MAX_LINES)
+            offset = 1
         if not isinstance(offset, int) or offset < 1:
             offset = 1
         if not isinstance(limit, int) or limit < 1:
@@ -181,13 +190,39 @@ class ReadFileTool:
 
         # 读file (单次遍历, 不 seek 回头)
         try:
+            file_enc = _detect_encoding(path)
+            if tail_count:
+                # 尾部读取 (kimi 对标): deque(maxlen) 单趟流式, 同时得精确总行数
+                import collections
+                tail_buf: collections.deque[tuple[int, str]] = collections.deque(
+                    maxlen=tail_count)
+                total = 0
+                with open(path, "r", encoding=file_enc) as f:
+                    for total, raw in enumerate(f, start=1):
+                        tail_buf.append((total, raw))
+                if not tail_buf:
+                    return ToolResult(
+                        success=True, output="[empty file]",
+                        artifacts={"path": str(path), "lines_read": 0,
+                                   "total_lines": 0},
+                    )
+                numbered = [f"{n:6d}\u2192{line.rstrip(chr(10))}"
+                            for n, line in tail_buf]
+                first_no = tail_buf[0][0]
+                header = (f"Lines {first_no}-{total} of {total} "
+                          f"(tail read, offset={-tail_count})")
+                return ToolResult(
+                    success=True,
+                    output=header + "\n" + "-" * 25 + "\n" + "\n".join(numbered),
+                    artifacts={"path": str(path), "lines_read": len(tail_buf),
+                               "total_lines": total},
+                )
             start = max(0, offset - 1)  # 转为 0-based
             end = start + limit
             file_size = os.path.getsize(path)
             total_lines = 0
             exact_total = True
             lines = []
-            file_enc = _detect_encoding(path)
             with open(path, "r", encoding=file_enc) as f:
                 lines = list(itertools.islice(f, start, end))
                 actual_end = start + len(lines)

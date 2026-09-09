@@ -123,7 +123,7 @@ class TestLoadSkills:
             '[[skills]]\nname = "x"\ndescription = "proj"\nprompt = "PROJ"\n',
         )
         skills = load_skills(
-            user_path=str(user_file), project_path=str(tmp_path)
+            user_path=str(user_file), project_path=str(tmp_path), skill_dirs=[]
         )
         assert len(skills) == 1
         assert skills[0].prompt == "PROJ"  # 项目级优先
@@ -140,7 +140,7 @@ class TestLoadSkills:
             '[[skills]]\nname = "b"\nprompt = "B"\n',
         )
         skills = load_skills(
-            user_path=str(user_file), project_path=str(tmp_path)
+            user_path=str(user_file), project_path=str(tmp_path), skill_dirs=[]
         )
         names = {s.name for s in skills}
         assert names == {"a", "b"}
@@ -150,13 +150,15 @@ class TestLoadSkills:
         _write_skill_file(user_file, '[[skills]]\nname = "a"\nprompt = "A"\n')
         # 项目directory不存在 .zall/skills.toml → 只用 user
         skills = load_skills(
-            user_path=str(user_file), project_path=str(tmp_path / "nope")
+            user_path=str(user_file), project_path=str(tmp_path / "nope"),
+            skill_dirs=[],
         )
         assert [s.name for s in skills] == ["a"]
 
     def test_both_missing_returns_empty(self, tmp_path: Path) -> None:
         skills = load_skills(
-            user_path=str(tmp_path / "u.toml"), project_path=str(tmp_path / "p")
+            user_path=str(tmp_path / "u.toml"), project_path=str(tmp_path / "p"),
+            skill_dirs=[],
         )
         assert skills == []
 
@@ -170,7 +172,9 @@ class TestLoadSkillsFailSafe:
     def test_bad_toml_returns_empty_not_raise(self, tmp_path: Path) -> None:
         proj_file = tmp_path / ".zall" / "skills.toml"
         _write_skill_file(proj_file, "this is not valid toml @@@ [[skills]]")
-        skills = load_skills(project_path=str(tmp_path))
+        skills = load_skills(project_path=str(tmp_path),
+                             user_path=str(tmp_path / "no-user.toml"),
+                             skill_dirs=[])
         assert skills == []  # fail安全: 解析异常不得抛, returns []
 
     def test_skill_missing_prompt_skipped(self, tmp_path: Path) -> None:
@@ -181,7 +185,9 @@ class TestLoadSkillsFailSafe:
             '[[skills]]\nname = "bad"\n'  # 无 prompt
             '[[skills]]\nname = "good"\nprompt = "OK"\n',
         )
-        skills = load_skills(project_path=str(tmp_path))
+        skills = load_skills(project_path=str(tmp_path),
+                             user_path=str(tmp_path / "no-user.toml"),
+                             skill_dirs=[])
         assert [s.name for s in skills] == ["good"]
 
 

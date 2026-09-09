@@ -584,7 +584,10 @@ class BashTool:
                 "description": (
                     f"Execute a {shell_hint} command. Returns stdout, stderr, and exit code. "
                     "Commands run with a timeout (default 120s, max 600s). "
-                    "Output is truncated at 50KB to prevent context pollution."
+                    "Output is truncated at 50KB to prevent context pollution. "
+                    "No stdin is supplied: interactive prompts (git credentials, "
+                    "sudo password) read EOF immediately — avoid commands that "
+                    "block waiting for input; pass arguments or use env vars."
                 ),
                 "parameters": {
                     "type": "object",
@@ -679,6 +682,9 @@ class PopenExecutor:
             proc = subprocess.Popen(
                 exec_args,
                 shell=True,
+                # kimi 对标: stdin 接 DEVNULL → 交互式提示 (git 密码/confirm)
+                # 立即收到 EOF 而非继承终端后永久挂死等一个不会来的输入
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd,

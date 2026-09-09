@@ -572,64 +572,6 @@ def cmd_forget_permissions(arg: str, out: Any, loop: Any | None = None, state: d
 # ──────────────────────────────────────────────────────────────────────
 
 
-# M2 fix: 移除重复的 /verify 注册 (与下方同名 cmd_verify 冲突, 后者静默覆盖前者)。
-# 本旧实现已停用 @slash_command 注册并改为私有名; 下方 cmd_verify 为唯一 /verify 实现。
-def _cmd_verify_legacy_unused(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
-    """[DEPRECATED · 未注册] 旧版 /verify, 由下方 cmd_verify 取代 (§12.1 Verifiability).
-
-    用法:
-      /verify            验证当前活跃 loop 的 recorder
-      /verify <run_id>   验证指定 session 的 timeline (从磁盘加载)
-
-    输出: valid/broken + 事件数 + tail hash + anchor 状态。
-    这是 zall 对外宣称的杀手场景: 第三方独立复核 run 完整性。
-    """
-    parts = arg.split() if arg else []
-    run_id = parts[0] if parts else None
-
-    recorder = None
-    # 优先用当前活跃 loop 的 recorder (实时验证)
-    if loop is not None and hasattr(loop, "recorder"):
-        recorder = loop.recorder
-
-    # 若指定了 run_id 且与当前 loop 不同, 从磁盘加载
-    if run_id and (recorder is None or getattr(recorder, "run_id", None) != run_id):
-        try:
-            from zall.cli.session import _load_timeline_for_run
-            recorder = _load_timeline_for_run(run_id)
-        except (ImportError, AttributeError, FileNotFoundError):
-            pass
-
-    if recorder is None:
-        out.write("  no active run and no run_id specified\n")
-        out.write("  usage: /verify [run_id]\n")
-        return "handled"
-
-    try:
-        is_valid = recorder.verify_chain()
-    except Exception as e:
-        out.write(f"  \u2717 verify_chain error: {e}\n")
-        return "handled"
-
-    events = getattr(recorder, "events", ()) or ()
-    tail_hash = getattr(recorder, "tail_hash", "unknown")
-    rid = getattr(recorder, "run_id", "unknown")
-    anchor_id = getattr(recorder, "anchor_id", None)
-
-    if is_valid:
-        out.write("  \u2713 timeline chain VALID\n")
-    else:
-        out.write("  \u2715 timeline chain BROKEN (tampering detected)\n")
-    out.write(f"    run_id:    {rid}\n")
-    out.write(f"    events:    {len(events)}\n")
-    out.write(f"    tail_hash: {tail_hash[:16]}...\n")
-    if anchor_id:
-        out.write(f"    anchored:  yes ({anchor_id[:16]}...)\n")
-    else:
-        out.write("    anchored:  no\n")
-    return "handled"
-
-
 def _load_timeline_events(session_dir: Path) -> list[dict] | None:
     """从 session 目录加载 timeline.jsonl, 返回 event dict 列表。
 

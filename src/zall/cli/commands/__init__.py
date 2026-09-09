@@ -115,6 +115,9 @@ from zall.cli.commands.config import (
     cmd_config,
 )
 
+# kimi 对标: /btw 侧问 (不污染主上下文的快速问答)
+from zall.cli.commands.btw import cmd_btw as cmd_btw
+
 # Import from eval (Phase 1: core/eval timeline-based evaluation)
 from zall.cli.commands.eval import cmd_eval as cmd_eval
 

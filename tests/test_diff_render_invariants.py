@@ -231,9 +231,11 @@ def _restore_theme():
 
 def test_diff_colors_follow_theme(_restore_theme):
     from zall.cli import theme
-    theme.apply(theme.OBSIDIAN)
-    obsidian_colors = dr._diff_colors()
     theme.apply(theme.ATTIC)
     attic_colors = dr._diff_colors()
-    assert obsidian_colors != attic_colors
     assert all(c.startswith("on #") for c in attic_colors)
+    # 反例孪生: 临时主题 (改动 diff 色槽) 必须产生不同色板 — 色直通主题槽位
+    from dataclasses import replace
+    other = replace(theme.ATTIC, diff_add_bg="#000000", diff_del_bg="#111111")
+    theme.apply(other)
+    assert dr._diff_colors() != attic_colors

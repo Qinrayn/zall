@@ -26,7 +26,7 @@ from zall.cli.commands import (
 )
 from zall.cli.config import _detect_provider, _onboarding
 from zall.cli.file_complete import expand_at_references
-from zall.cli.orchestrator import build_mcp_tools
+from zall.cli.orchestrator import build_mcp_tools  # noqa: F401  (保留导出: 测试/插件 patch 面)
 from zall.cli.orchestrator import make_usage_observer as _make_usage_observer
 from zall.cli.prompt import make_prompt_fn
 from zall.cli.render import _C, CliRenderer, _shared_console, clear_console_cache
@@ -177,9 +177,11 @@ def build_repl_loop(
     from zall.cli.orchestrator import (
         build_perception_engine,
         build_tools,
+        inject_ask_user_interaction,
         inject_subagent_context,
         merge_tools,
         refine_goal,
+        _sessions_dir,
     )
 
     try:
@@ -208,7 +210,10 @@ def build_repl_loop(
 
     tools = merge_tools(build_tools().tools, list(mcp_tools))
     rules = load_rules()
-    inject_subagent_context(tools, adapter, rules)
+    # P2 fix: 会话级通知 scope — 并行子代理完成通知只进本会话的 loop
+    import uuid as _uuid
+    run_scope = f"repl_{_uuid.uuid4().hex[:12]}"
+    inject_subagent_context(tools, adapter, rules, scope=run_scope)
     goal = refine_goal(first_input, judge_mode="none")
     context = Context(user_raw=first_input, cwd_meta=CwdMeta())
     renderer = CliRenderer(json_mode=json_mode, stream=out or sys.stderr,
@@ -243,6 +248,9 @@ def build_repl_loop(
         checkpoint_mgr = CheckpointManager()
     except (OSError, PermissionError, ValueError):
         checkpoint_mgr = None
+    # kimi AskUserQuestion 对标: 为 ask_user 注入交互 (TUI 桥 / REPL 选择器;
+    # 非交互保持未注入 → 工具自动 dismiss)
+    inject_ask_user_interaction(tools, responder, state, out or sys.stderr)
     loop = (
         AgentBuilder()
         .with_model(adapter)
@@ -261,6 +269,7 @@ def build_repl_loop(
         .with_compactor(ModelCompactor())
         .with_extensions(ext_registry)
         .with_perception(build_perception_engine())
+        .with_timeline_spill_dir(_sessions_dir())   # M-fix: 长会话内存有界
         .build()
     )
     if seed_messages is None:
@@ -275,6 +284,13 @@ def build_repl_loop(
                 skills=state.get("_skills"))),
             Message.user(first_input),
         ])
+    # kimi background→notification→inject 闭环: 主 loop 消费进程级通知中心
+    # (并行子代理完成即推送入上下文; 子代理 loop 不设 → 不误吞)
+    try:
+        from zall.core.notifications import get_notification_center
+        loop.set_notification_center(get_notification_center(), scope=run_scope)
+    except Exception:
+        pass
     return loop
 
 
@@ -297,8 +313,13 @@ def repl(
 
     out = out or sys.stderr
 
-    # §9.2.11: REPL session内 MCP server 只连接一次
-    mcp_tools: list[MCPTool] = build_mcp_tools(out)
+    # §9.2.11: REPL session内 MCP server 只连接一次。
+    # kimi 对标 (延迟后台加载): 启动零阻塞, 连接在后台进行,
+    # 首个回合构建前才收敛 (通常届时早已就绪, 等待为零)。
+    from zall.mcp.deferred import DeferredMCPLoader
+    _mcp_loader = DeferredMCPLoader()
+    _mcp_loader.start()
+    mcp_tools: list[MCPTool] = []  # 首个回合构建前由 loader.wait() 填充
     skills: list[Skill] = load_skills()
 
     # Extension registry (Pi-style self-evolving agent)
@@ -443,6 +464,13 @@ def repl(
                 out.flush()
 
             if loop is None:
+                # MCP 后台加载收敛 (首个回合构建前保证工具可用)
+                if not mcp_tools:
+                    mcp_tools = _mcp_loader.wait()
+                    state["_mcp_tools"] = mcp_tools
+                    _mcp_log = _mcp_loader.status().get("log", "")
+                    if _mcp_log.strip():
+                        out.write(_mcp_log)
                 loop = build_repl_loop(
                     line, state, yes, json_mode, stream, out,
                     max_steps=state.get("max_steps", REPL_MAX_STEPS),
@@ -581,6 +609,9 @@ def repl(
         _renderer = state.get("_renderer")
         if _renderer is not None and hasattr(_renderer, "shutdown_spinner"):
             _renderer.shutdown_spinner()
+        # 首个回合从未触发时, 后台可能已连上 server — 收敛后统一关闭 (防泄漏);
+        # close_all 等待仍在收尾的加载线程并关闭其最终产出的连接
+        _mcp_loader.close_all(timeout=5)
         for t in mcp_tools:
             t.close()
         # v0.3.0 (B2): 关闭session级 adapter (httpx 连接池释放); fake adapter 无 close skip

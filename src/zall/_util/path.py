@@ -8,12 +8,14 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-# 统一noisedirectory集 (并集: glob.py + grep.py + list_dir.py + loop.py)
+# 统一noisedirectory集 (并集: glob.py + grep.py + list_dir.py + loop.py + checkpoint)
+# 注意: .zall 必须排除, 否则 checkpoint 扫描会递归复制自身导致爆炸
 NOISE_DIRS: frozenset[str] = frozenset({
     ".git", "node_modules", ".venv", "venv", "__pycache__",
     ".tox", ".eggs", ".egg-info", ".svn", ".hg",
     ".pytest_cache", ".mypy_cache", ".ruff_cache",
     "dist", "build", "target", "lib", "include",
+    ".zall",
 })
 
 

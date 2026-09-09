@@ -70,6 +70,22 @@ def _build_parent_registry() -> ToolRegistry:
     )
 
 
+def _build_parent_full() -> ToolRegistry:
+    """parent 含全部 root-only 工具 (spawn/ask_user/context_rewind)。"""
+    from zall.tools.ask_user import AskUserTool
+    from zall.tools.context_rewind import ContextRewindTool
+
+    return ToolRegistry(
+        tools=(
+            _FakeTool("bash"),
+            _FakeTool("read_file"),
+            SpawnSubagentTool(),
+            AskUserTool(),
+            ContextRewindTool(),
+        )
+    )
+
+
 class TestSubagentMCPInheritance:
     def test_subagent_inherits_mcp_tools(self) -> None:
         parent = _build_parent_registry()
@@ -102,3 +118,27 @@ class TestSubagentMCPInheritance:
         parent = _build_parent_registry()
         sub = _build_subagent_tools(parent)
         assert isinstance(sub, ToolRegistry)
+
+    def test_context_rewind_excluded(self) -> None:
+        """P1 回归: 子代理不得持有 context_rewind — 进程级 mailbox 单例
+        会让子代理的信被主 loop 取走、按其锚点表截断主上下文。"""
+        parent = _build_parent_full()
+        sub = _build_subagent_tools(parent)
+        assert "context_rewind" not in sub.tool_ids
+        assert sub.get("context_rewind") is None
+
+    def test_ask_user_excluded(self) -> None:
+        """root-only: 无人监督的后台子代理弹交互面板会抢用户并阻塞 worker。"""
+        parent = _build_parent_full()
+        sub = _build_subagent_tools(parent)
+        assert "ask_user" not in sub.tool_ids
+        assert sub.get("ask_user") is None
+
+    def test_all_root_only_tools_excluded_together(self) -> None:
+        """计数器反例: 三个 root-only 工具全部排除 (不多不少)。"""
+        parent = _build_parent_full()
+        sub = _build_subagent_tools(parent)
+        parent_ids = set(parent.tool_ids)
+        sub_ids = set(sub.tool_ids)
+        assert sub_ids <= parent_ids
+        assert parent_ids - sub_ids == {"spawn_subagent", "ask_user", "context_rewind"}

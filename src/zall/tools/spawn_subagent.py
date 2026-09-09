@@ -123,9 +123,16 @@ def _build_subagent_tools(parent_tools: ToolRegistry) -> ToolRegistry:
     不变量:
       - 子 agent 工具集 ⊆ parent 工具集 (只减不增, 绝不凭空获得新能力)。
       - spawn_subagent 必被排除 (防无限嵌套)。
+      - ask_user 必被排除 (kimi root-only 对标: 无人监督的后台子代理
+        弹交互面板会与主 agent 抢用户, 且阻塞其 worker 线程)。
+      - context_rewind 必被排除 (P1 fix): 进程级工具缓存使父/子 loop 共享
+        同一个 RewindMailbox 单槽信箱 — 子代理每步用自己的锚点数覆盖
+        mailbox、投递的请求会被主 loop 取走并截断主上下文。子代理不持有
+        该工具即可彻底隔离。
     """
+    _EXCLUDED = {"spawn_subagent", "ask_user", "context_rewind"}
     return ToolRegistry(tools=tuple(
-        t for t in parent_tools.tools if t.tool_id != "spawn_subagent"
+        t for t in parent_tools.tools if t.tool_id not in _EXCLUDED
     ))
 
 
@@ -283,14 +290,28 @@ class SpawnSubagentTool:
         self._executor = ThreadPoolExecutor(max_workers=self._MAX_PARALLEL)
         self._subagents: dict[str, dict[str, Any]] = {}
         self._subagents_lock = threading.Lock()
+        # 通知 scope: 由 CLI 层按 run 注入, 发布完成通知时随 scope 带走
+        # (防上一个 run 遗留的并行子代理通知串进下一个 run 的上下文)
+        self._scope: str | None = None
         # v2 fix: 标记是否已cleanup, 防 __del__ 和 close() 重复execute
         self._closed = False
 
-    def set_context(self, model_provider: Any, tools: ToolRegistry, rules: RuleSet) -> None:
-        """CLI 层在 model/tools/rules 就绪后injectcontext。"""
+    def set_context(
+        self,
+        model_provider: Any,
+        tools: ToolRegistry,
+        rules: RuleSet,
+        scope: str | None = None,
+    ) -> None:
+        """CLI 层在 model/tools/rules 就绪后injectcontext。
+
+        scope: 本轮 run 的唯一标识 — 子代理完成通知只投递给同 scope 的主 loop
+        (notifications.py scope 过滤), 跨 run 不串味。
+        """
         self._model_provider = model_provider
         self._tools = tools
         self._rules = rules
+        self._scope = scope
 
     @staticmethod
     def _get_parent_cwd_meta() -> Any:
@@ -511,6 +532,9 @@ class SpawnSubagentTool:
                           sub_system_prompt: str) -> ToolResult:
         """parallelexecute子 agent: commit到thread池, 立即returntrace ID."""
         sub_id = uuid.uuid4().hex[:12]
+        # 快照当前 run scope: 完成回调执行时单例工具可能已被下一个 run
+        # 的 set_context 切走 scope — 通知必须挂在 spawn 时刻的 run 上。
+        scope = self._scope
 
         # register到trace表
         with self._subagents_lock:
@@ -529,14 +553,19 @@ class SpawnSubagentTool:
 
         # register完成回调
         def _on_done(f: Any) -> None:
+            _final_status = "completed"
+            _result_preview = ""
             try:
                 result = f.result()
+                _result_preview = (result.output or "")[:500]
                 with self._subagents_lock:
                     # Guard against race with close() which clears _subagents
                     if sub_id in self._subagents:
                         self._subagents[sub_id]["status"] = "completed"
                         self._subagents[sub_id]["result"] = result
             except Exception as e:
+                _final_status = "failed"
+                _result_preview = str(e)[:500]
                 with self._subagents_lock:
                     if sub_id in self._subagents:
                         self._subagents[sub_id]["status"] = "failed"
@@ -546,6 +575,8 @@ class SpawnSubagentTool:
             except BaseException as e:
                 # v0.5.0 (C5 fix): 捕获 BaseException (SystemExit, KeyboardInterrupt等)
                 # 确保 Future 不会泄漏, 即使被异常终止也清理 subagent 状态
+                _final_status = "cancelled"
+                _result_preview = f"{type(e).__name__}: {e}"[:500]
                 with self._subagents_lock:
                     if sub_id in self._subagents:
                         self._subagents[sub_id]["status"] = "cancelled"
@@ -553,6 +584,24 @@ class SpawnSubagentTool:
                             success=False, output="",
                             error=f"subagent cancelled: {type(e).__name__}: {e}",
                         )
+            # 完成即回收 (P2 fix 补强): 不只等 list_subagents 被查时才清,
+            # 后台子代理一多 _subagents 就无界增长 (每条夹带完整 output_text)。
+            self._trim_subagent_store_locked()
+            # kimi background→notification 闭环对标: 完成即发布通知,
+            # 主 loop 下一步自动注入上下文 — 模型不再需要轮询 list_subagents。
+            # IPR-0: 通知失败静默, 不影响子代理结果本身。
+            # scope 挂 spawn 时刻的快照: 完成后通知只进同 run 的主 loop。
+            try:
+                from zall.core.notifications import get_notification_center
+                get_notification_center().publish(
+                    title=f"subagent {sub_id} {_final_status}",
+                    body=_result_preview,
+                    severity="info" if _final_status == "completed" else "error",
+                    dedupe_key=f"subagent_{sub_id}",
+                    scope=scope,
+                )
+            except Exception:
+                pass
 
         future.add_done_callback(_on_done)
 
@@ -608,6 +657,17 @@ class SpawnSubagentTool:
             if timeline_content:
                 result_lines.append(f"  Output: {timeline_content[:2000]}")
 
+            # P2 fix: 结果全文只保留有界前缀 — 每个完成的子代理条目不再
+            # 无限夹带最终回复全文; 完整文本在父 timeline (落盘) 中可取。
+            _MAX_OUTPUT_TEXT_KEEP = 20_000
+            kept_text = timeline_content
+            if len(timeline_content) > _MAX_OUTPUT_TEXT_KEEP:
+                kept_text = (
+                    timeline_content[:_MAX_OUTPUT_TEXT_KEEP]
+                    + f"\n...[truncated {len(timeline_content) - _MAX_OUTPUT_TEXT_KEEP}"
+                    " chars; full text recorded in parent timeline]"
+                )
+
             return ToolResult(
                 success=egress.error is None,
                 output="\n".join(result_lines),
@@ -615,7 +675,7 @@ class SpawnSubagentTool:
                     "subagent_steps": egress.step_count,
                     "subagent_tool_calls": egress.total_tool_calls,
                     "subagent_state": egress.final_state.value,
-                    "output_text": timeline_content,
+                    "output_text": kept_text,
                 },
             )
 
@@ -627,6 +687,25 @@ class SpawnSubagentTool:
             )
 
     # ── Team Mode: list_subagents tool ──
+
+    _SUBAGENT_STORE_MAX = 64  # _subagents 条数上限 (完成即回收, 防无界增长)
+
+    def _trim_subagent_store_locked(self) -> None:
+        """在锁内淘汰最旧的非 running 条目, 保证 _subagents 有界。
+
+        由 _on_done (完成回调) 与 execute_list_subagents 调用; 顺序依据
+        dict 插入序 (最旧在前), 只淘汰 completed/failed — running 保留。
+        """
+        if len(self._subagents) <= self._SUBAGENT_STORE_MAX:
+            return
+        dropped = 0
+        for sid in list(self._subagents.keys()):
+            if len(self._subagents) - dropped <= self._SUBAGENT_STORE_MAX:
+                break
+            if self._subagents[sid].get("status") not in ("completed", "failed"):
+                continue
+            del self._subagents[sid]
+            dropped += 1
 
     @property
     def list_subagents_tool_id(self) -> str:
@@ -696,14 +775,8 @@ class SpawnSubagentTool:
                     "error": full_error,
                 })
 
-            # P2 fix: cleanup已完成的子 agent (preserve最近 50 条, 防 _subagents dict 无限增长)
-            if len(self._subagents) > 50:
-                completed_ids = [
-                    sid for sid, info in self._subagents.items()
-                    if info.get("status") in ("completed", "failed")
-                ]
-                for sid in completed_ids[:len(self._subagents) - 50]:
-                    del self._subagents[sid]
+            # P2 fix: cleanup已完成的子 agent (有界回收; _on_done 已兜底, 此处为查询路径复核)
+            self._trim_subagent_store_locked()
 
             return ToolResult(
                 success=True,

@@ -256,7 +256,7 @@ RULES (binding):
 10. If unsure where things are, explore first: list_dir/glob to find files, then
     read_file/grep to inspect. Do not guess paths — use tools to discover them.
 
-TOOLS available: read_file, write_file, edit_file, batch_edit, bash, grep, glob, list_dir, web_fetch, spawn_subagent, todo_list.
+TOOLS available: read_file, write_file, edit_file, batch_edit, bash, grep, glob, list_dir, web_fetch, spawn_subagent, todo_list, context_rewind.
   - read_file(path)           read a file's content
   - write_file(path, content) create or fully overwrite a file
   - edit_file(path, old, new) targeted string replacement (read first!)
@@ -268,6 +268,12 @@ TOOLS available: read_file, write_file, edit_file, batch_edit, bash, grep, glob,
   - web_fetch(url)            fetch a web page and extract text content
   - spawn_subagent(prompt)    delegate an isolated sub-task to a sub-agent (read-only by default)
   - todo_list(todos)          update the task progress checklist (display only; does not decide completion)
+  - context_rewind(checkpoint_id, message)  fold bloated recent context back to a
+    [CHECKPOINT k] anchor, carrying only the distilled findings forward. Use it
+    after large reads/searches or debugging detours that are no longer needed.
+  - ask_user(questions)      ask the user structured multiple-choice questions
+    when a decision genuinely changes your next action (auto-dismissed when no
+    user is present - then decide on your own).
 """
 
 

@@ -6,8 +6,8 @@
   I-ANSI16-2  resolve_code_bg: 空串 → None (跟随终端背景); 非空原样 (反例)
   I-ANSI16-3  ANSI 纯净性: zall-ansi 主题渲染代码块只发 16 色 SGR,
               绝无 truecolor (38;2;) 前景转义 (反例: one-dark 有 truecolor)
-  I-ANSI16-4  ansi 主题注册完整: THEMES/switch/list_themes 可用,
-              apply 后 render.CODE_THEME/CODE_BG 正确, 全槽位可 ANSI 派生
+  I-ANSI16-4  单主题精简后: ansi 主题已从注册表移除 (switch 拒绝),
+              但 zall-ansi 语法主题解析器作为库能力保留
 """
 
 from __future__ import annotations
@@ -93,46 +93,16 @@ def test_truecolor_theme_counterexample():
     assert "\x1b[38;2;" in out
 
 
-# ── I-ANSI16-4 ansi 主题注册完整 ──
+# ── I-ANSI16-4 单主题精简后的注册表 ──
 
 
-@pytest.fixture()
-def _restore_theme():
-    yield
+def test_ansi_theme_removed_from_registry():
+    """真实使用反馈: 只保留 attic 单主题; ansi 主题不再可切。"""
     from zall.cli import theme
 
-    theme.apply(theme.OBSIDIAN)
-
-
-def test_ansi_theme_registered(_restore_theme):
-    from zall.cli import render, theme
-
-    assert "ansi" in theme.THEMES
-    assert "ansi" in theme.list_themes()
-    t = theme.switch("ansi")
-    assert t.name == "ansi"
-    assert render.CODE_THEME == ANSI_THEME_NAME
-    assert render.CODE_BG == ""
-    assert resolve_code_bg(render.CODE_BG) is None
-    assert theme.current().name == "ansi"
-
-
-def test_ansi_theme_all_slots_derivable(_restore_theme):
-    """ansi 主题每个非空色槽都能派生 ANSI 前缀 (16 色语义名)。"""
-    from dataclasses import fields as dc_fields
-
-    from zall.cli import theme
-
-    t = theme.THEMES["ansi"]
-    for f in dc_fields(t):
-        val = getattr(t, f.name)
-        if not isinstance(val, str) or not val or f.name in (
-            "name", "code_theme", "code_bg",
-        ) or f.name.startswith(("tui_", "diff_")):
-            continue
-        prefix = theme.ansi_code(val)
-        assert prefix.startswith("\x1b["), f"slot {f.name}={val!r} not derivable"
-        assert ";2;" not in prefix, f"slot {f.name}={val!r} derived truecolor"
+    assert "ansi" not in theme.THEMES
+    with pytest.raises(ValueError):
+        theme.switch("ansi")
 
 
 def test_unknown_theme_counterexample():
