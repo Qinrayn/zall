@@ -52,6 +52,9 @@ class AgentConfig:
     perception_engine: Any | None = None
     # v0.6.x: Identity (MASTER.md §1.2 + §4.2.1) — 六维本体论 ① Identity 维度
     identity: Any | None = None
+    # M-fix: timeline spill 目录 — 非 None 时 RunRecorder 开启
+    # "内存窗口 + 磁盘全量"模式 (长会话内存有界, 见 core/verifiability.py)
+    timeline_spill_dir: str | None = None
 
     @classmethod
     def from_kwargs(cls, judge=None, observer=None, event_bus=None,

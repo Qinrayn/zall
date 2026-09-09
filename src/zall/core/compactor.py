@@ -92,6 +92,9 @@ _CHARS_PER_TOKEN_CJK = 1.6   # 中文/日文/韩文: ~1.6 chars/token (GPT-4 bas
 _SAMPLE_SIZE = 1000           # 采样字符数用于估算语言比例
 _SAFE_WATERMARK = 0.75       # 水位 > 75% 触发预警压缩
 _CRITICAL_WATERMARK = 0.9    # 水位 > 90% 强制压缩
+# kimi 对标 (双条件压缩): 为下一次模型回复预留的 token 空间 —
+# tokens + reserved >= window 时即使比率未达阈也强制压缩 (小窗口模型取 window/4)。
+_RESERVED_REPLY_TOKENS = 16_000
 
 # CJK 统一码range (CJK Unified Ideographs)
 _CJK_RANGES: tuple[tuple[int, int], ...] = (
@@ -263,6 +266,12 @@ class WatermarkMonitor:
         window = self.get_window_size(model_name)
         ratio = tokens / window if window > 0 else 0
 
+        # kimi should_auto_compact 对标: 双条件取先到者 — 比率阈值之外,
+        # 预留下一次回复的空间 (防"比率未达但大回复直接撑爆窗口")。
+        reserved = min(_RESERVED_REPLY_TOKENS, window // 4) if window > 0 else 0
+        if window > 0 and tokens + reserved >= window:
+            return "force"
+
         safe_wm = self._policy.auto_compact_threshold_percent / 100.0
         critical_wm = min(safe_wm + 0.15, 0.99)
 
@@ -425,10 +434,11 @@ class ModelCompactor:
     def _generate_summary(self, messages: list[Message], model: ModelAdapter) -> str:
         """用rule折叠生成结构化digest (A4 fix: 不再调model, 避免 LENGTH 雪上加霜)。
 
-        规则折叠算法:
-          1. 统计每类 role 的消息数
-          2. 提取文件名操作 (read/write/edit/grep 命令的目标路径)
-          3. 构建结构化摘要: 什么角色做了什么事
+        规则折叠算法 (kimi compact.md 分级压缩协议对标, 优先级自高到低):
+          1. Errors & fixes — 错误信息必留 (kimi: MUST KEEP error messages)
+          2. 用户决策 (任务意图演化)
+          3. 文件操作 / 命令 (什么被碰过)
+          4. 角色计数 (体量元信息)
         """
         if not messages:
             return "(no messages to summarize)"
@@ -437,6 +447,7 @@ class ModelCompactor:
         file_ops: list[str] = []
         bash_cmds: list[str] = []
         key_decisions: list[str] = []
+        errors: list[str] = []
 
         for m in messages:
             role = m.role or "unknown"
@@ -455,24 +466,37 @@ class ModelCompactor:
                         if cmd:
                             bash_cmds.append(cmd)
 
+            # kimi 对标 (最高优先级): 错误与解法必留 — 从 tool 结果提取错误首行,
+            # 压缩后模型仍知道"哪里失败过", 不会重踩同一个坑
+            if role == "tool" and content:
+                for line in content.split("\n")[:20]:
+                    ls = line.strip()
+                    if ls.startswith(("[ERROR", "[GATE REJECTED", "Traceback")) or (
+                            "FAILED" in ls[:60]):
+                        errors.append(ls[:140])
+                        break
+
             # 提取关键决策 (user message或重要 assistant reply)
             if role == "user" and content:
                 first_line = content.split("\n")[0][:120]
                 key_decisions.append(f"user: {first_line}")
 
-        # 去重 + truncate
+        # 去重 + truncate (错误优先级最高, 配额最宽)
         file_ops = list(dict.fromkeys(file_ops))[:10]
         bash_cmds = list(dict.fromkeys(bash_cmds))[:5]
         key_decisions = list(dict.fromkeys(key_decisions))[:5]
+        errors = list(dict.fromkeys(errors))[:8]
 
-        # build结构化digest
+        # build结构化digest (kimi 优先序: errors > decisions > files/commands > 计数)
         parts: list[str] = []
-        parts.append(f"Messages: {', '.join(f'{k}={v}' for k, v in sorted(counts.items()))}")
+        if errors:
+            parts.append(f"Errors seen: {' || '.join(errors)}")
+        if key_decisions:
+            parts.append(f"Decisions: {' | '.join(key_decisions)}")
         if file_ops:
             parts.append(f"Files: {', '.join(file_ops)}")
         if bash_cmds:
             parts.append(f"Commands: {'; '.join(bash_cmds)}")
-        if key_decisions:
-            parts.append(f"Decisions: {' | '.join(key_decisions)}")
+        parts.append(f"Messages: {', '.join(f'{k}={v}' for k, v in sorted(counts.items()))}")
 
         return " | ".join(parts)

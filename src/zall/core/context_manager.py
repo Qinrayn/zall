@@ -207,6 +207,17 @@ class ContextManager:
         if self._compactor is None:
             return False
 
+        # PreCompact 事件 (kimi hooks 事件面对标): 压缩前广播给扩展
+        # (auto_learn 等可观测压缩频率/时机; 失败静默, IPR-0)
+        if getattr(self._loop, "_ext_registry", None) is not None:
+            try:
+                self._loop._ext_registry.fire_all(
+                    "on_pre_compact", None,
+                    reason=reason, message_count=len(self._loop.messages),
+                )
+            except Exception:
+                pass
+
         try:
             result = self._compactor.compact(self._loop.messages, self._loop.model_adapter)
         except (KeyboardInterrupt, SystemExit):
@@ -253,4 +264,14 @@ class ContextManager:
                 "strategy": result.strategy,
             },
         ))
+        # PostCompact 事件 (kimi hooks 对标): 压缩后广播 (含压缩量)
+        if getattr(self._loop, "_ext_registry", None) is not None:
+            try:
+                self._loop._ext_registry.fire_all(
+                    "on_post_compact", None,
+                    reason=reason, compacted_count=result.compacted_count,
+                    message_count=len(self._loop.messages),
+                )
+            except Exception:
+                pass
         return True

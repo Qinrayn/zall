@@ -647,3 +647,57 @@ class TestUsageTrackerTyped:
         stats = ext.get_stats()
         assert stats["tool_errors"]["bash"] == 1
         assert stats["total_errors"] == 1
+
+
+# ── kimi hooks 事件面对标: PreCompact / PostCompact (I-HOOK-COMPACT) ──
+
+
+class TestCompactionHooks:
+    """压缩前后广播给扩展 (kimi PreCompact/PostCompact 对标)。"""
+
+    @staticmethod
+    def _make_mgr(compacted_count: int):
+        from types import SimpleNamespace
+
+        from zall.core.context_manager import ContextManager
+        events: list[tuple[str, dict[str, Any]]] = []
+
+        class _Reg:
+            def fire_all(self, legacy, typed, typed_input=None, **kw):
+                events.append((legacy, kw))
+                return []
+
+        class _Compactor:
+            watermark_monitor = None
+
+            def compact(self, messages, adapter):
+                return SimpleNamespace(
+                    compacted_count=compacted_count, strategy="fake",
+                    summary="s", compressed_messages=[],
+                )
+
+        loop = SimpleNamespace(
+            _ext_registry=_Reg(),
+            messages=[1, 2, 3, 4],
+            model_adapter=None,
+            step_count=1,
+            recorder=SimpleNamespace(append=lambda **kw: None),
+            set_messages=lambda msgs: None,
+            _emit=lambda ev: None,
+        )
+        return ContextManager(loop, _Compactor()), events
+
+    def test_pre_and_post_compact_fired_on_success(self) -> None:
+        mgr, events = self._make_mgr(compacted_count=3)
+        assert mgr._auto_compact(reason="watermark_force") is True
+        names = [n for n, _ in events]
+        assert names == ["on_pre_compact", "on_post_compact"]
+        assert events[0][1]["reason"] == "watermark_force"
+        assert events[1][1]["compacted_count"] == 3
+
+    def test_post_compact_not_fired_when_nothing_compacted(self) -> None:
+        """反例孪生: 压缩量为 0 → 只有 pre, 绝无 post。"""
+        mgr, events = self._make_mgr(compacted_count=0)
+        assert mgr._auto_compact(reason="watermark_suggest") is False
+        names = [n for n, _ in events]
+        assert names == ["on_pre_compact"]

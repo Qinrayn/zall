@@ -28,7 +28,7 @@ from typing import Any
 from uuid import uuid4
 
 from zall._util.logging import get_zall_logger as _get_zall_logger
-from zall.core import loop_checkpoint, loop_perception
+from zall.core import loop_checkpoint, loop_perception, loop_rewind
 from zall.core.accountability import AccountabilityResult
 from zall.core.action import Action
 from zall.core.chat_state import ChatState
@@ -288,7 +288,10 @@ class AgentLoop:
         self._messages: list[Message] = list(self._chat_state.messages)
 
         self._run_id = uuid4().hex
-        self._recorder = RunRecorder(self._run_id)
+        self._recorder = RunRecorder(
+            self._run_id,
+            spill_dir=getattr(_config, "timeline_spill_dir", None),
+        )
         # _messages 通过 messages property 访问 (见 messages())
         self._step_count = 0
         self._tool_call_count = 0
@@ -326,6 +329,27 @@ class AgentLoop:
         """Number of times doom-loop was detected"""
         self._last_doom_loop_step: int = 0
         """Step of last doom-loop detection (for debounce)"""
+
+        # context_rewind (kimi D-Mail 对标): 逐步锚点 = 落锚时的消息列表长度。
+        # 仅当 context_rewind 工具已注册才落锚 (未注册时零成本)。
+        self._rewind_anchors: list[int] = []
+        self._rewind_tool_checked: bool = False
+        self._rewind_tool: Any = None
+
+        # 工具重复调用梯度惩罚 (kimi r1/r2/r3/stop 升级链对标)
+        from zall.core.repeat_guard import RepeatGuard
+        self._repeat_guard = RepeatGuard()
+
+        # 按步动态注入 providers (kimi DynamicInjectionProvider 对标;
+        # 历史推断节流, 压缩后自愈重注入 — 见 core/dynamic_inject.py)
+        from zall.core.dynamic_inject import PlanModeReminderProvider
+        self._injection_providers: list[Any] = [PlanModeReminderProvider()]
+
+        # 通知中心 (kimi background→notification→inject 闭环对标;
+        # 仅主 loop 由 CLI 层显式设置, 子代理 loop 不设 → root-only 消费)
+        self._notification_center: Any = None
+        # P2 fix: 本 loop 消费的通知 scope (run 级隔离); None = 收全部
+        self._notification_scope: str | None = None
 
         # §3.4 GoalDowngrade tracking
         self._allow_downgrade = _allow_downgrade
@@ -503,6 +527,15 @@ class AgentLoop:
         elif not enabled and self._planner.is_active:
             self._planner.deactivate()
         self._plan_mode = enabled  # 保持向后兼容
+
+    def set_notification_center(self, center: Any, scope: str | None = None) -> None:
+        """设置通知中心 (仅主 loop; 子代理不设 → root-only 消费语义)。
+
+        scope: 本 run 的通知归属 (P2 fix) — 只消费同 scope/全局通知,
+        上一个 run 遗留的子代理通知不会注入本 loop 的上下文。
+        """
+        self._notification_center = center
+        self._notification_scope = scope
 
     def set_messages(self, messages: list[Message]) -> None:
         """replace model context messagelist (供 /compact/CLI command使用)。
@@ -1016,6 +1049,28 @@ class AgentLoop:
             Message.assistant(content=resp.content, tool_calls=resp.tool_calls)
         )
         self._execute_tool_calls(resp.tool_calls)
+        # context_rewind: 模型本步请求了上下文回滚 → 施加后直接进入下一步
+        # (doom-loop 历史已在 apply 内复位, 无需再检测本步序列)
+        if loop_rewind.apply_pending_rewind(self):
+            return StepResult(
+                kind="tool_used",
+                tools_used=tuple(tc.tool_id for tc in resp.tool_calls),
+            )
+        # repeat_guard 强制止损 (kimi force_stop_turn 对标): 同一调用连击达阈,
+        # 提醒已局尽 → 优雅结束本回合 (awaiting_input, 控制权交回用户)。
+        if self._repeat_guard.force_stop:
+            self._repeat_guard.reset()
+            self._emit(LoopEvent(
+                kind="repeat_force_stop",
+                step=self._step_count,
+                payload={"message": "identical tool call repeated past hard "
+                                     "limit; turn stopped to cut losses"},
+            ))
+            return StepResult(
+                kind="awaiting_input",
+                content="(turn stopped: identical tool call repeated past the "
+                        "hard limit without progress)",
+            )
         # v0.5.0: Doom-loop detection — 检查重复 tool call 序列
         seq_hash = _tool_sequence_hash(resp.tool_calls)
         self._tool_seq_history.append(seq_hash)
@@ -1080,6 +1135,17 @@ class AgentLoop:
             # 子步骤 0: 感知 (v0.6.0, MASTER.md §4.2.3) — 逻辑抽取到 core/loop_perception.py
             # (PARADIGM Step 0 热循环瘦身); 感知引擎为 None 时该函数直接返回, 不进热路径。
             loop_perception.run_perception(self)
+            # 子步骤 0.5: context_rewind 落锚 (kimi D-Mail 对标;
+            # 工具未注册时 no-op, 逻辑见 core/loop_rewind.py)
+            loop_rewind.maybe_drop_anchor(self)
+            # 子步骤 0.6: 按步动态注入 (plan 模式纪律周期性重申等;
+            # 历史推断节流, 无 provider/不命中时零成本)
+            from zall.core.dynamic_inject import run_injections
+            run_injections(self)
+            # 子步骤 0.7: 后台通知递送 (并行子代理完成等 → 注入上下文;
+            # 未设通知中心时零成本 — 见 core/notifications.py)
+            from zall.core.notifications import deliver_into_loop
+            deliver_into_loop(self)
             # 子步骤 1: 准备上下文
             self._emit(LoopEvent(
                 kind="step_progress",
@@ -1232,6 +1298,8 @@ class AgentLoop:
         """
         self._append_message(Message.user(content))
         self._mark_watermark_dirty()
+        # 新回合: 重复连击追踪复位 (kimi 每回合 _last_tool_calls=[] 对标)
+        self._repeat_guard.reset()
 
         # Extension: on_user_input (legacy + typed)
         if self._ext_registry is not None:
@@ -1797,12 +1865,12 @@ class AgentLoop:
                 event_type=EventType.CHAIN_BROKEN,
                 payload={
                     "step": self._step_count,
-                    "event_count": len(self._recorder.events),
+                    "event_count": len(self._recorder),
                 },
             )
             return (
                 f"timeline chain integrity check FAILED: "
-                f"{len(self._recorder.events)} events, "
+                f"{len(self._recorder)} events, "
                 f"tail_hash={self._recorder.tail_hash[:16]}..."
             )
         _log.debug("timeline chain integrity verified (§12.1)")

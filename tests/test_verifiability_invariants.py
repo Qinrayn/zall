@@ -197,6 +197,103 @@ class TestRunRecorderInvariants:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# §6.1 RunRecorder spill (M-fix: 内存窗口 + 磁盘全量)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestRunRecorderSpill:
+    """RunRecorder spill 模式不变量 (内存有界, 链完整, 落盘可重建)。"""
+
+    def test_memory_window_bounded_after_spill(self, tmp_path) -> None:
+        """超过窗口上限 → 最旧事件落盘, 内存窗口有界 (反例: 无界增长)。"""
+        rec = RunRecorder("spill_win", spill_dir=str(tmp_path),
+                          max_memory_events=4)
+        for i in range(20):
+            rec.append(f"e{i}", 1000 + i, EventType.MODEL_CALL, {"i": i})
+        assert len(rec._events) <= 4, "memory window must stay bounded"
+        assert rec.spilled_count == 20 - len(rec._events)
+        assert rec.spill_path is not None and rec.spill_path.exists()
+        # len 是"盘 + 内存"总条数
+        assert len(rec) == 20
+
+    def test_full_reconstruction_matches_plain_recorder(self, tmp_path) -> None:
+        """Happy path: iter_events/events 按序产出全部 20 条, 与无 spill 完全一致。"""
+        seq = [(f"e{i}", 1000 + i, {"i": i}) for i in range(20)]
+        plain = RunRecorder("plain_1")
+        for eid, ts, payload in seq:
+            plain.append(eid, ts, EventType.MODEL_CALL, payload)
+
+        spilled = RunRecorder("spill_2", spill_dir=str(tmp_path),
+                              max_memory_events=3)
+        for eid, ts, payload in seq:
+            spilled.append(eid, ts, EventType.MODEL_CALL, payload)
+
+        got = [(e.event_id, e.payload) for e in spilled.iter_events()]
+        want = [(e.event_id, e.payload) for e in plain.events]
+        assert got == want, "spill reconstruction must equal no-spill sequence"
+        assert len(spilled.events) == 20  # events property 物化全量
+
+    def test_verify_chain_across_spill_boundary(self, tmp_path) -> None:
+        """链跨盘/内存边界仍完整可验证 (反例: 边界断裂)。"""
+        rec = RunRecorder("spill_chain", spill_dir=str(tmp_path),
+                          max_memory_events=2)
+        for i in range(10):
+            rec.append(f"e{i}", 1000 + i, EventType.MODEL_CALL, {"i": i})
+        assert rec.verify_chain() is True
+        # 篡改盘上事件 (改首条 payload) → 整链验证必须失败 (链式不中断)
+        path = rec.spill_path
+        assert path is not None
+        lines = path.read_text(encoding="utf-8").splitlines()
+        import json as _json
+        first = _json.loads(lines[0])
+        first["payload"] = {"forged": True}
+        path.write_text(_json.dumps(first, ensure_ascii=False) + "\n"
+                        + "\n".join(lines[1:]), encoding="utf-8")
+        assert rec.verify_chain() is False
+
+    def test_spill_head_continuity_when_memory_emptied(self, tmp_path) -> None:
+        """整窗都进盘后, 内存空 → tail_hash 仍指向 spill 尾 (链不丢头)。"""
+        rec = RunRecorder("spill_tail", spill_dir=str(tmp_path),
+                          max_memory_events=2)
+        for i in range(15):
+            rec.append(f"e{i}", 1000 + i, EventType.MODEL_CALL, {"i": i})
+        last = rec.append("last", 9999, EventType.MODEL_CALL)
+        assert last.prev_hash is not None
+        # 内存窗 (2 条) + 盘 (14 条) — 全链可验证
+        assert rec.verify_chain() is True
+        assert rec.tail_hash == last.compute_hash()
+
+    def test_save_then_continue_new_record_is_fresh(self, tmp_path) -> None:
+        """会话保存 (关句柄 + 删 spill) 后, 同 run_id 新 recorder 是干净链 —
+        不继承旧 spill 导致双链 (session-resume 语义回归)。"""
+        sub = tmp_path / "spill_dir_save"
+        rec = RunRecorder("js_run", spill_dir=str(sub), max_memory_events=2)
+        for i in range(6):
+            rec.append(f"e{i}", 1000 + i, EventType.MODEL_CALL)
+        spilled_path = rec.spill_path
+        assert spilled_path is not None and spilled_path.exists()
+        rec.close()
+        spilled_path.unlink(missing_ok=True)
+
+        # session 保存后启动的新 recorder (同 run_id, 同 spill 目录)
+        rec2 = RunRecorder("js_run", spill_dir=str(sub), max_memory_events=2)
+        rec2.append("n0", 5000, EventType.MODEL_CALL)
+        assert rec2.spilled_count == 0               # 不继承旧 spill
+        assert [e.event_id for e in rec2.iter_events()] == ["n0"]
+        assert rec2.verify_chain() is True           # genesis 起新链
+        rec2.close()
+
+    def test_len_reflects_total(self, tmp_path) -> None:
+        """len() = 盘 + 内存总量, 不物化全量 (O(1))。"""
+        rec = RunRecorder("spill_len", spill_dir=str(tmp_path),
+                          max_memory_events=3)
+        for i in range(7):
+            rec.append(f"e{i}", 1000 + i, EventType.MODEL_CALL)
+        assert len(rec) == 7
+        assert rec.spilled_count > 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # §6.5.2 TrustAnchor Protocol invariants
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -289,14 +386,15 @@ class TestEventTypeInvariants:
     """§6.1 EventType invariant."""
 
     def test_eight_event_types(self) -> None:
-        """Happy path: EventType 有 17 种 (含 v0.0.5 anchor_ack + v0.0.10 context_compaction + v0.0.11 goal_downgrade + pr0_hallucination + v0.0.22 system_injection + Phase 1 goal_statement + user_confirm + §12.3 E1.1 perception_anomaly + E4 user_interrupt + E6 chain_broken).
+        """Happy path: EventType 有 18 种 (含 v0.0.5 anchor_ack + v0.0.10 context_compaction + v0.0.11 goal_downgrade + pr0_hallucination + v0.0.22 system_injection + Phase 1 goal_statement + user_confirm + §12.3 E1.1 perception_anomaly + E4 user_interrupt + E6 chain_broken + context_rewind (kimi D-Mail 对标)).
 
         Counterexample: 如果有人删了事件类型, 审计轨迹断 -> fail.
         """
         types = {t for t in EventType}
-        assert len(types) == 17
+        assert len(types) == 18
         assert EventType.ANCHOR_ACK in types
         assert EventType.CONTEXT_COMPACTION in types
+        assert EventType.CONTEXT_REWIND in types
         assert EventType.GOAL_DOWNGRADE in types
         assert EventType.PR0_HALLUCINATION in types
         assert EventType.MODEL_CALL in types
@@ -310,3 +408,39 @@ class TestEventTypeInvariants:
         assert EventType.USER_INTERRUPT in types
         # E6: chain broken (tamper detection)
         assert EventType.CHAIN_BROKEN in types
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# §6.5.2 FileTrustAnchor anchor-log trim (O(n) 行数缓存修复后的不变量)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestFileTrustAnchorTrim:
+    """anchor 日志超过上限淘汰最旧 1/3, 链完整性不因 trim 断裂。"""
+
+    def test_trim_keeps_log_bounded_and_chain_valid(self, tmp_path) -> None:
+        """写入超过 _ANCHOR_LOG_MAX_ENTRIES 条 → 文件被裁, 链仍可验证。"""
+        from zall.core.verifiability import FileTrustAnchor, _ANCHOR_LOG_MAX_ENTRIES
+
+        anchor = FileTrustAnchor(work_dir=str(tmp_path))
+        ts = 1_000_000_000
+        for i in range(_ANCHOR_LOG_MAX_ENTRIES + 40):
+            anchor.write_run_tail(f"run_{i:04d}", f"{i:064x}", ts + i)
+
+        lines = [
+            l for l in anchor._log_path.read_text(encoding="utf-8").splitlines()
+            if l.strip()
+        ]
+        assert len(lines) < _ANCHOR_LOG_MAX_ENTRIES, "log must be trimmed"
+        assert len(lines) >= _ANCHOR_LOG_MAX_ENTRIES * 2 // 3
+        # 链完整性: 首条 prev_anchor_hash 继承被淘汰段 (verify_log_chain 必须 True)
+        assert anchor.verify_log_chain() is True
+        # 行数缓存与实际盘上一致 (O(n) 修复后缓存不该漂移)
+        assert anchor._line_count == len(lines)
+        # 继续追加仍正常 (trim 后新写入不破坏链)
+        anchor.write_run_tail("run_final", "f" * 64, ts + 9999)
+        assert anchor.verify_log_chain() is True
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

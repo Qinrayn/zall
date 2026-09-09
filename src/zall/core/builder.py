@@ -107,6 +107,7 @@ class AgentBuilder:
         self._agent_definition: Any = None
         self._planner: Any = None
         self._perception_engine: Any = None
+        self._timeline_spill_dir: str | None = None
 
     # ═══════════════════════════════════════════════════════════════
     # Required fields
@@ -255,6 +256,15 @@ class AgentBuilder:
         self._perception_engine = perception_engine
         return self
 
+    def with_timeline_spill_dir(self, spill_dir: str | None) -> AgentBuilder:
+        """Set the timeline spill directory (M-fix: long-run memory bound).
+
+        Non-None enables RunRecorder's memory-window + disk-full mode:
+        oldest events spill to <spill_dir>/<run_id>/timeline.spill.jsonl.
+        """
+        self._timeline_spill_dir = spill_dir
+        return self
+
     # ═══════════════════════════════════════════════════════════════
     # Build
     # ═══════════════════════════════════════════════════════════════
@@ -292,6 +302,7 @@ class AgentBuilder:
             ext_registry=self._ext_registry,
             planner=self._planner,
             perception_engine=self._perception_engine,
+            timeline_spill_dir=self._timeline_spill_dir,
         )
 
         return AgentLoop(

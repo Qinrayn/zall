@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -41,6 +42,13 @@ _log = _get_zall_logger(__name__)
 
 # .zall 下 checkpoint 存储directory名
 CHECKPOINT_DIR_NAME = "checkpoints"
+
+# B11: 单个 snapshot 大小预算 — 超过则拒绝快照 (安全网不应吃光磁盘)。
+# 注意不能做"部分快照": restore 时会静默丢文件, 故超预算整体拒绝。
+MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024  # 512 MB
+# B11: 全部 checkpoint 总量/数量预算 — 超出从最旧开始修剪 (保留策略)。
+MAX_TOTAL_SNAPSHOT_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_CHECKPOINT_COUNT = 50
 
 
 @dataclass
@@ -74,12 +82,23 @@ class CheckpointManager:
 
     def __init__(self, project_root: str | Path | None = None) -> None:
         self._project_root = Path(project_root) if project_root else Path.cwd()
-        self._cp_dir: Path | None = self._project_root / ".zall" / CHECKPOINT_DIR_NAME
-        try:
-            self._cp_dir.mkdir(parents=True, exist_ok=True)
-        except (OSError, PermissionError):
-            # 非 git 仓库 / 无authoritydirectory → checkpoint 不可用
-            self._cp_dir = None
+        self._cp_dir: Path | None = None
+        # B11 fix: 根目录守卫 — home / 盘根不是项目根。
+        # 在 home 下启动时全量快照会复制整个用户目录 (实测 60GB+ 磁盘爆满),
+        # 此类根一律禁用 checkpoint (GitProtect 安全网仍在)。
+        if self._is_unsafe_root(self._project_root):
+            _log.warning(
+                "checkpoint: project_root %s looks like home/drive root; "
+                "checkpoints disabled to avoid snapshotting the whole disk",
+                self._project_root,
+            )
+        else:
+            self._cp_dir = self._project_root / ".zall" / CHECKPOINT_DIR_NAME
+            try:
+                self._cp_dir.mkdir(parents=True, exist_ok=True)
+            except (OSError, PermissionError):
+                # 非 git 仓库 / 无authoritydirectory → checkpoint 不可用
+                self._cp_dir = None
         self._loaded: list[CheckpointEntry] = []
         self._dirty = False
         # Bug4 fix: 独立 load 标志 (原 `if self._loaded` 在空列表时 falsy → 每次重扫盘)
@@ -92,6 +111,26 @@ class CheckpointManager:
         if msg not in self._log_spoken:
             self._log_spoken.add(msg)
             _log.warning("checkpoint: %s", msg)
+
+    @staticmethod
+    def _is_unsafe_root(root: Path) -> bool:
+        """B11: 判断 project_root 是否为 home / 盘根等非项目根。"""
+        try:
+            r = root.resolve()
+        except OSError:
+            r = root
+        if r == r.parent:  # 盘根 (C:\ 或 /)
+            return True
+        try:
+            home = Path.home().resolve()
+        except (OSError, RuntimeError):
+            return False
+        # Windows 下比较带大小写归一化 — env 提供的路径常有盘符/case 差异
+        # (如 c:\Users vs C:\Users), WindowsPath 比较虽已 normcase, 显式处理
+        # 防止任何非 pathlib 归一化的构造路径漏判。
+        if os.name == "nt":
+            return os.path.normcase(str(r)) == os.path.normcase(str(home))
+        return r == home
 
     # ── 公共property ──────────────────────────────────────────────
 
@@ -123,7 +162,7 @@ class CheckpointManager:
         tool_id: 触发 checkpoint 的工具 ID。
         run_id: 关联的 run ID。
 
-        返回 CheckpointEntry, 或在无可追踪文件时返回 None。
+        返回 CheckpointEntry, 或在无可追踪文件/超预算时返回 None。
         """
         fs_files = self._resolve_files(files)
 
@@ -134,81 +173,121 @@ class CheckpointManager:
         if self._cp_dir is None:
             return None
 
+        # B11: 预算检查 — 先 stat 汇总, 超预算整体拒绝
+        # (部分快照会让 restore 静默丢文件, 不可取)。
+        sized: list[tuple[Path, int]] = []
+        planned_bytes = 0
+        for fpath in fs_files:
+            try:
+                sz = fpath.stat().st_size
+            except OSError:
+                continue
+            sized.append((fpath, sz))
+            planned_bytes += sz
+        if planned_bytes > MAX_SNAPSHOT_BYTES:
+            self._log_once(
+                f"snapshot too large ({planned_bytes // (1024 * 1024)} MB > "
+                f"{MAX_SNAPSHOT_BYTES // (1024 * 1024)} MB), refused"
+            )
+            return None
+
+        # M3: ensure loaded from disk before accessing chain (cross-session)
+        # B12: 必须在创建 _tmp_ 目录之前调用 — _ensure_loaded 的 GC 会回收
+        # 所有 _tmp_* 目录, 若后调用会误删本次正在写入的快照。
+        self._ensure_loaded()
+
         # 生成 checkpoint ID
         raw = f"{time.time()}_{label}_{tool_id}".encode()
         cid = "cp_" + hashlib.sha256(raw).hexdigest()[:16]
 
         ts = time.time()
         cp_dir = self._cp_dir / cid
-        files_dir = cp_dir / "files"
-        files_dir.mkdir(parents=True, exist_ok=True)
+        # B12 fix: 先写临时目录, meta.json 落盘后再 rename 提交。
+        # 原实现 meta.json 最后写: 复制中途被 Ctrl+C/崩溃打断 → 留下无 meta 的
+        # 孤儿快照, list/delete 都看不见, 磁盘永久泄漏 (实测积累 45GB+)。
+        tmp_dir = self._cp_dir / f"_tmp_{cid}"
+        files_dir = tmp_dir / "files"
+        try:
+            files_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
 
         # 复制file
         file_entries: list[dict[str, Any]] = []
         total_bytes = 0
-        for fpath in fs_files:
-            rel = fpath.relative_to(self._project_root)
-            target = files_dir / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.copy2(fpath, target)
-                total_bytes += fpath.stat().st_size
-                file_entries.append({
-                    "path": str(rel),
-                    "size": fpath.stat().st_size,
-                })
-            except OSError as _cp_err:
-                # B10: 记录不可复制的file, 不静默skip
-                # 但 checkpoint 链不受损: skip单个file不影响其他file
-                self._log_once(f"checkpoint: cannot copy {rel}: {_cp_err}")
-
-        if not file_entries:
-            # 没有实际file被trace → 不要创建空的 checkpoint directory
-            shutil.rmtree(cp_dir, ignore_errors=True)
-            return None
-
-        # M3: ensure loaded from disk before accessing chain (cross-session)
-        self._ensure_loaded()
-
-        # 获取上一个 checkpoint ID (链式)
-        prev_id = self._loaded[-1].checkpoint_id if self._loaded else None
-
-        entry = CheckpointEntry(
-            checkpoint_id=cid,
-            ts=ts,
-            label=label or f"cp_{len(self._loaded)}",
-            snapshot_dir=str(cp_dir.relative_to(self._project_root)),
-            file_count=len(file_entries),
-            total_bytes=total_bytes,
-            prev_checkpoint_id=prev_id,
-            tool_id=tool_id,
-            run_id=run_id,
-        )
-
-        # write meta.json
-        meta = {
-            "checkpoint_id": cid,
-            "ts": ts,
-            "label": entry.label,
-            "snapshot_dir": entry.snapshot_dir,
-            "file_count": entry.file_count,
-            "total_bytes": total_bytes,
-            "prev_checkpoint_id": prev_id,
-            "tool_id": tool_id,
-            "run_id": run_id,
-            "files": file_entries,
-        }
         try:
-            (cp_dir / "meta.json").write_text(
+            for fpath, sz in sized:
+                try:
+                    rel = fpath.relative_to(self._project_root)
+                except ValueError:
+                    # B13: project_root 之外的文件不入快照 (restore 无法定位)
+                    self._log_once(f"checkpoint: skip outside-root file {fpath}")
+                    continue
+                target = files_dir / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(fpath, target)
+                    total_bytes += sz
+                    file_entries.append({
+                        "path": str(rel),
+                        "size": sz,
+                    })
+                except OSError as _cp_err:
+                    # B10: 记录不可复制的file, 不静默skip
+                    # 但 checkpoint 链不受损: skip单个file不影响其他file
+                    self._log_once(f"checkpoint: cannot copy {rel}: {_cp_err}")
+
+            if not file_entries:
+                # 没有实际file被trace → 不要创建空的 checkpoint directory
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return None
+
+            # 获取上一个 checkpoint ID (链式)
+            prev_id = self._loaded[-1].checkpoint_id if self._loaded else None
+
+            entry = CheckpointEntry(
+                checkpoint_id=cid,
+                ts=ts,
+                label=label or f"cp_{len(self._loaded)}",
+                snapshot_dir=str(cp_dir.relative_to(self._project_root)),
+                file_count=len(file_entries),
+                total_bytes=total_bytes,
+                prev_checkpoint_id=prev_id,
+                tool_id=tool_id,
+                run_id=run_id,
+            )
+
+            # write meta.json (仍在 tmp_dir 内, rename 前)
+            meta = {
+                "checkpoint_id": cid,
+                "ts": ts,
+                "label": entry.label,
+                "snapshot_dir": entry.snapshot_dir,
+                "file_count": entry.file_count,
+                "total_bytes": total_bytes,
+                "prev_checkpoint_id": prev_id,
+                "tool_id": tool_id,
+                "run_id": run_id,
+                "files": file_entries,
+            }
+            (tmp_dir / "meta.json").write_text(
                 json.dumps(meta, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+            # B12: 原子提交 — rename 成功后快照才对 list/restore 可见
+            tmp_dir.rename(cp_dir)
         except OSError:
-            shutil.rmtree(cp_dir, ignore_errors=True)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             return None
+        except BaseException:
+            # KeyboardInterrupt / 进程被杀等: 清理半成品再传播 (B12: 不留孤儿)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
 
         self._loaded.append(entry)
         self._dirty = True
+        # B11: 保留策略 — 总量/数量超预算时从最旧开始修剪
+        self._prune_over_budget()
         return entry
 
     def restore_checkpoint(self, checkpoint_id: str) -> bool:
@@ -300,6 +379,17 @@ class CheckpointManager:
 
     # ── 内部 ───────────────────────────────────────────────
 
+    def _prune_over_budget(self) -> None:
+        """B11: 保留策略 — 超出总量/数量预算时从最旧开始删, 至少保留最新 1 个。"""
+        self._ensure_loaded()
+        while len(self._loaded) > 1 and (
+            len(self._loaded) > MAX_CHECKPOINT_COUNT
+            or sum(e.total_bytes for e in self._loaded) > MAX_TOTAL_SNAPSHOT_BYTES
+        ):
+            oldest = self._loaded[0]
+            if not self.delete_checkpoint(oldest.checkpoint_id):
+                break
+
     def _resolve_files(self, files: set[str] | None) -> list[Path]:
         """将用户指定的pathparse为绝对 Path list。"""
         if files is None:
@@ -323,7 +413,7 @@ class CheckpointManager:
         return None
 
     def _ensure_loaded(self) -> None:
-        """从diskload已存在的 checkpoint。"""
+        """从diskload已存在的 checkpoint, 并 GC 孤儿快照 (B12)。"""
         if self._load_done and not self._dirty:
             return
 
@@ -340,8 +430,17 @@ class CheckpointManager:
         for child in sorted(self._cp_dir.iterdir()):
             if not child.is_dir():
                 continue
+            # B12 GC: 中断残留的临时目录 → 直接回收
+            if child.name.startswith("_tmp_"):
+                shutil.rmtree(child, ignore_errors=True)
+                continue
             meta_file = child / "meta.json"
             if not meta_file.is_file():
+                # B12 GC: 旧版本残留的孤儿快照 (meta 未落盘, 不可恢复) → 回收磁盘。
+                # 仅处理 cp_* 命名, 避免误删 _restore_backup 等工作目录。
+                if child.name.startswith("cp_"):
+                    self._log_once(f"GC orphan snapshot {child.name}")
+                    shutil.rmtree(child, ignore_errors=True)
                 continue
             try:
                 meta = json.loads(meta_file.read_text(encoding="utf-8"))

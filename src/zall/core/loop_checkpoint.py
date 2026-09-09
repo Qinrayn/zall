@@ -30,8 +30,9 @@ import fnmatch
 import os
 from typing import Any
 
-from zall._util import skip_noise_dirs
+from zall._util import is_noise, skip_noise_dirs
 from zall._util.logging import get_zall_logger as _get_zall_logger
+from pathlib import PurePath
 
 _log = _get_zall_logger(__name__)
 
@@ -48,6 +49,28 @@ CHECKPOINT_EXCLUDE_PATTERNS: tuple[str, ...] = (
     "*secret*", "*password*", "*credential*",
     "id_rsa", "id_ed25519", "*.pub",
 )
+
+
+def is_checkpoint_trackable(rel_path: str) -> bool:
+    """S1 fix: 单一路径是否可入快照 (扩展名白名单 + 敏感模式 + noise 目录)。
+
+    此前排除逻辑只存在于 scan_tracked_files 全量扫描路径; write_file/edit_file
+    的快速路径直接返回工具参数中的 path, 完全绕过 S1 排除 → 编辑 .env 会把
+    secret 原样复制进 .zall/checkpoints/ (secret leak)。现统一收口到本函数。
+    """
+    norm = rel_path.replace("\\", "/")
+    ext = os.path.splitext(norm)[1].lower()
+    if ext not in CHECKPOINT_TRACKED_EXTS:
+        return False
+    base = norm.rsplit("/", 1)[-1]
+    # 同时匹配 basename 与完整相对路径 (".env" 模式须命中 "sub/.env")
+    for pat in CHECKPOINT_EXCLUDE_PATTERNS:
+        if fnmatch.fnmatch(base, pat) or fnmatch.fnmatch(norm, pat):
+            return False
+    # noise 目录内文件 (node_modules/.zall 等) 不追踪
+    if is_noise(PurePath(norm)):
+        return False
+    return True
 
 
 def maybe_checkpoint_file(
@@ -106,7 +129,10 @@ def get_checkpoint_files(
     if action_args:
         path = action_args.get("path") or action_args.get("file_path") or ""
         if path:
-            return {path.replace("\\", "/")}
+            norm = path.replace("\\", "/")
+            # S1 fix: 快速路径同样过 is_checkpoint_trackable (敏感文件不入快照);
+            # 不可回退全量扫描 — 本次只改了这个文件, 快照其他文件无意义。
+            return {norm} if is_checkpoint_trackable(norm) else set()
         # batch_edit: edits list 含多个 path
         if tool_id == "batch_edit":
             edits = action_args.get("edits", [])
@@ -115,7 +141,9 @@ def get_checkpoint_files(
                 for ed in edits:
                     p = ed.get("path", "") if isinstance(ed, dict) else ""
                     if p:
-                        paths.add(p.replace("\\", "/"))
+                        norm = p.replace("\\", "/")
+                        if is_checkpoint_trackable(norm):  # S1 fix
+                            paths.add(norm)
                 if paths:
                     return paths
 
@@ -138,13 +166,10 @@ def scan_tracked_files(loop: Any) -> set[str]:
             skip_noise_dirs(dirnames)
             rel_base = os.path.relpath(dirpath, str(root))
             for fn in filenames:
-                ext = os.path.splitext(fn)[1].lower()
-                if ext in CHECKPOINT_TRACKED_EXTS:
-                    rel = os.path.join(rel_base, fn) if rel_base != "." else fn
-                    rel_norm = rel.replace("\\", "/")
-                    # S1: 排除敏感文件模式 (fnmatch 同时匹配 .env 和 key.pem)
-                    if any(fnmatch.fnmatch(rel_norm, pat) for pat in CHECKPOINT_EXCLUDE_PATTERNS):
-                        continue
+                rel = os.path.join(rel_base, fn) if rel_base != "." else fn
+                rel_norm = rel.replace("\\", "/")
+                # S1: 扩展名 + 敏感模式统一走 is_checkpoint_trackable
+                if is_checkpoint_trackable(rel_norm):
                     candidates.append(rel_norm)
 
     # 确定性排序后返回完整集合 (不硬限文件数, fix B9)

@@ -54,6 +54,75 @@ def _tool_not_found(*args: Any, **kwargs: Any) -> Any:
     return ToolNotFound(*args, **kwargs)
 
 
+# ── 上下文入口中心截断 (context ingestion cap) ──
+# 背景: 各工具自身有宽松上限 (read_file 2000 行 / bash 50KB / grep 200 匹配),
+# 但工具输出追加进消息历史时**无中心上限** — 首轮对话就能把上下文堆到
+# 数十万 token, 每次 model call 全量重发 → 响应超慢 + 成本爆炸。
+# timeline/event 仍记录完整输出 (磁盘便宜); 只有**进入模型上下文的副本**被截断。
+# head+tail 保留: 头部是主体信息, 尾部常含总结/错误行。
+MAX_CONTEXT_TOOL_OUTPUT = 32_000  # chars (≈ 8K tokens)
+_CAP_HEAD = 26_000
+_CAP_TAIL = 4_000
+
+
+def clip_tool_output_for_context(output: str) -> str:
+    """截断进入消息历史的工具输出 (保头保尾 + 显式截断提示)。
+
+    不变量 (I-CTX-CAP, test_tool_invariants):
+      - len(result) 不超 MAX_CONTEXT_TOOL_OUTPUT + 提示长度
+      - 未超限输出原样返回 (无副作用)
+      - 截断时保留头部与尾部, 中间插入可见提示 (模型可感知截断并用
+        offset/limit 或更精确的 grep 补读)
+    """
+    if len(output) <= MAX_CONTEXT_TOOL_OUTPUT:
+        return output
+    omitted = len(output) - _CAP_HEAD - _CAP_TAIL
+    return (
+        output[:_CAP_HEAD]
+        + f"\n... [context cap: {omitted} chars omitted of {len(output)} total — "
+        "re-run with a narrower range (offset/limit or a more specific pattern) "
+        "if you need the omitted part] ...\n"
+        + output[-_CAP_TAIL:]
+    )
+
+
+def spill_full_output(loop: Any, tool_id: str, output: str) -> str | None:
+    """超限工具输出全量落盘 (kimi Background 输出协议对标)。
+
+    kimi 的巧思: 截断提示里给出**精确的文件路径 + 分页读取指引** —
+    bash 等不可重放的输出 (副作用已发生) 也能事后补读, 而非永久丢失。
+    落盘到 .zall/tool_outputs/ (项目级, 随 .zall 已在 gitignore 惯例)。
+    IPR-0: 任何失败返回 None (降级为纯截断提示, 不影响主流程)。
+    """
+    try:
+        from pathlib import Path
+        root = Path(getattr(getattr(loop, "_context", None), "cwd_meta", None)
+                    and loop._context.cwd_meta.cwd_path or ".")
+        out_dir = root / ".zall" / "tool_outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fname = f"step{loop._step_count}_call{loop._tool_call_count}_{tool_id}.txt"
+        fpath = out_dir / fname
+        fpath.write_text(output, encoding="utf-8", errors="replace")
+        return str(fpath)
+    except Exception:
+        return None
+
+
+def clip_with_spill(loop: Any, tool_id: str, output: str) -> str:
+    """中心截断 + 超限时全量落盘并附分页读取指引。"""
+    clipped = clip_tool_output_for_context(output)
+    if clipped is output:
+        return output
+    spill_path = spill_full_output(loop, tool_id, output)
+    if spill_path:
+        clipped += (
+            f"\n[full output saved to: {spill_path} — use "
+            f'read_file(path="{spill_path}", offset=..., limit=...) '
+            "to page through the omitted part]"
+        )
+    return clipped
+
+
 class ToolExecutor:
     """Executes tool calls through the full safety pipeline.
 
@@ -76,9 +145,51 @@ class ToolExecutor:
 
         Each tool call goes through the full safety pipeline independently.
         Results are appended to the loop's message list.
+
+        同步内去重 (kimi same-step dedup 对标): 同一步内完全相同的调用
+        只执行一次, 重复者直接得到占位结果 (不过门不执行, 省时省 token;
+        每个 tool_call id 仍得到配对的 tool 消息, API 契约不破)。
         """
+        from zall.core.repeat_guard import DUPLICATE_CALL_NOTE, canonical_key
         loop = self._loop
+        seen_in_step: set[str] = set()
         for tc in tool_calls:
+            key = canonical_key(tc.tool_id, dict(tc.args or {}))
+            if key in seen_in_step:
+                loop._tool_call_count += 1
+                loop._recorder.append(
+                    event_id=f"tool_call_end_{loop._tool_call_count}",
+                    ts=int(time.time() * 1000),
+                    event_type=EventType.TOOL_CALL_END,
+                    payload={
+                        "tool_id": tc.tool_id,
+                        "success": True,
+                        "output_length": len(DUPLICATE_CALL_NOTE),
+                        "output": DUPLICATE_CALL_NOTE,
+                        "error": None,
+                        "artifacts": {"dedup": "same_step"},
+                    },
+                )
+                loop._emit(_loop_event(
+                    kind="tool_call_end",
+                    step=step_count,
+                    payload={
+                        "tool_id": tc.tool_id,
+                        "success": True,
+                        "output": DUPLICATE_CALL_NOTE,
+                        "error": None,
+                        "artifacts": {"dedup": "same_step"},
+                    },
+                ))
+                from zall.core.model import Message
+                loop.append_message(Message.tool_result(
+                    content=DUPLICATE_CALL_NOTE,
+                    tool_call_id=(tc.id if hasattr(tc, "id")
+                                  else f"call_{loop._tool_call_count}"),
+                    tool_id=tc.tool_id,
+                ))
+                continue
+            seen_in_step.add(key)
             action = Action(tool_id=tc.tool_id, args=tc.args)
             # v0.5.1: 传入 tool_registry, 让 context_judge 根据工具能力决定默认权限
             judgement = context_judge(
@@ -265,13 +376,15 @@ class ToolExecutor:
         loop._tool_call_count += 1
         execute_action = gate_result.action_to_execute
         tid = execute_action.tool_id
-        loop._tool_usage_counts[tid] = loop._tool_usage_counts.get(tid, 0) + 1
 
         tool = loop._tools.get(execute_action.tool_id)
         if tool is None:
             raise _tool_not_found(
                 f"tool_id={execute_action.tool_id} not in ToolRegistry"
             )
+        # 计数放在存在性校验之后: 幻觉 tool_id 不会在计数表里留下新 key
+        # (doom-loop 场景下模型编造任意 tool_id 会让 dict 无限涨 key)
+        loop._tool_usage_counts[tid] = loop._tool_usage_counts.get(tid, 0) + 1
 
         # Record tool_call_start
         loop._recorder.append(
@@ -348,12 +461,16 @@ class ToolExecutor:
                     "artifacts": {},
                 },
             ))
-            # Append tool result to messages
+            # Append tool result to messages (上下文副本经中心截断 + 重复提醒)
             from zall.core.model import Message, ToolCall
+            _ra, _reminder = loop._repeat_guard.note_call(tid, dict(execute_action.args))
+            _content = clip_tool_output_for_context(result.output)
+            if _reminder:
+                _content += _reminder
             _tc_id = call_id or f"call_{loop._tool_call_count}"
             _tool_call = ToolCall(id=_tc_id, tool_id=tid, args=dict(execute_action.args))
             loop.append_message(Message.tool_result(
-                content=result.output,
+                content=_content,
                 tool_call_id=_tool_call.id,
                 tool_id=_tool_call.tool_id,
             ))
@@ -400,12 +517,24 @@ class ToolExecutor:
         # GitProtect checkpoint
         loop._maybe_checkpoint(tid, dict(execute_action.args))
 
-        # Append tool result to messages
+        # Append tool result to messages (上下文副本经中心截断 + 重复梯度提醒;
+        # timeline 保留全量)。提醒直接追加在工具结果内 (kimi 实证该位置模型更听
+        # 得进, 优于独立 system 消息)。
         from zall.core.model import Message, ToolCall
+        _ra, _reminder = loop._repeat_guard.note_call(tid, dict(execute_action.args))
+        _content = clip_with_spill(loop, tid, result.output)
+        if _reminder:
+            _content += _reminder
+            loop._emit(_loop_event(
+                kind="repeat_warning",
+                step=step_count,
+                payload={"tool_id": tid, "action": _ra,
+                         "streak": loop._repeat_guard.streak},
+            ))
         _tc_id = call_id or f"call_{loop._tool_call_count}"
         _tool_call = ToolCall(id=_tc_id, tool_id=tid, args=dict(execute_action.args))
         loop.append_message(Message.tool_result(
-            content=result.output,
+            content=_content,
             tool_call_id=_tool_call.id,
             tool_id=_tool_call.tool_id,
         ))

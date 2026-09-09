@@ -406,6 +406,27 @@ class TestWatermarkMonitorInvariants:
         )
         assert action is None, "debounce should prevent compression"
 
+    def test_check_watermark_reserved_headroom_dual_condition(self) -> None:
+        """kimi 对标 (I-WM-RESERVED): tokens+预留回复空间 >= window → force,
+        即使比率未达 policy 阈值 (双条件取先到者)。
+
+        构造: 阈值配高到 95%, llama3 window=8192, reserved=min(16000, 2048)=2048。
+        real_tokens=6500: 比率 79% < 95% (旧逻辑 None), 但 6500+2048 >= 8192 → force。
+        反例孪生: real_tokens=6000 → 6000+2048 < 8192 且比率未达 → None。
+        """
+        from zall.core.policies import CompactionPolicy
+        monitor = WatermarkMonitor(
+            policy=CompactionPolicy(auto_compact_threshold_percent=95),
+        )
+        msgs = [_make_msg("user", "hi")]
+        action = monitor.check_watermark(msgs, "llama3", step=10, real_tokens=6500)
+        assert action == "force", f"expected 'force' via reserved headroom, got {action}"
+        monitor2 = WatermarkMonitor(
+            policy=CompactionPolicy(auto_compact_threshold_percent=95),
+        )
+        action2 = monitor2.check_watermark(msgs, "llama3", step=10, real_tokens=6000)
+        assert action2 is None, f"counterexample: below both conditions, got {action2}"
+
     def test_get_watermark_report(self) -> None:
         """水位报告格式correctly."""
         monitor = WatermarkMonitor()
