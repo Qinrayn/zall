@@ -42,15 +42,22 @@ jobs:
       - name: IPR-3 — core is model-agnostic (no model SDK imports)
         run: python scripts/check_ipr3.py
 
-      - name: Type check with mypy
+      - name: Type check with mypy (ratchet: errors must not increase)
         run: |
-          pip install mypy
-          mypy src/zall/ --ignore-missing-imports || true
+          pip install mypy==1.17.0
+          python scripts/mypy_ratchet.py
 
       - name: Test with pytest
         run: |
+          set -o pipefail
           python -m pytest tests/ -v --tb=short -q --no-header --junitxml=pytest-results.xml \
+            --cov=zall --cov-report= \
             -k 'not (test_directory_instead_of_file or test_bash_schema_contains_shell_hint or test_usage_stats or test_streaming_accumulates_correctly or test_streaming_produces_tokens)' 2>&1 | tail -30
+
+      - name: Coverage gate (placeholder 50% — raise after local full-suite measurement)
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          python -m coverage report --fail-under=50
 
       - name: Upload test report
         if: always()
@@ -123,6 +130,21 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip build twine
+
+      - name: Verify version matches tag
+        run: |
+          python - <<'EOF'
+          import re, sys
+          from pathlib import Path
+          tag = "${{ github.ref_name }}"
+          pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+          ver = re.search(r'^version = "(.+)"$', pyproject, re.M).group(1)
+          init = Path("src/zall/__init__.py").read_text(encoding="utf-8")
+          mod_ver = re.search(r'__version__ = "(.+)"$', init, re.M).group(1)
+          if tag.lstrip("v") != ver or mod_ver != ver:
+              sys.exit(f"version mismatch: tag={tag} pyproject={ver} __version__={mod_ver}")
+          print(f"OK: {ver} matches tag {tag}")
+          EOF
 
       - name: Build package
         run: python -m build

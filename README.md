@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.1.0-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
-  <img alt="zall" src="https://img.shields.io/badge/zall-v0.1.0-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+  <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/zall-v0.5.2-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
+  <img alt="zall" src="https://img.shields.io/badge/zall-v0.5.2-blue?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a2e">
 </picture>
 
 <p align="center">
@@ -414,6 +414,7 @@ Contributions are welcome! See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for gu
 
 ## 🙏 Acknowledgements
 
+- **qinrayn (Yuhan Zhang)** — Originator and lead of this project: the idea, direction, and design decisions are his; implementation is assisted by AI coding agents
 - **xAI Grok Build** — Architecture inspiration for agent definition, tool taxonomy, and modular design
 - **Claude Code** — Interaction design patterns
 - **OpenAI Function Calling** — API compatibility

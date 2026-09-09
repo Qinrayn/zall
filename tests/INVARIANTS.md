@@ -1,23 +1,23 @@
-# zall · Invariants ↔ DESIGN.md mapping
+# zall · Invariants ↔ MASTER.md mapping
 
 > 对应 IMPL.md IPR-0:每个 SETTLED 节(§1-§6)的代码化身必须有
 > ≥1 个 invariant 测试,且**测试必须含反例**(明示何条件下失效,失效对应
 > 文档哪条被偷渡)。
 
-本文件维护 **测试文件 ↔ DESIGN.md 章节** 的映射。每加一个 primitive
+本文件维护 **测试文件 ↔ MASTER.md 章节** 的映射。每加一个 primitive
 对应加一行。
 
 ## 模板(每个 primitive 必填一行)
 
 ```
-tests/test_<primitive>.py  ←→  DESIGN.md §<节号>
+tests/test_<primitive>.py  ←→  MASTER.md §<节号>
   反例:<一句话说明该测试在何条件下 fail, 对应文档哪条被破坏>
   上溯:<该 primitive 长出于 §1.2 的哪一项>
 ```
 
 ## 当前映射表
 
-| 测试文件 | DESIGN.md 节 | 反例摘要 | 上溯 §1.2 |
+| 测试文件 | MASTER.md 节 | 反例摘要 | 上溯 §1.2 |
 |---|---|---|---|
 | `scripts/check_ipr3.py` (CI 钩子,等价自检) | IMPL.md IPR-3 | 构造 `import openai` / `from anthropic` 的反例后 → 必报 forbidden; docstring 里出现 "import openai" 字样 → **不应**误判 | (元规则) |
 | `tests/test_goal_invariants.py` | §3.2 / §3.5 | 6 条反例:added_intent 非空 raise / confidence 越界 raise / frozen 改写 raise / tuple 不可 append / system_judge+None exposed_set raise / Protocol 缺属性 isinstance fail | §1.2 ① Goal |
@@ -48,17 +48,28 @@ tests/test_<primitive>.py  ←→  DESIGN.md §<节号>
 | `tests/test_project_memory_invariants.py` | §9.4 (项目记忆注入) | 5 条:AGENTS.md 存在则读 / 缺失返回 None / 读取异常静默(反例) / system prompt 注入 PROJECT MEMORY / 缺失不注入仍正常 | §1.2 ② Authority (项目级) |
 | `tests/test_select_typeahead_guard.py` | §4.5 (确认门交互面, I-SELECT-GRACE) | 6 条:宽限期内决策键必吞 / 宽限期后必可达(反例孪生) / 导航与Esc永不吞 / opened_at未记录不吞 / open_select接线 / 宽限常量人道范围 | §1.2 ② Authority (确认门) |
 | `tests/test_sensitive_file_invariants.py` | §4.2 工具层 (I-SENSITIVE) | 9 条:敏感模式命中(.env/私钥/credentials/trust_anchor_key) / 豁免与普通文件不误拦(反例孪生) / read_file拒读且内容不外泄 / @引用跳过注入 / Windows反斜杠 | §1.2 ② Authority (信息泄漏面) |
+| `tests/test_context_rewind_invariants.py` | §4.2 工具层 + loop (I-REWIND, kimi D-Mail 对标) | 6 条:未注册零成本(无锚点)/注册必落锚(反例孪生) / 信箱校验(越界·空信·单槽重复) / e2e回滚后膨胀消失+信存活+timeline记CONTEXT_REWIND+doom-loop复位 / 无效id不回滚(反例) | §1.2 ⑥ Verifiability + 上下文管理 |
+| `tests/test_mcp_deferred_invariants.py` | §9.2.11 (I-MCPDEF, kimi 三段式对标) | 5 条:idle→loading→ready状态机 / start幂等(二次False反例) / 未启动wait不阻塞 / 超时返空 / 后台异常降级不传播(IPR-0) / 返回副本防污染 | §1.2 ② Authority (工具接入面) |
+| `tests/test_repeat_guard_invariants.py` | §3.6 (I-REPEAT, kimi dedup/repeat 对标) | 8 条:连击升级链 3→r1/5→r2/8→r3/12→stop / 换参断连击(反例孪生) / reset清零 / 键序无关 / e2e提醒进工具结果内+前2次无提醒(反例) / 12连击优雅止损(非error) / 同步去重只执行一次且tool_call配对不破 / 新回合复位 | §1.2 ③ Perception + 防失控 |
+| `tests/test_dynamic_inject_invariants.py` | §9.4 (I-DYNINJ, kimi DynamicInjectionProvider 对标) | 7 条:plan关零注入/开启首步全文版(反例孪生) / 历史推断节流(不足N轮不注) / 压缩后自愈重注 / 注入记SYSTEM_INJECTION / 坏provider静默跳过(IPR-0) / 无provider零成本 | §1.2 ② Authority (plan 纪律) |
+| `tests/test_notifications_invariants.py` | §9.2 (I-NOTIFY, kimi claim/ack 对标) | 7 条:pending→claimed→acked不重复递送(反例) / handler异常留claimed+超时recover重投(至少一次) / dedupe_key幂等 / limit限流 / root-only(未设中心零注入反例孪生) / 并行子代理完成自动发布 | §1.2 ③ Perception (后台事件面) |
+| `tests/test_btw_invariants.py` | §9.2 (I-BTW, kimi soul/btw 对标) | 5 条:主上下文纹丝不动(前后一致) / cache对齐(前缀==主对话+同工具schema) / DenyAll二轮(首轮调工具喂回重试) / 两轮都调工具放弃不无限循环(反例) / 无对话友好提示+空问题不发请求(反例) | §1.2 ② Authority (交互面) |
+| `tests/test_ask_user_invariants.py` | §4.2 工具层 (I-ASKUSER, kimi AskUserQuestion 对标) | 8 条:无人在场自动dismiss不阻塞 / 选中label入JSON+自动补Other(反例孪生) / Other路由自由输入 / 多题全答 / 交互异常报错不挂起(反例) / 兜底校验6反例不弹面板 / 子代理排除ask_user(root-only)+spawn仍排除(反例孪生) / 原生集已注册 | §1.2 ② Authority (交互面) |
+| `tests/test_commit_boundary_invariants.py` | TUI 流式 (I-COMMIT, kimi committed-boundary 对标) | 8 条:未超阈不提交(反例) / 切点在段落边界且≥阈值半 / 无段落边界不切 / 未闭合代码围栏不切(反例) / 围栏前安全区可切 / 集成:超长流式前缀固化+尾部受控+内容无损 / 短回复绝不提前固化(反例孪生) | UI 性能不变量 |
+| `tests/test_lifecycle_hooks.py` (TestCompactionHooks) | §7 (I-HOOK-COMPACT, kimi PreCompact/PostCompact 对标) | 2 条:压缩成功 pre+post 顺序广播含压缩量 / 压缩量0只有pre无post(反例孪生) | §1.2 ⑥ Verifiability (可观测) |
+| `tests/test_kimi_final_sweep_invariants.py` | §4.2 工具层 (I-TAIL/I-SKILLDIR/I-SUMMARY-ERR/I-BASH-STDIN) | 11 条:read_file负偏移尾读越界钳制 / skill多品牌目录发现+同名优先(反例孪生) / compactor错误段必留 / bash子进程stdin=DEVNULL不挂死(反例) | §1.2 ② Authority (工具手段) |
+| `tests/test_help_overlay_invariants.py` | TUI 帮助层 (I-HELP, Codex ?overlay 对标) | 22 条:空输入?开面板(纯空白也算空) / 非空输入?必须照常输入(反例) / select_mode不抢键(反例) / 帮助开时Esc只关面板绝无Interrupt(反例) / 帮助关时Esc照常中断(反例孪生) / toggle对合 / 帮助行=BINDINGS真实绑定逐条一致 / 未挂载幂等no-op / CSS无hex / ASCII回退无emoji | UI 可发现性不变量 |
 
 ## 元规则验定测试
 
-| 测试文件 | DESIGN.md 节 | 反例摘要 |
+| 测试文件 | MASTER.md 节 | 反例摘要 |
 |---|---|---|
 | `tests/test_ipr3_lint.py` | IMPL.md IPR-3 | `core/` 出现 SDK import → fail (test 自身调 `scripts/check_ipr3.py`) |
 | `tests/test_metrics_r_metric.py` | §2.0 R-Metric A/B/C | 任何 metric 无反指标配对 / 上溯不到 §1.2 → fail |
 
 ## 规范层 invariant 测试 (AAS, 对应 docs/spec/AGENT_ALIGNMENT_SPEC.md)
 
-与上表不同:此子表测的是 **AAS 规范自身**, 不上溯 DESIGN.md 而上溯 AAS §B/§E。
+与上表不同:此子表测的是 **AAS 规范自身**, 不上溯 MASTER.md 而上溯 AAS §B/§E。
 故意独立: 任何第三方 agent 可声称遵守 AAS 而不采纳 zall 任何内部形态 (AAS §G),
 故 `tests/spec/` 严禁 `import zall.core.*`。
 
@@ -72,7 +83,7 @@ tests/test_<primitive>.py  ←→  DESIGN.md §<节号>
 | `tests/spec/test_aas_e_falsifiability.py::TestB13GoalMutationFalsifiable` | §B1.3 / §E.2 | 1 反例: 首条 goal_statement intent=A, 后续 intent=B → 必报 B1.3; 3 正向: 单条 / 重复同 intent / 无 goal_statement 不报 (B1.3 是不可变性非存在性) | ✅ 让 `_goal_mutations` 早返回空 → 反例 fail, 正向不误报 |
 | `tests/spec/test_aas_e_falsifiability.py::TestB21DenyByDefaultFalsifiable` | §B2.1 / §E.2 | 1 反例: gate_decision(allow, unmatched_default) → 必报 B2.1; 3 正向: explicit_whitelist+allow / unmatched+greylist (正确默认) / deny 不触发 B2.1 | ✅ 让 `_deny_by_default_allows` 早返回空 → 反例 fail, 正向不误报 |
 | `tests/spec/test_aas_e_falsifiability.py::TestB22BlacklistDirectExecFalsifiable` | §B2.2 / §E.2 | 1 反例: gate_decision(deny,A)→tool_call_end(A) 无 override → 必报 B2.2; 3 正向: deny→override→execute / deny→不同 action_id 的等价替换 / allow→execute 不触发 B2.2 | ✅ 让 `_blacklist_direct_executions` 早返回空 → 反例 fail, 正向不误报 |
-| `tests/spec/test_aas_e_falsifiability.py::TestS93NoToolWithoutLockedGoal` | DESIGN.md §9.3 / §E.2 | 3 反例: tool_call 前无 goal / goal 提议未确认就调工具 / confirm 指向非 goal 事件 → 必报 S9.3; 3 正向: 确认后调工具 / 一次确认多次调工具 / 无 tool_call 不报 | ✅ 让 `_tool_calls_without_locked_goal` 早返回空 → 3 反例 fail, 正向不误报 |
+| `tests/spec/test_aas_e_falsifiability.py::TestS93NoToolWithoutLockedGoal` | MASTER.md §9.3 / §E.2 | 3 反例: tool_call 前无 goal / goal 提议未确认就调工具 / confirm 指向非 goal 事件 → 必报 S9.3; 3 正向: 确认后调工具 / 一次确认多次调工具 / 无 tool_call 不报 | ✅ 让 `_tool_calls_without_locked_goal` 早返回空 → 3 反例 fail, 正向不误报 |
 
 **注 1**:`mutation 自检`列记录已对该 invariant 跑过 mutation test
 (破坏 detector → 反例测试必须 fail, 正向不误报)。九条均已跑 (v0.1-draft-impl)。

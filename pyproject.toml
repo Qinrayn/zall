@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zall"
-version = "0.1.0"
+version = "0.5.2"
 description = "A falsifiable, reproducible coding agent CLI — model-agnostic, chain-hashed, replayable. Features LSP integration, CodeGraph code intelligence, sandbox isolation, plugin system, and MCP support."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -96,6 +96,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]  # __init__ 常做 re-export, 不删"未用" import
 "tests/**" = ["F401", "F841", "E402"]
+"scripts/**" = ["E402", "F401", "F541", "F841"]  # 独立验收/探针脚本: sys.path 注入与演示变量, 不按库代码标准
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

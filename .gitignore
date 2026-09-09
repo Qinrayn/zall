@@ -62,3 +62,5 @@ minecraft_*.txt
 .zall_test/
 _apitest/
 Microsoft/
+# Local agent session artifacts
+.qoder/

@@ -1,0 +1,18 @@
+# 统一文本行尾: 仓库内存 LF, 检出也是 LF (跨平台: CI = ubuntu+windows, 本地 = Windows)
+# 没有本文件时 core.autocrlf 会把 LF 检出成 CRLF → git diff 全是行尾噪音
+* text=auto eol=lf
+
+# Windows 专用脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+
+# 二进制 (禁止行尾转换/diff)
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.whl binary
+*.tar.gz binary
+*.zip binary
+*.pdf binary

@@ -1,5 +1,99 @@
 # Changelog
 
+## [Unreleased]
+
+### UI 轻便化: `?` 快捷键帮助层 (2026-09-03)
+
+#### Claude 式内联优化第一刀: 按 `?` 弹出快捷键帮助面板 (Codex CLI ?overlay 同款)
+- 新增 `tui/widgets.py::HelpOverlay`: 输入区上方的键位帮助浮层, 空输入按 `?` 开/关, Esc 关闭 — **不会**把 Esc 误发成中断 (打开时 Esc 只关面板, 反例测试锁定)。
+- 帮助数据来自**真实绑定** (TuiApp.BINDINGS 的 show=True 项 + 输入区固定功能 Enter/Shift+Enter/↑↓ 历史// 命令/@ 文件/Tab 补全/Esc 中断), Codex key-hint 思想: 显示的就是实际可用的一套, 换键自动跟随, 杜绝"帮助说一套".
+- 非空输入中的 `?` 照常作为字符输入 (不抢键); 确认门 (select_mode) 中 `?` 不接管任何决策键。新增 I-HELP 不变量 22 测试 (test_help_overlay_invariants.py, 含以上全部反例孪生 + CSS 无 hex / ASCII 回退无 emoji)。
+
+
+### kimi CLI 残值终扫 + 源码删除 (2026-07-26)
+
+#### 删除前最后一次全面残值清扫 — 补捕 5 项真金 (上轮"榨干"宣告修正)
+- **bash 防挂死**: 子进程 stdin 接 DEVNULL — 交互式提示 (git 密码/confirm) 立即收 EOF 而非挂到 timeout (kimi shell 关 stdin 技巧)。
+- **read_file 负偏移尾读**: offset=-100 读最后 100 行 (deque 单趟流式 + 精确总行数), 日志场景刚需; 旧"负数修正为1"语义升级。
+- **grep 超时部分结果**: rg 超时时返回已扫到的匹配 + 明确 PARTIAL 提示, 而非整体作废退 Python 重扫 (kimi grep_local 对标)。
+- **compactor 分级压缩协议**: 规则折叠摘要新增"错误与解法必留"最高优先段 (压缩后模型仍知哪里失败过, 不重踩坑), 输出按 kimi compact.md 优先序 errors > decisions > files > 计数。
+- **skill 多品牌目录复用**: 额外发现 ~/.zall・~/.claude・~/.codex・~/.agents 及项目级同名目录的 SKILL.md 技能 (frontmatter 解析 + 渐进披露: prompt 只指向文件, 正文用时才读) — 用户已装 Claude/Codex 技能直接可用; 自家 toml 同名优先。
+- 新增 I-TAIL/I-SKILLDIR/I-SUMMARY-ERR/I-BASH-STDIN 不变量 11 测试 (test_kimi_final_sweep_invariants.py, 含反例孪生); 旧语义测试同步升级。
+- 终扫其余判定无残值或已有等价物: web/search、broadcast/aioqueue、clipboard(Windows 路径即 Pillow 默认)、usage(专有配额 API)、write/replace、magic 嗅探(zall is_binary 够用)、EAGAIN 重试(Linux errno, zall run() 模型不适用)、git-bash 四级定位(zall 已有等价链)、会话导出/跳过版本提醒(低价值录待办不引入)。
+- 清扫完成后按用户指令删除桌面 kimi-cli-main 源码 (知识已全部转化为 zall 原创实现 + 不变量测试)。
+
+
+### kimi CLI 吸纳收口轮 (2026-07-26)
+
+#### committed-boundary 流式提交边界 (kimi visualize/_blocks 对标)
+- 新增 `cli/tui/commit_boundary.py`: 超长流式回复 (>6K chars) 把稳定前缀提前固化进历史, 活跃块只留尾部 — 重渲染成本从 O(全文) 降到 O(尾部), 长回复不再越流越卡。安全切点: 只在段落边界切 + 代码围栏成对 (markdown 不裂) + 最小前缀防碎片化。新增 I-COMMIT 不变量 8 测试 (含未闭合围栏不切/短回复不提交反例)。
+
+#### PreCompact/PostCompact 扩展事件 (kimi hooks 事件面对标)
+- ContextManager._auto_compact 压缩前后广播 `on_pre_compact`/`on_post_compact` 给扩展 (含 reason/压缩量/消息数; 失败静默 IPR-0)。新增 I-HOOK-COMPACT 2 测试 (含压缩量 0 无 post 反例)。
+
+#### 吸纳终局审计 — 12 项盘点清单全部处置 (9 落地 + 3 论证不适用)
+- **已落地 (均含不变量测试)**: context_rewind (D-Mail) / 双条件压缩 / 重复梯度惩罚+同步去重 / 动态注入 providers / 通知 claim-ack+子代理闭环 / MCP 三段式延迟加载 / ask_user 问卷 / btw 侧问 / 超限输出落盘分页 / committed-boundary / PreCompact-PostCompact。叠加早前轮次: 主题单色源、ANSI-16 语法主题、敏感文件防护、type-ahead 防护、粘贴折叠、steer has_steers→continue、ScriptedAdapter、diff 色、命令面板/@补全/底栏、工具输出截断纪律。
+- **论证不适用 (非遗漏, 是设计差异)**:
+  - ToolReturnValue 三通道 (output/message/display): zall 的 ToolResult(output→模型, artifacts→渲染) + ToolPanel 类型感知渲染已实现同等分离; display block 注册表是为 kimi wire 协议序列化设计, zall 无 wire。
+  - 审批运行时 ContextVar/共享 future 并发原语: zall 子代理 auto-reject (无人监督不擅自执行) + 单 root 交互, 通过设计避免了 kimi 需要复杂并发原语解决的多代理并发审批问题。
+  - acp/wire (IDE 集成协议)、kaos (SSH 远程 OS 抽象)、web/vis (Web UI)、telemetry: 产品方向差异 (zall = 本地可证伪 agent CLI), 非技术债; SubagentStart/Stop 可观测性已由通知闭环 + timeline 覆盖。
+
+
+### kimi CLI 深度吸纳第五轮 (2026-07-26)
+
+#### context_rewind — 模型驱动上下文回滚 (kimi D-Mail 机制对标, 全原创实现)
+- 新增 `core/rewind.py` (单槽信箱+校验) / `core/loop_rewind.py` (落锚+施加, loop 协作者模式) / `tools/context_rewind.py` (工具本体, 倒置成功语义)。每步落 [CHECKPOINT k] 可见锚点 (仅当工具注册, 未注册零成本); 模型可把膨胀上下文 (大文件/大搜索/调试弯路) 折叠回锚点并携带"给过去自己的信"。compaction 之外的第二把上下文武器 — 与本轮的 executor 中心截断形成主动+被动双层防线。
+- timeline 先记 CONTEXT_REWIND 后改消息 (§6.1 真相源不受损); 回滚后 doom-loop 追踪复位 (kimi begin_step 空列表复位对标)。新增 I-REWIND 不变量 6 测试 (含 e2e 与反例孪生)。
+
+#### MCP 延迟后台加载 (kimi KimiToolset 三段式状态机对标)
+- 新增 `mcp/deferred.py` DeferredMCPLoader: idle→loading→ready, 启动即回、连接在 daemon 线程、首个回合构建前才收敛 (届时通常已就绪, 等待为零)。REPL 与 TUI 双入口接线; 启动路径不再被 MCP 连接 (子进程+握手, 百 ms~秒级) 阻塞。加载日志进 status 缓冲 (不污染 TUI); 后台失败降级空工具集 (IPR-0)。退出路径收敛后统一关闭防连接泄漏。新增 I-MCPDEF 不变量 5 测试。
+
+#### 工具重复梯度惩罚 (kimi toolset dedup/repeat 对标)
+- 新增 `core/repeat_guard.py`: 单调用粒度连击追踪, 升级链 3→r1 轻提醒 / 5→r2 重提醒 / 8→r3 勒令停止 / 12→强制优雅止损 (awaiting_input 非 error)。提醒**直接追加在工具结果内** (kimi 实证该位置模型更听得进)。与现有 doom-loop (步级序列哈希) 互补共存; context_rewind/新回合复位连击。
+- 同步内去重: 同一步内完全相同的调用只执行一次, 重复者得占位结果 (不过门不执行, tool_call 配对不破)。新增 I-REPEAT 不变量 8 测试。
+
+#### 双条件自动压缩 (kimi should_auto_compact 对标)
+- WatermarkMonitor 新增预留回复空间条件: tokens + reserved (16K, 小窗口取 window/4) >= window 时即使比率未达阈也强制压缩 — 防"比率未达但大回复直接撑爆窗口"。新增 I-WM-RESERVED 测试 (含反例孪生)。
+
+#### 按步动态注入 providers (kimi DynamicInjectionProvider 对标)
+- 新增 `core/dynamic_inject.py`: provider 协议 + **历史推断节流** (反向扫历史找上条提醒数 assistant 轮 — 计数器与历史永不漂移; 压缩摘掉旧提醒后自愈重注, 无需回调) + 稀疏/全文交替省 token。首个 provider: PlanModeReminderProvider (plan 只读纪律每 5 轮重申, 防长会话淡忘)。新增 I-DYNINJ 不变量 7 测试。
+
+#### 通知中心 + 并行子代理闭环 (kimi background→notification→inject 对标)
+- 新增 `core/notifications.py` NotificationCenter: pending→claimed→acked 状态机, handler 异常留 claimed + 超时 recover 归还重投 (**至少一次递送**), dedupe_key 幂等, 每步限流 4 条。
+- 闭环接线: spawn_subagent 并行完成回调自动发布通知 → 主 loop 每步开始前注入上下文 (system 消息 + timeline) — **模型不再需要轮询 list_subagents**。root-only 语义: 仅主 loop 设通知中心, 子代理不误吞。新增 I-NOTIFY 不变量 7 测试。
+
+#### 超限工具输出落盘 + 分页指引 (kimi Background 输出协议对标)
+- executor 新增 `clip_with_spill`: 中心截断触发时全量落盘 `.zall/tool_outputs/step{N}_call{M}_{tool}.txt`, 截断提示附**精确路径 + read_file 分页读取指引** — bash 等不可重放输出也能事后补读而非永久丢失。落盘失败降级纯提示 (IPR-0)。新增 I-CTX-SPILL 测试 (含小输出不落盘反例)。
+
+#### /btw 侧问 (kimi soul/btw.py 对标)
+- 新增 `cli/commands/btw.py`: 长任务中途随口问一句, **不写入主对话历史** (agent 工作记忆不被打乱)。三大 kimi 巧思全部保留: 复用主对话消息前缀 + 相同工具 schema (**prompt cache 对齐省钱**, 只为增量付费); DenyAll 语义 (工具可见但一律拒绝); maxTurns=2 (首轮误调工具喂回拒绝结果给第二次机会)。新增 I-BTW 不变量 5 测试 (含主上下文纹丝不动/不无限循环反例)。
+
+#### ask_user 结构化问卷工具 (kimi AskUserQuestion 对标)
+- 新增 `tools/ask_user.py`: 模型在决策真正改变下一步时向用户提**结构化选择题** (1-3 题×2-4 选项, 含权衡说明与推荐标注), 系统自动补 "Other" 自由输入项, 答案以机器可解析 JSON 返回。复用现有交互基建: TUI → TuiUserResponder 选择菜单桥 / REPL → select_prompt 数字选择器 (含 type-ahead 冲刷)。
+- kimi 关键语义保留: 无人在场 (非交互/未注入) → 自动 dismiss 返回"自行决策" (绝不阻塞); **root-only** — 子代理工具集强制排除 ask_user (后台线程不得弹面板抢用户)。新增 I-ASKUSER 不变量 8 测试。
+
+
+### 真实使用反馈修复 (2026-07-26)
+
+#### 上下文膨胀修复 (首轮对话占 20%/1M 上下文 → 响应超慢的根因)
+- **executor 上下文入口中心截断** (`clip_tool_output_for_context`): 工具输出追加进消息历史此前**无上限** (各工具自身上限宽松: read_file 2000 行可达数百 KB), 多步首轮对话即可堆到数十万 token 且每次 model call 全量重发。现在单条工具消息封顶 32K 字符 (≈8K tokens), 保头保尾 + 可见截断提示 (模型可用 offset/limit 补读); timeline 仍记录全量。新增 I-CTX-CAP 不变量 3 测试 (含 executor 集成反例)。
+
+#### TUI 回车修复 (“每次回车没用要手动点 steer”)
+- 运行中按 Enter 从“进 pending 队列等回合结束”改为**立即 steer 注入当前回合** — 慢端点下回合可持续数分钟, 旧行为让回车看起来无反应。显示用户气泡 + “↳ injected into current turn”反馈。
+- 回合末尾未消费的 steer (模型已 STOP) 不再丢失 → 自动降级为新回合。新增回归测试 (反例: 回归排队行为即失败)。
+
+#### steer 链路加固 (第二轮反馈 “steer 无效” — 确定性探针定位后三处加固)
+- 新增 `scripts/probe_steer_repro.py` (ScriptedAdapter+Pilot, 三场景): A 中途 Enter 回合内注入 / B STOP 后 steer 不丢 / C 真实键盘逐键路径 — 机制层实测三场景全 PASS, 排除输入层被挡。
+- **worker 全局 try/finally 守护 `_agent_running`**: 此前构建段 (@展开/build_repl_loop/renderer) 抛异常会让标志永久卡 True → 此后每次回车都进无人消费的 steer 队列 (“回车无效”的真实可崩溃路径)。
+- **kimi parity (kimisoul `has_steers → continue`)**: 模型 STOP 时若本步已攒 steer, 不结束回合 — 注入后强制再步, 用户消息在同一回合内立即得到回应 (此前降级新回合, 慢端点下体感延迟翻倍)。
+- 降级路径双气泡修复: Enter 时已显气泡的 steer 降级运行不再重复 echo。
+
+#### 主题精简 (“主题只用一个算了”)
+- 移除 obsidian / ansi 主题, 只保留希腊美学 **attic** 单主题; 旧配置持久化的 obsidian/ansi 自动自愈回 attic (不崩)。`/theme` 描述同步; zall-ansi 语法主题解析器作为库能力保留。主题/diff/syntax 不变量测试改写为单主题语义 (含“移除主题不得残留/不可切换”反例)。
+
+#### checkpoint 自杀 bug 修复 (B12 GC 与写入互打)
+- `save_checkpoint` 在复制完文件后才调 `_ensure_loaded()`, 而它的孤儿 GC 回收一切 `_tmp_*` 目录 — 把自己正在写的快照删掉, meta 写入 FileNotFoundError → 静默返回 None, **文件快照全灭 / `/undo` 失效**。修复: `_ensure_loaded()` 提到临时目录创建之前。checkpoint 18 测试恢复全绿。
+
 ## [0.1.0] - 2026-07-26 · Collatz 研究+Bugfix 双段 e2e (2026-07-26)
 
 ### loop.py 瘦身 (第四轮, 工程化持续)
