@@ -133,40 +133,77 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
     else:
         from zall.cli.config import _config_status
         display_model = _config_status().get("model") or "unset"
-    # v1.4: 框式 banner (用户偏好) + 上下呼吸空行
-    width = min(50, max(30, len(display_model) + 20))
-    _dash_line = "\u2500" * width
-    console.print()
-    console.print(f"  [bold {_C.ACCENT}]\u256d{_dash_line}\u256e[/]")
-    console.print(f"  [bold {_C.ACCENT}]\u2502[/]  [bold]zall[/]  "
-                  f"[dim {_C.ACCENT}]\u00b7[/]  [dim]{display_model}[/]")
-    # Argus logo 对标信息行: 版本 · 命令数 · 科研目录模块数 (一眼知道装备了多少)
+    # 简洁大气版启动屏 — 单层圆角细框: 顶边中置 ◆ 徽记 (过闸的证明),
+    # 底边嵌版本装备行; 框内: 字距舒展的 zall + 一句描述 + 运行态。
+    # 无块字/无噪声; 非 TTY 或 ASCII 字形回退时降级为纯文本 (管道/CI 契约不变)。
     from zall import __version__
-    info_parts = [f"v{__version__}"]
+    equip_parts = [f"v{__version__}"]
     try:
         from zall.cli.commands import get_palette_commands
-        info_parts.append(f"{len(get_palette_commands())} commands")
+        equip_parts.append(f"{len(get_palette_commands())} commands")
     except Exception:
         pass
     try:
         from zall.extensions.science.catalog import load_catalog
-        info_parts.append(f"{len(load_catalog())} research modules")
+        equip_parts.append(f"{len(load_catalog())} research modules")
     except Exception:
         pass
-    _info_line = "  \u00b7  ".join(info_parts)
-    console.print(f"  [bold {_C.ACCENT}]\u2502[/]  "
-                  f"[{_C.SUBTLE}]{_info_line}[/]")
-    meta_parts = []
+    equip_line = "  \u00b7  ".join(equip_parts)
+
+    from zall.cli.render import _is_tty
+    if not _is_tty(out):
+        console.print(f"zall  v{__version__}  \u00b7  {display_model}")
+        return
+
+    from rich import box as _box
+    from rich.align import Align as _Align
+    from rich.console import Group as _Group
+    from rich.panel import Panel as _Panel
+    from rich.text import Text as _Text
+
+    try:
+        from zall.cli.render import is_ascii_glyphs
+        ascii_mode = is_ascii_glyphs()
+    except Exception:
+        ascii_mode = False
+
+    if ascii_mode:
+        # ASCII 回退: 名字上边框, 框内不再重复; 无 ◆ (异体宽字符免错位)
+        name = None
+        border_title = "zall"
+        panel_box = _box.ASCII
+    else:
+        name = _Text("z a l l", style=f"bold {_C.ACCENT}", justify="center")
+        border_title = "\u25c6"
+        panel_box = _box.ROUNDED
+
+    desc = _Text("a falsifiable, reproducible coding agent", style=_C.SUBTLE, justify="center")
+    meta_parts = [display_model]
     if branch:
-        meta_parts.append(f"[{_C.INFO}]{branch}[/]")
+        meta_parts.append(branch)
     if plan:
-        meta_parts.append(f"[{_C.THINKING}]plan[/]")
+        meta_parts.append("plan")
     if verbose:
-        meta_parts.append(f"[{_C.DIM}]verbose[/]")
-    if meta_parts:
-        sep = f"  [{_C.SUBTLE}]\u00b7[/]  "
-        console.print(f"  [bold {_C.ACCENT}]\u2502[/]  {sep.join(meta_parts)}")
-    console.print(f"  [bold {_C.ACCENT}]\u2570{_dash_line}\u256f[/]")
+        meta_parts.append("verbose")
+    meta = _Text("  \u00b7  ".join(meta_parts), style=_C.DIM, justify="center")
+
+    body_parts: list[Any] = [_Text("")]
+    if name is not None:
+        body_parts.append(name)
+    body_parts.extend([desc, _Text(""), meta, _Text("")])
+    panel = _Panel(
+        _Group(*body_parts),
+        title=border_title,
+        subtitle=equip_line,
+        title_align="center",
+        subtitle_align="center",
+        border_style=_C.ACCENT2,
+        box=panel_box,
+        padding=(0, 6),
+        expand=False,
+    )
+    console.print()
+    console.print(_Align(panel, align="center"))
     console.print()
 
 

@@ -45,6 +45,41 @@ _HISTORY_FILE = _home_dir() / ".zall" / "history.jsonl"
 _HISTORY_MAX = 500
 
 
+def _pt_color(value: str, fallback: str) -> str:
+    """prompt_toolkit 只认 hex/ANSI 名; rich 色名 (主题未 apply 时的默认值) 走 fallback。"""
+    return value if (value.startswith("#") or value.startswith("ansi")) else fallback
+
+
+def _build_pt_style() -> Any:
+    """prompt_toolkit Style — 补全菜单/工具栏/占位符跟主题着色 (G6 单一色源)。
+
+    之前菜单硬编码 ansiblue, 与 attic 主题两张皮; 现在菜单底色/选中项/滚动条
+    都取 _C 槽位 (theme.apply 后为 hex), 未 apply 时退回 ANSI 中性色。
+    """
+    try:
+        from prompt_toolkit.styles import Style
+
+        from zall.cli.render import _C
+        accent = _pt_color(_C.ACCENT, "ansiyellow")
+        subtle = _pt_color(_C.SUBTLE, "ansibrightblack")
+        text = _pt_color(_C.STATUS_BAR_TEXT, "ansiwhite")
+        panel_bg = "#23211c"  # 深中性底 (与 attic 暖色系一致; 菜单需要不透明底)
+        selected_fg = "#14120e"
+        return Style.from_dict({
+            "prompt": f"{accent} bold",
+            "placeholder": subtle,
+            "bottom-toolbar": f"bg:{panel_bg} {text}",
+            "completion-menu.completion": f"bg:{panel_bg} {text}",
+            "completion-menu.completion.current": f"bg:{accent} {selected_fg} bold",
+            "completion-menu.meta.completion": f"bg:{panel_bg} {subtle}",
+            "completion-menu.meta.completion.current": f"bg:{accent} {selected_fg}",
+            "scrollbar.background": f"bg:{panel_bg}",
+            "scrollbar.button": f"bg:{accent}",
+        })
+    except Exception:
+        return None
+
+
 def build_toolbar_text(state: dict[str, Any] | None) -> str | None:
     """组成底部状态行文本 (学 Pi/Claude): model · 上下文占用% · 模式 · 键位提示。
 
@@ -136,7 +171,6 @@ def _build_custom_completer(
                         start_position=-len(text),
                         display=display_html,
                         display_meta=desc,
-                        style="bg:ansiblue fg:ansiwhite",
                     )
 
     return _DescCompleter()
@@ -350,6 +384,7 @@ def make_prompt_fn(
                 vi_mode=False,
                 placeholder=_placeholder,
                 bottom_toolbar=_bottom_toolbar,
+                style=_build_pt_style(),
             )
             # G5: 提交时展开粘贴占位符 (发给模型的是原文);
             # 未知 id (跨会话历史召回) 原样保留。

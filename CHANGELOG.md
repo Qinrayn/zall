@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 启动屏重设计 + 控制台排版/配色统一 (2026-09-14)
+- **新启动屏 (简洁大气)**: 单层圆角细框 + 顶边中置 ◆ 徽记 + 底边嵌版本装备行 (`v0.5.2 · N commands · M research modules`); 框内为字距舒展的 zall、一句描述与运行态 (model · branch · plan)。无块字/无噪声。ASCII 字形回退时名字上边框 (免异体宽字符错位), 非 TTY (管道/CI) 降级单行文本 — 输出契约不变。
+- **排版统一**: `section_header` 面板头与 `kv_table` 信息表水平居中 (Argus `_print_centered` 对标), 与启动屏构图一致。
+- **交互配色统一**: prompt_toolkit 补全菜单/底部状态栏/占位符接入主题 Style (原先硬编码 ansiblue 与 attic 主题两张皮); 菜单底色/选中项/滚动条全部走 `_C` 槽位, 主题切换自动跟随。
+
 ### 默认界面翻转: console REPL 上位, TUI 转可选 (2026-09-14)
 - `zall` 无参默认进入同步 REPL 控制台 (Argus 式主界面: 横幅装备行 + 闪讯 + 面板头 + 信息表 + 命令后状态行); `--tui` 为可选的 inline Textual UI (终端不支持自动回退 console); `--no-tui` 保留为兼容别名 (与默认等价, 旧脚本不报错)。
 - 启动路径不再急切加载 textual (console 启动零 Textual 依赖, `import zall.cli.app` 后 textual 不在 sys.modules); 横幅提示行加入 `/science` 入口。

@@ -149,6 +149,11 @@ def use_unicode_glyphs() -> None:
         setattr(_G, k, v)
 
 
+def is_ascii_glyphs() -> bool:
+    """当前是否处于 ASCII 回退字形模式 (装饰件/banner 据此降级, 免 mid-layout 混搭)。"""
+    return _G.CORNER_TL == "+"
+
+
 # ── Code syntax highlighting theme (pygments style) ──
 # 值由 theme.apply() 管理 (G6); 默认 obsidian: one-dark + #1e1e1e。
 # 消费方须用 `render.CODE_THEME` 模块属性访问 (非 from-import 拷贝), 否则切主题不生效。
@@ -359,9 +364,12 @@ def section_header(out: Any, title: str) -> None:
     """居中强调面板头 (Argus "Selected: X" 式) — 标记重要状态切换。"""
     c = _shared_console(out)
     if _is_tty(out):
+        from rich.align import Align
+
         header = Text(f" {title} ", justify="center", style=f"bold {_C.ACCENT}")
         c.print()
-        c.print(Panel(header, expand=False, padding=(0, 2), style=_C.ACCENT2))
+        c.print(Align(Panel(header, expand=False, padding=(0, 2), style=_C.ACCENT2),
+                      align="center"))
         c.print()
     else:
         c.print(f"== {title} ==")
@@ -409,9 +417,11 @@ def kv_table(
             else:
                 style = ""
             table.add_row(str(k), Text(sv, style=style))
+        from rich.align import Align
+
         c = _shared_console(out)
         c.print()
-        c.print(table)
+        c.print(Align(table, align="center"))
         c.print()
     else:
         if title:
