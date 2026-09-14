@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Argus 吸纳轮: UI 控制台视觉词汇 + 科研工作台 + 自主研究循环 (2026-09-14)
+
+学习源: 桌面 Argus (jasonxtn 的 rich+cmd2 侦察控制台) — 概念吸收, 全原创实现, 不抄代码。
+
+#### UI: 控制台视觉词汇 (render.py, REPL/TUI 共享, 一次构建两处消费)
+- 新 helper: flash 闪讯纪律 ([+]/[!]/[-]/[i] 前缀) / section_header 居中面板头 / kv_table 信息表 (已设=绿·未设=暗·caption 引导) / next_steps_panel (Recommended Next Steps) / batch_progress (spinner+n/m+已用时+ETA, transient)。TTY 走 rich 结构, 非 TTY 降级纯文本 (管道/CI 输出契约不变), 颜色全走 _C 槽位 (主题自动跟随)。
+- REPL: banner 框内加装备行 `v0.5.2 · N commands · M research modules` (Argus logo 对标); 每条斜杠命令后回显状态行 (Argus _print_status_bar 纪律; render_status_bar 新增 force 参数)。
+- TUI: 欢迎卡加 counts 行与 `?` 快捷键提示。
+
+#### 科研工作台 (Argus 控制台架构 → /science, 数据驱动)
+- `extensions/science/catalog.{json,py}`: 科研模块目录 (id/name/options/certifier|script/tags), env ZALL_SCIENCE_CATALOG 覆盖 + ~/.zall overlay 合并 + id 冲突自动重排; 内置 4 模块 (Erdős–Straus 密度 5/6 · Diophantine 四元组族 · 覆盖系统 · 完全平方多项式); 名字 token 级模糊 (coverng→Covering)。
+- `runner.py`: in-process certifier (秒级) / script 子进程流式 双模; **tier 分级只来自验证器输出** (ProofCertificate.tier / 报告 tier 字段), 绝不从字符串猜 — Argus 用正则猜 severity, zall 把 Proof Gate 精神贯彻到运行器。
+- `profiles.py` (quick/deep/exhaustive 预设, 手动 set 永远优先) / `report.py` (results/science/<topic>/ REPORT.md+json, 带 timeline 链尾锚点) / `state.py` (选中·选项·收藏·recent(10)·用5次建议收藏, 持久化 ~/.zall/science_state.json)。
+- /science 新子命令: modules [-s|-d|-t] / use <id|name|tmp#> (多匹配给 Tmp# 表) / set·unset (k=v 弹性语法+did-you-mean) / run [ids] [--dry-run] [--timeout] (批跑进度条) / report / profile / fav (add·del·run·list·clear·tag:) / recent。
+
+#### 自主研究循环 (混合自主: 规则执行零 token + LLM 只做目录内提议)
+- `auto_loop.py` + `/science auto <topic> [--budget N] [--cycles M] [--module id]`: 假设(锁定,I-1)→实验(start/complete/fail 状态机)→证据(REFUTED 走 NegativeResult 一等公民, UNKNOWN 不记账)→tier 门控→经验蒸馏(record_certificate, CORROBORATED 带界永不升 PROVEN)→下一假设; PROVEN 自动推进假设 CONFIRMED。
+- 规则引擎: UNKNOWN/CORROBORATED→扩界重跑 (residual_bound×2 / search_bound×4 / coef_max+2, 均有上限); REFUTED 或界用尽→LLM 在**目录内**提议下一模块+参数 — JSON 严格校验 (模块必须在目录、选项过白名单, 夹带即拒), 预算尽/无模型自动降级纯规则, 绝不阻塞。
+- 全程可审计: ScienceStore 记账 + 链哈希 timeline 事件 (SYSTEM_INJECTION/science_auto) + 蒸馏进经验库。
+
 ### UI 轻便化: `?` 快捷键帮助层 (2026-09-03)
 
 #### Claude 式内联优化第一刀: 按 `?` 弹出快捷键帮助面板 (Codex CLI ?overlay 同款)
