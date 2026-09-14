@@ -1,0 +1,101 @@
+{
+  "modules": [
+    {
+      "id": "1",
+      "name": "Erdos-Straus Density 5/6",
+      "description": "Machine-checked density-5/6 proof of 4/n = 1/x+1/y+1/z via parametric Egyptian-fraction families; residual honestly reported as CORROBORATED (bounded search), never as PROVEN.",
+      "section": "Number Theory",
+      "primary_input": "residual_bound",
+      "options": [
+        "residual-bound"
+      ],
+      "options_help": {
+        "residual-bound": "search bound for residual corroboration (default 20000)"
+      },
+      "script": "experiments/erdos_straus/prove.py",
+      "script_args": [
+        "--residual-bound",
+        "{residual_bound}",
+        "--out",
+        "{out_dir}"
+      ],
+      "report": "results/PROOF_REPORT.json",
+      "tags": [
+        "number-theory",
+        "egyptian-fraction",
+        "heavy"
+      ],
+      "report_tier_path": "all_identities_proven"
+    },
+    {
+      "id": "2",
+      "name": "Diophantine Quadruple Family",
+      "description": "Certify Euler's infinite Diophantine quadruple family via perfect-square polynomial identities (corroborating Dujella-Fuchs).",
+      "section": "Number Theory",
+      "primary_input": "coef_max",
+      "options": [
+        "coef-max"
+      ],
+      "options_help": {
+        "coef-max": "coefficient search bound (default 6)"
+      },
+      "script": "experiments/diophantine/certify.py",
+      "script_args": [
+        "--coef-max",
+        "{coef_max}",
+        "--out",
+        "{out_dir}"
+      ],
+      "report": "results/DIOPHANTINE_REPORT.json",
+      "tags": [
+        "number-theory",
+        "diophantine",
+        "heavy"
+      ],
+      "report_tier_path": "euler_quadruple_family.tier"
+    },
+    {
+      "id": "3",
+      "name": "Covering System Check",
+      "description": "Verify a set of congruences covers every integer (Erdos 1950 style): PROVEN by lcm-residue exhaustion, or REFUTED with an explicit uncovered residue.",
+      "section": "Number Theory",
+      "primary_input": "congruences",
+      "options": [
+        "congruences",
+        "preset"
+      ],
+      "options_help": {
+        "congruences": "a:m,a:m,... e.g. 0:2,0:3,1:4,3:8,7:12,23:24",
+        "preset": "erdos1950 (the classic covering) | nearmiss (drop-last refutation demo)"
+      },
+      "certifier": "verify_covering_system",
+      "tags": [
+        "number-theory",
+        "covering",
+        "fast",
+        "in-process"
+      ]
+    },
+    {
+      "id": "4",
+      "name": "Perfect-Square Polynomial",
+      "description": "Certify P(t) is a perfect square for all integers t>=0 (exact poly_sqrt), or refute with an explicit small counterexample.",
+      "section": "Algebra",
+      "primary_input": "poly",
+      "options": [
+        "poly",
+        "search-bound"
+      ],
+      "options_help": {
+        "poly": "coefficients low-to-high, e.g. 1,2,1 for (t+1)^2",
+        "search-bound": "counterexample search bound (default 64)"
+      },
+      "certifier": "verify_square_identity",
+      "tags": [
+        "algebra",
+        "fast",
+        "in-process"
+      ]
+    }
+  ]
+}
