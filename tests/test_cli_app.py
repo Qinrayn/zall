@@ -96,10 +96,10 @@ class TestMainRegression:
         rc = app_mod.repl(input_fn=boom, out=io.StringIO())
         assert rc == 0
 
-    def test_default_dispatch_is_inline_tui(self, monkeypatch) -> None:
-        """v2.x 收敛: 无 task 无 flag → 默认 Textual inline TUI (inline=True)。
+    def test_default_dispatch_is_console_repl(self, monkeypatch) -> None:
+        """v2.2 console 优先: 无 task 无 flag → 默认同步 REPL 控制台。
 
-        反例: 默认不再直接进同步 REPL (repl 不被调用, 除非 fallback)。
+        反例: 默认不再进 Textual (run_tui 不被调用; 仅 --tui 显式进入)。
         """
         calls: dict = {}
         monkeypatch.setattr("zall.cli.config._onboarding", lambda *a, **k: None)
@@ -115,17 +115,30 @@ class TestMainRegression:
         monkeypatch.setattr("zall.cli.repl_ui.repl", fake_repl)
         rc = app_mod.main([])
         assert rc == 0
-        assert "run_tui" in calls
-        assert calls["run_tui"].get("inline") is True   # 默认 inline
-        assert "repl" not in calls                       # 反例: 默认不进同步 REPL
+        assert "repl" in calls
+        assert "run_tui" not in calls                    # 反例: 默认不进 Textual
 
-    def test_tui_fullscreen_flag_removed(self) -> None:
-        """--tui 全屏已删: argparse 拒绝 (只剩 inline 默认 + --no-tui + 一次性)。"""
-        with pytest.raises(SystemExit):
-            app_mod.main(["--tui"])
+    def test_tui_flag_opts_into_inline(self, monkeypatch) -> None:
+        """--tui → 可选进入 inline Textual UI (inline=True); 默认是 console 不再受理。"""
+        calls: dict = {}
+        monkeypatch.setattr("zall.cli.config._onboarding", lambda *a, **k: None)
 
-    def test_no_tui_forces_sync_repl(self, monkeypatch) -> None:
-        """--no-tui → 强制同步 REPL, 完全不碰 Textual。"""
+        def fake_run_tui(**kw):
+            calls["run_tui"] = kw
+            return 0
+
+        def fake_repl(**kw):
+            calls["repl"] = kw
+            return 0
+        monkeypatch.setattr("zall.cli.tui.run_tui", fake_run_tui)
+        monkeypatch.setattr("zall.cli.repl_ui.repl", fake_repl)
+        rc = app_mod.main(["--tui"])
+        assert rc == 0
+        assert calls["run_tui"].get("inline") is True
+        assert "repl" not in calls                       # 反例: --tui 成功时不落回 REPL
+
+    def test_no_tui_is_compat_alias(self, monkeypatch) -> None:
+        """--no-tui 为兼容别名: 与默认等价 (进 REPL, 完全不碰 Textual)。"""
         calls: dict = {}
         monkeypatch.setattr("zall.cli.config._onboarding", lambda *a, **k: None)
 
@@ -143,8 +156,8 @@ class TestMainRegression:
         assert "repl" in calls
         assert "run_tui" not in calls                    # 反例: --no-tui 不进 Textual
 
-    def test_inline_falls_back_to_repl_when_unsupported(self, monkeypatch) -> None:
-        """默认 inline 但终端不支持 (run_tui 返回 2) → 自动回退同步 REPL。"""
+    def test_tui_falls_back_to_repl_when_unsupported(self, monkeypatch) -> None:
+        """--tui 但终端不支持 (run_tui 返回 2) → 自动回退同步 REPL。"""
         calls: dict = {}
         monkeypatch.setattr("zall.cli.config._onboarding", lambda *a, **k: None)
         monkeypatch.setattr("zall.cli.tui.run_tui", lambda **kw: 2)  # 终端不支持
@@ -153,7 +166,7 @@ class TestMainRegression:
             calls["repl"] = kw
             return 0
         monkeypatch.setattr("zall.cli.repl_ui.repl", fake_repl)
-        rc = app_mod.main([])
+        rc = app_mod.main(["--tui"])
         assert rc == 0
         assert "repl" in calls                           # rc==2 → 回退同步 REPL
 

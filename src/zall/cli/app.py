@@ -76,9 +76,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description="zall - model-agnostic, falsifiable, reproducible coding agent",
         epilog=(
             "run modes:\n"
-            "  zall              interactive UI (inline TUI; type while the model runs) [default]\n"
+            "  zall              interactive console (default; type while the model runs)\n"
             "  zall '<task>'     one-shot: run the task once and exit (scriptable, has exit code)\n"
-            "  zall --no-tui     plain REPL (no Textual; for SSH / dumb terminals / pipes)\n"
+            "  zall --tui        optional inline Textual UI (auto-falls back to the console)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -103,9 +103,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="strict mode: enable full confirm/downgrade gates")
     p.add_argument("--version", "-V", action="store_true",
                    help="show version and exit")
-    # 交互界面: 默认 inline TUI; --no-tui 强制纯同步 REPL (SSH / dumb 终端 / 管道)
-    p.add_argument("--no-tui", dest="tui_mode", action="store_false", default=None,
-                   help="plain synchronous REPL (no Textual; for SSH / dumb terminals / pipes)")
+    # 交互界面 (console 优先, v2.2):
+    #   默认     → 同步 REPL 控制台 (Argus 式主界面)
+    #   --tui    → 可选 inline TUI (Textual; 终端不支持自动回退)
+    #   --no-tui → 兼容别名 (与默认等价; 旧脚本不报错)
+    p.add_argument("--tui", dest="tui_mode", action="store_true", default=False,
+                   help="opt-in inline Textual UI (default is the console REPL)")
+    p.add_argument("--no-tui", dest="tui_mode", action="store_false",
+                   default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     # 会话续接 (kimi -C/-r parity)
     p.add_argument("--continue", "-C", dest="continue_", action="store_true",
                    help="continue the most recent session in this directory")
@@ -158,13 +163,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not task:
-        # 交互界面 (仅两种):
-        #   默认      → Textual inline TUI (停靠输入框 + 边跑边输入, 对齐 Claude/Pi)
-        #   --no-tui  → 纯同步 REPL (SSH / dumb 终端 / 管道)
-        #   textual 缺失 / 终端不支持 → 自动回退同步 REPL
+        # 交互界面 (v2.2 console 优先):
+        #   默认    → 同步 REPL 控制台 (Argus 式主界面)
+        #   --tui   → 可选 inline TUI; 终端不支持 (rc==2 / textual 缺失) → 回退 REPL
         resume_session = _resolve_resume_target(args)  # --continue / -r
-        tui_mode = getattr(args, "tui_mode", None)
-        if tui_mode is not False:  # 非 --no-tui: 尝试 inline TUI
+        if getattr(args, "tui_mode", False):  # 仅显式 --tui 进 Textual
             from zall.cli.config import _onboarding
             _onboarding(sys.stderr, input)  # 进任何交互界面前先配置 API key (idempotent)
             rc = 2

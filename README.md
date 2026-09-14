@@ -34,7 +34,7 @@ pip install zall
 Requires Python 3.10+. For optional features:
 
 ```bash
-pip install "zall[tui]"       # inline/full-screen Textual UI (recommended)
+pip install "zall[tui]"       # optional --tui inline Textual UI (console REPL needs no extras)
 pip install "zall[bs4]"      # web_fetch with BeautifulSoup HTML parsing
 pip install "zall[images]"    # read_image with Pillow
 pip install "zall[dev]"       # development tools (pytest, mypy, ruff)

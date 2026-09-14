@@ -402,18 +402,21 @@ class TestTuiCliArgs:
         args = parser.parse_args(["--no-tui"])
         assert args.tui_mode is False
 
-    def test_default_tui_mode_is_none(self) -> None:
-        """默认 tui_mode 为 None (尝试 inline, 不支持则回退同步 REPL)。"""
+    def test_default_tui_mode_is_false(self) -> None:
+        """v2.2 console 优先: 默认 tui_mode=False (console REPL; 仅 --tui 进 Textual)。"""
         from zall.cli.app import _build_parser
         parser = _build_parser()
         args = parser.parse_args([])
-        assert args.tui_mode is None
+        assert args.tui_mode is False
+        # 显式 --tui 才转真; --no-tui 兼容别名回假
+        assert parser.parse_args(["--tui"]).tui_mode is True
+        assert parser.parse_args(["--no-tui"]).tui_mode is False
 
     def test_fullscreen_and_inline_flags_removed(self) -> None:
-        """反例: --tui 全屏与 --inline 已删, argparse 拒绝这些标志。"""
+        """反例: 全屏/--inline 变体已删 (--tui 现为 inline 可选开关, 不再是全屏)。"""
         from zall.cli.app import _build_parser
         parser = _build_parser()
-        for flag in ("--tui", "-T", "--inline", "-I"):
+        for flag in ("-T", "--inline", "-I"):
             with pytest.raises(SystemExit):
                 parser.parse_args([flag])
 

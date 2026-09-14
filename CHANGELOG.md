@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 默认界面翻转: console REPL 上位, TUI 转可选 (2026-09-14)
+- `zall` 无参默认进入同步 REPL 控制台 (Argus 式主界面: 横幅装备行 + 闪讯 + 面板头 + 信息表 + 命令后状态行); `--tui` 为可选的 inline Textual UI (终端不支持自动回退 console); `--no-tui` 保留为兼容别名 (与默认等价, 旧脚本不报错)。
+- 启动路径不再急切加载 textual (console 启动零 Textual 依赖, `import zall.cli.app` 后 textual 不在 sys.modules); 横幅提示行加入 `/science` 入口。
+- README 安装说明同步 (tui extra 标注为可选); 既有行为测试同步更新 (默认→repl / --tui 可选进入 / rc=2 回退), 定向 152 测试全绿。
+
 ### Argus 吸纳轮: UI 控制台视觉词汇 + 科研工作台 + 自主研究循环 (2026-09-14)
 
 学习源: 桌面 Argus (jasonxtn 的 rich+cmd2 侦察控制台) — 概念吸收, 全原创实现, 不抄代码。

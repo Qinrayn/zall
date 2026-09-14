@@ -414,7 +414,7 @@ def repl(
                   branch=get_cached_cwd_meta(state).git_branch,
                   max_steps=state["max_steps"],
                   verbose=state["verbose"], plan=state.get("plan_mode", False))
-    out.write("  /help commands \u00b7 Ctrl-D exit \u00b7 Ctrl-R search history \u00b7 /plan read-only\n")
+    out.write("  /help commands \u00b7 /science research \u00b7 Ctrl-D exit \u00b7 Ctrl-R search history \u00b7 /plan read-only\n")
     out.flush()
 
     # v2: background update check (non-blocking)
