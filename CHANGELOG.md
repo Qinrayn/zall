@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 控制台交互对齐 Argus: 参数补全 + runall/last + banner/history (2026-09-14)
+- **参数位 TAB 补全** (补齐与 Argus/cmd2 的最大交互差距): 首参之后也有候选 — `/science <TAB>` 全部子命令、`/science run|use|fav add <TAB>` 模块 id (名字前缀命中时给引号名, 与 shlex 解析兼容)、`/science set <TAB>` 选中模块的选项键、`/science profile <TAB>` 预设、`/science fav <TAB>` 子命令、`/science auto <TAB>` 旗标、`/help <TAB>` 全部命令、`/model <TAB>` 模型预设、`/mode <TAB>` 模式。非命令输入 (裸文本/任务) 不受影响 (反例冒烟锁定)。
+- **`/science runall <section|tag:x>`** (Argus do_runall 对标): 整组批跑; 无参 = 全部目录。
+- **`/science last`** (Argus do_last 对标): 一键重跑上一轮模块集。
+- **`/banner`** (Argus do_banner 对标): 重印启动屏 (Ctrl-L 清屏后常用)。
+- **`/history [n]`** (cmd2 history 对标): 列最近输入 (多行条目折叠为 `…+k`); Ctrl-R 仍是交互式反向搜索。
+
 ### 启动屏重设计 + 控制台排版/配色统一 (2026-09-14)
 - **新启动屏 (简洁大气)**: 单层圆角细框 + 顶边中置 ◆ 徽记 + 底边嵌版本装备行 (`v0.5.2 · N commands · M research modules`); 框内为字距舒展的 zall、一句描述与运行态 (model · branch · plan)。无块字/无噪声。ASCII 字形回退时名字上边框 (免异体宽字符错位), 非 TTY (管道/CI) 降级单行文本 — 输出契约不变。
 - **排版统一**: `section_header` 面板头与 `kv_table` 信息表水平居中 (Argus `_print_centered` 对标), 与启动屏构图一致。

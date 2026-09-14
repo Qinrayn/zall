@@ -132,6 +132,10 @@ def cmd_science(arg: str, out: Any, loop: Any | None = None, state: dict[str, An
         return _sci_unset(parts[1:], out, state)
     elif subcmd == "run":
         return _sci_run(parts[1:], out, state)
+    elif subcmd == "runall":
+        return _sci_runall(parts[1:], out, state)
+    elif subcmd == "last":
+        return _sci_last(out, state)
     elif subcmd == "report":
         return _sci_report(parts[1:], out, state)
     elif subcmd == "profile":
@@ -768,6 +772,46 @@ def _sci_run(args: list[str], out: Any, state: dict[str, Any] | None) -> str:
         steps.append("/science auto <topic> — 让 agent 基于此结果继续猜想-反驳循环")
     next_steps_panel(out, steps)
     return "handled"
+
+
+def _sci_runall(args: list[str], out: Any, state: dict[str, Any] | None) -> str:
+    """整组执行 (Argus do_runall 对标): section 名 / tag:x / 无参=全部。"""
+    from zall.extensions.science.catalog import load_catalog
+    mods = load_catalog()
+    if not args:
+        ids = [m.id for m in mods]
+        label = "all"
+    else:
+        key = " ".join(args).strip()
+        if key.startswith("tag:"):
+            tag = key[4:].lower()
+            ids = [m.id for m in mods if tag in m.tags]
+        else:
+            ids = [m.id for m in mods if key.lower() in m.section.lower()]
+        label = key
+    if not ids:
+        flash_err(out, f"no modules match {label!r}")
+        next_steps_panel(out, ["/science modules -t — see sections and tags"])
+        return "handled"
+    flash_info(out, f"runall {label}: {len(ids)} module(s)")
+    return _sci_run(ids, out, state)
+
+
+def _sci_last(out: Any, state: dict[str, Any] | None) -> str:
+    """重跑上一次运行集 (Argus do_last 对标)。"""
+    st = _st(state)
+    outcomes = st.get("_sci_last_outcomes") or []
+    ids: list[str] = []
+    for o in outcomes:
+        mid = getattr(o, "module_id", None)
+        if mid and mid not in ids:
+            ids.append(mid)
+    if not ids:
+        flash_warn(out, "nothing has been run yet")
+        next_steps_panel(out, ["/science modules", "/science use <id>"])
+        return "handled"
+    flash_info(out, f"re-running last set: {', '.join(ids)}")
+    return _sci_run(ids, out, state)
 
 
 # ── report: 汇总上一次运行 (Argus report_generator 对标 + 链锚点) ──

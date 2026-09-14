@@ -93,6 +93,64 @@ def cmd_clear(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
 
 
 
+@slash_command("/banner", description="re-print the startup banner", category=_CATEGORY_NAV)
+def cmd_banner(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """重印启动屏 (Argus do_banner 对标; Ctrl-L 清屏后常用)。"""
+    from zall.cli.repl_ui import _print_banner
+    st = state or {}
+    branch = None
+    try:
+        from zall.cli.environment import get_cached_cwd_meta
+        branch = get_cached_cwd_meta(st).git_branch or None
+    except Exception:
+        pass
+    _print_banner(
+        out,
+        model=st.get("model"),
+        branch=branch,
+        max_steps=st.get("max_steps", 0),
+        verbose=bool(st.get("verbose")),
+        plan=bool(st.get("plan_mode")),
+    )
+    return "handled"
+
+
+@slash_command("/history", description="show recent input history (Ctrl-R searches)", category=_CATEGORY_NAV)
+def cmd_history(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """最近输入历史 (cmd2 history 对标; 交互式反向搜索仍是 Ctrl-R)。"""
+    limit = int(arg.strip()) if arg.strip().isdigit() else 20
+    from zall.cli.prompt import _HISTORY_FILE
+    try:
+        raw_lines = _HISTORY_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        raw_lines = []
+    # prompt_toolkit FileHistory 格式: 首行原样, 续行以 "+" 开头
+    entries: list[str] = []
+    cur: list[str] = []
+    for raw in raw_lines:
+        if raw.startswith("+"):
+            if cur:
+                cur.append(raw[1:])
+        else:
+            if cur:
+                entries.append("\n".join(cur))
+            cur = [raw]
+    if cur:
+        entries.append("\n".join(cur))
+    entries = [e for e in entries if e.strip()]
+    if not entries:
+        out.write("  (no history yet)\n")
+        return "handled"
+    recent = entries[-limit:][::-1]
+    out.write(f"  recent history ({len(recent)}, newest first) \u00b7 Ctrl-R to search\n")
+    for i, t in enumerate(recent, 1):
+        lines = t.splitlines()
+        suffix = f"  \u2026+{len(lines) - 1}" if len(lines) > 1 else ""
+        out.write(f"    {i:>3}  {lines[0]}{suffix}\n")
+    return "handled"
+
+
+
 # Extracted from _legacy.py lines 771-899
 # ──────────────────────────────────────────────────────────────────────
 # Checkpoint & Revert

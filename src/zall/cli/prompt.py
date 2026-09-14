@@ -107,6 +107,131 @@ def build_toolbar_text(state: dict[str, Any] | None) -> str | None:
     return "  " + "  \u00b7  ".join(parts)
 
 
+# ── 参数位补全 (Argus/cmd2 子命令+choices 补全对标) ──
+# cmd2 靠 argparse 免费拿到子命令/选项补全; zall 此前只有一级命令补全。
+# 这里给已知命令挂参数表: /science <sub> /science run <id> /science profile <name> …
+# 候选项在 provider 内完成过滤 (供 quotable 名字等自定义匹配逻辑)。
+
+_SCIENCE_SUBS: list[tuple[str, str]] = [
+    ("new", "create a hypothesis"),
+    ("list", "list hypotheses"),
+    ("show", "show hypothesis + evidence"),
+    ("evidence", "record evidence (supports/against)"),
+    ("falsify", "falsify with a counterexample evidence"),
+    ("revise", "revise a falsified hypothesis"),
+    ("modules", "browse the research catalog"),
+    ("use", "select a module"),
+    ("set", "set an option (k=v)"),
+    ("unset", "remove an option"),
+    ("run", "execute module(s)"),
+    ("runall", "run a whole section/tag"),
+    ("last", "re-run the previous run"),
+    ("report", "write REPORT.md + report.json"),
+    ("profile", "research-depth preset"),
+    ("fav", "favorites (add/del/run/list/clear/tag:)"),
+    ("recent", "recent modules"),
+    ("auto", "autonomous research loop"),
+]
+
+_FAV_SUBS: list[tuple[str, str]] = [
+    ("add", "add to favorites"), ("del", "remove from favorites"),
+    ("run", "run favorites"), ("list", "list favorites"),
+    ("clear", "clear all"), ("tag:", "add all modules with a tag"),
+]
+
+
+def _prefixed(cands: list[tuple[str, str]], frag: str) -> list[tuple[str, str]]:
+    fl = frag.lower()
+    return [(v, d) for v, d in cands if not fl or v.lower().startswith(fl)]
+
+
+def _science_module_candidates(frag: str) -> list[tuple[str, str]]:
+    """模块 id 优先; 名字前缀命中时给引号名 (与 /science 的 shlex 解析兼容)。"""
+    try:
+        from zall.extensions.science.catalog import load_catalog
+        mods = load_catalog()
+    except Exception:
+        return []
+    fl = frag.lower()
+    out: list[tuple[str, str]] = []
+    for m in mods:
+        if not fl or m.id.startswith(frag):
+            out.append((m.id, m.name))
+        elif m.name.lower().startswith(fl):
+            out.append((f'"{m.name}"', m.name))
+    return out
+
+
+def _complete_argument(cmd: str, prev: list[str], frag: str) -> list[tuple[str, str]] | None:
+    """命令参数位候选 (value, desc); None = 该命令无参数表 (回落默认行为)。"""
+    if cmd == "/science":
+        if not prev:
+            return _prefixed(_SCIENCE_SUBS, frag)
+        sub, rest = prev[0].lower(), prev[1:]
+        run_flags = [("--dry-run", "preview only"), ("--timeout", "seconds")]
+        if sub == "use":
+            return _science_module_candidates(frag)
+        if sub == "run":
+            if not rest:
+                return _science_module_candidates(frag) + _prefixed(run_flags, frag)
+            return _prefixed(run_flags, frag)
+        if sub == "runall":
+            try:
+                from zall.extensions.science.catalog import load_catalog
+                secs = sorted({m.section for m in load_catalog()})
+            except Exception:
+                secs = []
+            return _prefixed([(s, "section") for s in secs] + [("tag:", "by tag")], frag)
+        if sub in ("set", "unset"):
+            try:
+                from zall.extensions.science.catalog import load_catalog
+                from zall.extensions.science.state import get_science_state
+                sel_id = get_science_state().selected_id
+                sel = next((m for m in load_catalog() if m.id == sel_id), None)
+            except Exception:
+                sel = None
+            opts = [(f"{o.replace('-', '_')}=", o) for o in sel.options] if sel else []
+            cands = opts + (_science_module_candidates(frag) if sub == "unset" else [])
+            return _prefixed(cands, frag) if cands else []
+        if sub == "profile":
+            try:
+                from zall.extensions.science.profiles import PROFILES
+                cands = [(k, ", ".join(f"{a}={b}" for a, b in sorted(v.items())))
+                         for k, v in PROFILES.items()]
+            except Exception:
+                cands = []
+            return _prefixed(cands, frag)
+        if sub == "fav":
+            if not rest:
+                return _prefixed(_FAV_SUBS, frag)
+            if rest[0] in ("add", "del", "rm", "remove"):
+                return _science_module_candidates(frag)
+            return []
+        if sub == "modules":
+            return _prefixed([("-s", "short list"), ("-d", "detailed"),
+                              ("-t", "show tags"), ("tag:", "filter by tag")], frag)
+        if sub == "auto":
+            return _prefixed([("--budget", "max LLM calls"), ("--cycles", "max cycles"),
+                              ("--module", "use a specific module as seed")], frag)
+        return []
+    if cmd == "/help" and not prev:
+        try:
+            from zall.cli.commands import get_command_meta
+            return _prefixed(sorted(get_command_meta().items()), frag)
+        except Exception:
+            return []
+    if cmd == "/model" and not prev:
+        try:
+            from zall._util.model_registry import _MODEL_PRESETS
+            return _prefixed([(a, f"{n} · {p}") for a, n, _note, p in _MODEL_PRESETS], frag)
+        except Exception:
+            return []
+    if cmd == "/mode" and not prev:
+        return _prefixed([("strict", "full confirm/downgrade gates"),
+                          ("fast", "skip confirmation extras")], frag)
+    return None
+
+
 def _build_custom_completer(
     commands: list[str],
     skills: list[str] | None = None,
@@ -158,6 +283,29 @@ def _build_custom_completer(
                         display_meta="file",
                     )
                 return
+            # 参数位补全 (Argus/cmd2 对标): 首参之后的候选表 (子命令/模块 id/选项…)
+            toks = text.split()
+            if toks and toks[0].startswith("/"):
+                trailing = text.endswith(" ")
+                if len(toks) > 1 or trailing:
+                    if trailing:
+                        frag, prev = "", toks[1:]
+                    else:
+                        frag, prev = toks[-1], toks[1:-1]
+                    cands = _complete_argument(toks[0].lower(), prev, frag)
+                    if cands is not None:
+                        for value, desc in cands:
+                            safe_v = _html.escape(value)
+                            safe_d = _html.escape(desc or "")
+                            yield Completion(
+                                value,
+                                start_position=-len(frag),
+                                display=HTML(
+                                    f"<b>{safe_v}</b> <ansibrightblack>{safe_d}</ansibrightblack>"
+                                ),
+                                display_meta=desc or "",
+                            )
+                        return
             text_lower = text.lower()
             for cmd, display, desc in entries:
                 if cmd.lower().startswith(text_lower):
