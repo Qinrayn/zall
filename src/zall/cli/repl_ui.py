@@ -140,6 +140,22 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
     console.print(f"  [bold {_C.ACCENT}]\u256d{_dash_line}\u256e[/]")
     console.print(f"  [bold {_C.ACCENT}]\u2502[/]  [bold]zall[/]  "
                   f"[dim {_C.ACCENT}]\u00b7[/]  [dim]{display_model}[/]")
+    # Argus logo 对标信息行: 版本 · 命令数 · 科研目录模块数 (一眼知道装备了多少)
+    from zall import __version__
+    info_parts = [f"v{__version__}"]
+    try:
+        from zall.cli.commands import get_palette_commands
+        info_parts.append(f"{len(get_palette_commands())} commands")
+    except Exception:
+        pass
+    try:
+        from zall.extensions.science.catalog import load_catalog
+        info_parts.append(f"{len(load_catalog())} research modules")
+    except Exception:
+        pass
+    _info_line = "  \u00b7  ".join(info_parts)
+    console.print(f"  [bold {_C.ACCENT}]\u2502[/]  "
+                  f"[{_C.SUBTLE}]{_info_line}[/]")
     meta_parts = []
     if branch:
         meta_parts.append(f"[{_C.INFO}]{branch}[/]")
@@ -152,6 +168,19 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
         console.print(f"  [bold {_C.ACCENT}]\u2502[/]  {sep.join(meta_parts)}")
     console.print(f"  [bold {_C.ACCENT}]\u2570{_dash_line}\u256f[/]")
     console.print()
+
+
+def _echo_status(state: dict[str, Any]) -> None:
+    """命令后回显状态行 (Argus _print_status_bar 纪律)。
+
+    renderer 缺席/非 TTY 时静默 — 管道与 CI 输出契约不受影响。
+    """
+    renderer = state.get("_renderer")
+    if renderer is not None and hasattr(renderer, "render_status_bar"):
+        try:
+            renderer.render_status_bar(force=True)
+        except Exception:
+            pass
 
 
 def build_repl_loop(
@@ -454,6 +483,8 @@ def repl(
                         return 0
                     if action == "clear":
                         loop = None
+                    # Argus _print_status_bar 纪律: 命令后回显当前状态行
+                    _echo_status(state)
                     continue
 
             # v2.x: @file 引用展开 — 把 @path 解析到的真实文件内容注入消息 (Claude Code 式)。

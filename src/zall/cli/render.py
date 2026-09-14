@@ -310,6 +310,178 @@ def _key_arg(args: dict[str, Any]) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# 控制台视觉词汇 (Argus 吸纳轮): 闪讯 / 面板头 / KV 表 / 引导面板 / 批跑进度
+# — REPL 与 TUI 共享同一套 helper, 一次构建两处消费。
+# 纪律: TTY 走 rich 结构 (Panel/Table), 非 TTY 降级纯文本 (管道/CI 输出契约
+# 不变); 颜色一律 _C 语义槽位运行时取值 (G6 单一色源, 主题切换自动跟随)。
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _is_tty(out: Any) -> bool:
+    return bool(hasattr(out, "isatty") and out.isatty())
+
+
+def flash(out: Any, level: str, msg: str) -> None:
+    """闪讯纪律 (Argus _flash 对标): [+]=成功 [!]=警告 [-]=错误 [i]=信息。
+
+    全 CLI 统一的命令反馈前缀 — 用户扫一眼前缀就知道结果性质, 不用读全文。
+    """
+    styles = {
+        "ok": ("[+]", _C.SUCCESS),
+        "warn": ("[!]", _C.WARN),
+        "err": ("[-]", _C.FAIL),
+        "info": ("[i]", _C.INFO),
+    }
+    prefix, color = styles.get(level, styles["info"])
+    line = Text()
+    line.append(f"{prefix} ", style=f"bold {color}")
+    line.append(msg, style=color)
+    _shared_console(out).print(line)
+
+
+def flash_ok(out: Any, msg: str) -> None:
+    flash(out, "ok", msg)
+
+
+def flash_warn(out: Any, msg: str) -> None:
+    flash(out, "warn", msg)
+
+
+def flash_err(out: Any, msg: str) -> None:
+    flash(out, "err", msg)
+
+
+def flash_info(out: Any, msg: str) -> None:
+    flash(out, "info", msg)
+
+
+def section_header(out: Any, title: str) -> None:
+    """居中强调面板头 (Argus "Selected: X" 式) — 标记重要状态切换。"""
+    c = _shared_console(out)
+    if _is_tty(out):
+        header = Text(f" {title} ", justify="center", style=f"bold {_C.ACCENT}")
+        c.print()
+        c.print(Panel(header, expand=False, padding=(0, 2), style=_C.ACCENT2))
+        c.print()
+    else:
+        c.print(f"== {title} ==")
+
+
+_UNSET_VALUES = frozenset({"", "None", "Not set", "\u2014", "-"})
+
+
+def kv_table(
+    out: Any,
+    title: str,
+    pairs: list[tuple[str, Any]],
+    *,
+    caption: str = "",
+    highlight: tuple[str, ...] = (),
+) -> None:
+    """Field/Value 信息表 (Argus module_info_table 对标)。
+
+    highlight 中的字段值用成功色 (已设置/已变更); 空值统一暗色占位 —
+    一眼看出"哪些已配、哪些还没有"。caption 放引导语 (⇒ Type 'run' 式)。
+    """
+    if _is_tty(out):
+        from rich import box
+        from rich.table import Table
+
+        table = Table(
+            title=title or None,
+            title_style=f"bold {_C.ACCENT}",
+            box=box.SIMPLE_HEAVY,
+            caption=caption or None,
+            caption_justify="center",
+            caption_style=_C.DIM,
+            expand=False,
+            pad_edge=True,
+        )
+        table.add_column("Field", style=_C.INFO, no_wrap=True)
+        table.add_column("Value", ratio=1, overflow="fold")
+        for k, v in pairs:
+            sv = str(v)
+            if k in highlight and sv not in _UNSET_VALUES:
+                style = _C.SUCCESS
+            elif sv in _UNSET_VALUES:
+                style = _C.SUBTLE
+                sv = sv or "\u2014"
+            else:
+                style = ""
+            table.add_row(str(k), Text(sv, style=style))
+        c = _shared_console(out)
+        c.print()
+        c.print(table)
+        c.print()
+    else:
+        if title:
+            out.write(f"== {title} ==\n")
+        w = max((len(str(k)) for k, _ in pairs), default=8)
+        for k, v in pairs:
+            sv = str(v)
+            out.write(f"  {str(k).ljust(w)}  {sv if sv not in _UNSET_VALUES else '-'}\n")
+        if caption:
+            out.write(f"  {caption}\n")
+
+
+def next_steps_panel(out: Any, lines: list[str], *, title: str = "Recommended Next Steps") -> None:
+    """引导面板 (Argus recommendations_panel 对标): 动作后告诉用户下一步能做什么。
+
+    空列表不渲染 (无话可说时保持安静, 不刷存在感)。
+    """
+    if not lines:
+        return
+    c = _shared_console(out)
+    if _is_tty(out):
+        body = Text()
+        for i, ln in enumerate(lines):
+            if i:
+                body.append("\n")
+            body.append(f"{_G.TOOL} ", style=f"bold {_C.ACCENT}")
+            body.append(ln)
+        c.print()
+        c.print(Panel(
+            body,
+            title=Text(f" {title} ", style=f"bold {_C.ACCENT}"),
+            border_style=_C.ACCENT2,
+            expand=False,
+            padding=(0, 2),
+        ))
+        c.print()
+    else:
+        c.print("  next steps:")
+        for ln in lines:
+            c.print(f"    - {ln}")
+
+
+def batch_progress(console: Console | None = None) -> Any:
+    """批跑进度预设 (Argus run_modules 对标): spinner+名称+n/m+已用时+ETA。
+
+    transient=True — 跑完即清屏, 不留进度条残骸污染滚动历史。
+    用法: with batch_progress() as prog: task = prog.add_task("run", total=n, name=...)
+    """
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    return Progress(
+        SpinnerColumn(),
+        TextColumn(f"[bold {_C.INFO}]" + "{task.fields[name]}" + "[/]"),
+        BarColumn(bar_width=None),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=True,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # _StreamBuffer — 50ms timer-based batch flushing for streaming tokens
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -770,9 +942,13 @@ class CliRenderer:
             self._status_tokens = tokens
             self._status_dirty = True
 
-    def render_status_bar(self) -> None:
-        """渲染状态栏 (1 行, 顶部)。"""
-        if not self._is_tty or not self._status_dirty:
+    def render_status_bar(self, force: bool = False) -> None:
+        """渲染状态栏 (1 行, 顶部)。
+
+        force=True 绕过 dirty 门 — 命令后回显纪律 (Argus _print_status_bar 对标):
+        每条斜杠命令执行完都重印一次当前状态, 用户始终知道"现在处于什么状态"。
+        """
+        if not self._is_tty or (not force and not self._status_dirty):
             return
         self._status_dirty = False
         parts = []

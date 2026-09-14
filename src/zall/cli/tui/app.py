@@ -434,6 +434,21 @@ class TuiApp(App):
         title.append(f"  v{__version__}", style=SUB)
         # 描述
         desc = Text("a falsifiable, reproducible coding agent", style=SUB)
+        # 装备计数行 (Argus logo 对标: 版本 · 命令数 · 科研模块数)
+        counts = Text()
+        count_parts: list[str] = []
+        try:
+            from zall.cli.commands import get_palette_commands
+            count_parts.append(f"{len(get_palette_commands())} commands")
+        except Exception:
+            pass
+        try:
+            from zall.extensions.science.catalog import load_catalog
+            count_parts.append(f"{len(load_catalog())} research modules")
+        except Exception:
+            pass
+        if count_parts:
+            counts.append("  \u00b7  ".join(count_parts), style=DIM)
         # 模型
         model_line = Text(self._model or "unset", style=DIM)
         # 键位提示
@@ -442,9 +457,14 @@ class TuiApp(App):
         hint.append("/help", style=INFO); hint.append(" commands   ", style=DIM)
         hint.append("@", style=INFO); hint.append(" files   ", style=DIM)
         hint.append("Shift+Tab", style=INFO); hint.append(" plan   ", style=DIM)
+        hint.append("?", style=INFO); hint.append(" keys   ", style=DIM)
         hint.append("esc", style=INFO); hint.append(" interrupt", style=DIM)
+        group_parts: list[Any] = [title, desc]
+        if count_parts:
+            group_parts.append(counts)
+        group_parts.extend([model_line, Text(""), hint])
         return Panel(
-            Group(title, desc, model_line, Text(""), hint),
+            Group(*group_parts),
             border_style=A, box=box.ROUNDED, padding=(1, 2), expand=False,
         )
 
