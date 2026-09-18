@@ -207,11 +207,18 @@ def _check_repl_autosave(out: Any, state: dict[str, Any]) -> bool:
     out.flush()
     ask = state.get("_input_fn") or input
     try:
-        ans = ask("  restore? [y/N] ").strip().lower()
+        ans_raw = ask("  restore? [y/N] ").strip()
     except (EOFError, KeyboardInterrupt):
-        ans = ""
+        ans_raw = ""
+    ans = ans_raw.lower()
     if ans not in ("y", "yes"):
         _clear_repl_autosave()
+        # 用户在恢复提示弹出前就开始打任务: 非 y/N 的长答案几乎一定是首条任务
+        # (实测: 启动即打字会被此提示整个吞掉, 会话空等)。转交 REPL 作为首输入。
+        if len(ans) > 2 and ans not in ("n", "no"):
+            out.write("  · restore declined — your typed text runs as the first task\n")
+            out.flush()
+            state["_pending_first_input"] = ans_raw
         return False
     from zall.core.model import Message as _Msg
     from zall.core.model import ToolCall as _ToolCall

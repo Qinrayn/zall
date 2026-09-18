@@ -18,9 +18,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rich.align import Align
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 
 from zall.cli.commands._common import (
     _CATEGORY_CONTEXT,
@@ -34,7 +36,7 @@ from zall.cli.commands._common import (
     _print_help,
     slash_command,
 )
-from zall.cli.render import _shared_console
+from zall.cli.render import _C, _shared_console
 from zall.core.verifiability import EventType, RunRecorder
 
 
@@ -74,8 +76,13 @@ def cmd_exit(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] 
     return "exit"
 
 
-@slash_command("/clear", description="clear screen", category=_CATEGORY_NAV)
+@slash_command("/clear", aliases=("/new",), description="clear screen and start a new chat",
+               category=_CATEGORY_NAV)
 def cmd_clear(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """清屏 + 起新对话 (Codex /clear; /new 同义 — 新对话不继承上一段上下文)。
+
+    吸收轮: 重置时把缓存统计一并清零, 否则新对话的命中率会被上一段污染。
+    """
     if state is None:
         state = {}
     if hasattr(out, "isatty") and out.isatty():
@@ -87,6 +94,13 @@ def cmd_clear(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
     state.pop("resume_messages", None)
     state.pop("_loop", None)
     state["usage"] = {"prompt": 0, "completion": 0}
+    state.pop("ctx_tokens", None)
+    _stats = state.get("cache_stats")
+    if _stats is not None and hasattr(_stats, "reset"):
+        try:
+            _stats.reset()
+        except Exception:
+            pass
     state.pop("_artifact_files", None)
     state.pop("_added_files", None)
     return "clear"
@@ -155,6 +169,177 @@ def cmd_history(arg: str, out: Any, loop: Any | None = None, state: dict[str, An
 # ──────────────────────────────────────────────────────────────────────
 # Checkpoint & Revert
 # ──────────────────────────────────────────────────────────────────────
+
+
+@slash_command("/status", aliases=("/st",),
+               description="show session config and token usage", category=_CATEGORY_NAV)
+def cmd_status(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """会话状态一览 (Codex /status 对标): 配置 + 用量 + 缓存命中。
+
+    与 /doctor 的分工: /doctor 诊断环境 (依赖/网络/目录), /status 只看"当前这个
+    会话在用什么、花了多少、缓存命中如何" — Codex 的 status 是同一定位。
+    """
+    from zall.cli.render import kv_table
+    st = state or {}
+    model = str(st.get("model") or "unset")
+    mode = "plan" if st.get("plan_mode") else ("strict" if st.get("strict") else "fast")
+    branch = ""
+    try:
+        from zall.cli.environment import get_cached_cwd_meta
+        branch = get_cached_cwd_meta(st).git_branch or ""
+    except Exception:
+        pass
+    pairs: list[tuple[str, Any]] = [
+        ("model", model),
+        ("mode", mode),
+        ("cwd", str(Path.cwd())),
+    ]
+    if branch:
+        pairs.append(("git branch", branch))
+    steps = getattr(loop, "step_count", None) if loop is not None else None
+    if steps is not None:
+        pairs.append(("steps", steps))
+    ctx = int(st.get("ctx_tokens", 0) or 0)
+    if ctx:
+        from zall.cli.repl_ui import _format_status_context
+        pairs.append(("context", _format_status_context(st)))
+    usage = st.get("usage") or {}
+    if usage and (int(usage.get("prompt", 0) or 0) or int(usage.get("completion", 0) or 0)):
+        from zall.core.cache_stats import format_tokens
+        prompt = int(usage.get("prompt", 0) or 0)
+        cached = int(usage.get("cached", 0) or 0)
+        write = int(usage.get("cache_write", 0) or 0)
+        completion = int(usage.get("completion", 0) or 0)
+        pairs.append(("tokens in", f"{format_tokens(prompt)}"
+                                    + (f" ({format_tokens(cached)} cached)" if cached else "")))
+        if write:
+            pairs.append(("cache write", format_tokens(write)))
+        pairs.append(("tokens out", format_tokens(completion)))
+    stats = st.get("cache_stats")
+    if stats is not None:
+        try:
+            pairs.append(("cache", stats.format_summary()))
+            if getattr(stats, "prefix_changes", 0):
+                pairs.append(("prefix", f"{stats.prefix_changes} invalidated (system/tools changed)"))
+        except Exception:
+            pass
+    # 会话落盘位置 (Codex /status 显示 rollout 路径的同位物)
+    try:
+        from zall.cli.orchestrator import _sessions_dir
+        pairs.append(("sessions", str(_sessions_dir())))
+    except Exception:
+        pass
+    # 链哈希头 (zall 特有: §6.1 可复现 timeline 的当前锚点)
+    try:
+        recorder = getattr(loop, "recorder", None)
+        tail = str(getattr(recorder, "tail_hash", "") or "")
+        if tail:
+            pairs.append(("chain head", tail[:16]))
+    except Exception:
+        pass
+    _has_usage = any(k == "tokens in" for k, _v in pairs)
+    kv_table(out, "session status", pairs,
+             caption=("usage is session-cumulative; cache% = cached input / total input"
+                      if _has_usage else ""))
+    return "handled"
+
+
+# Codex "? for shortcuts" 对标: 控制台快捷键卡片 (TUI 的 ? 浮层同源信息)
+_SHORTCUT_ROWS: list[tuple[str, str]] = [
+    ("Ctrl-D", "exit (empty line)"),
+    ("Ctrl-C", "interrupt the running turn"),
+    ("Ctrl-R", "search input history"),
+    ("Ctrl-P / Ctrl-N", "previous / next history entry"),
+    ("Ctrl-L", "clear screen"),
+    ("Ctrl-W / Ctrl-U", "delete word / line"),
+    ("Alt-Enter", "insert newline (multi-line input)"),
+    ("\\ + Enter", "continue on the next line"),
+    ("Enter Enter", "submit after multi-line paste"),
+    ("Tab", "complete commands, arguments, @files"),
+    ("@path", "reference a file in the message"),
+    ("/", "command palette (/help lists all)"),
+    ("?", "this card"),
+    ("/science", "research workbench (modules/use/run/auto)"),
+]
+
+
+@slash_command("/keys", aliases=("/shortcuts",),
+               description="keyboard shortcuts and input tips", category=_CATEGORY_NAV)
+def cmd_keys(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """快捷键卡片 (Codex "? for shortcuts" 对标)。"""
+    _print_shortcuts(out)
+    return "handled"
+
+
+def _print_shortcuts(out: Any) -> None:
+    """渲染快捷键卡片 (TTY 走 rich 表, 非 TTY 走纯文本 — 管道契约不变)。"""
+    if hasattr(out, "isatty") and out.isatty():
+        console = _shared_console(out)
+        console.print()
+        title = Text(" ? shortcuts ", justify="center", style=f"bold {_C.ACCENT}")
+        console.print(Align(Panel(title, expand=False, padding=(0, 2), style=_C.ACCENT2),
+                            align="center"))
+        console.print()
+        key_col, desc_col = [], []
+        for key, desc in _SHORTCUT_ROWS:
+            key_col.append(key)
+            desc_col.append(desc)
+        # 两列并排 (短卡片, 不占满屏)
+        half = (len(_SHORTCUT_ROWS) + 1) // 2
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("key", style=_C.ACCENT, no_wrap=True)
+        table.add_column("desc", style=_C.DIM)
+        table.add_column("key2", style=_C.ACCENT, no_wrap=True)
+        table.add_column("desc2", style=_C.DIM)
+        for i in range(half):
+            left_k, left_d = _SHORTCUT_ROWS[i]
+            right = _SHORTCUT_ROWS[i + half] if i + half < len(_SHORTCUT_ROWS) else ("", "")
+            table.add_row(left_k, left_d, right[0], right[1])
+        console.print(Align(table, align="center"))
+        console.print()
+    else:
+        out.write("  shortcuts:\n")
+        for key, desc in _SHORTCUT_ROWS:
+            out.write(f"    {key:18s} {desc}\n")
+    out.flush()
+
+
+@slash_command("/mcp", description="list configured MCP servers and tools", category=_CATEGORY_TOOLS)
+def cmd_mcp(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """MCP 概览 (Codex /mcp 对标): 配置的 server + 已注册工具 (verbose 列工具名)。
+
+    zall 的 MCP 是延迟后台加载 (§9.2.11), 所以这里显示"配置了什么"与"已连上并
+    注册了什么"两件事 — 两者不一致本身就是诊断信息。
+    """
+    st = state or {}
+    verbose = arg.strip().lower() in ("verbose", "-v", "--verbose")
+    from zall.cli.render import kv_table
+    tools = list(st.get("_mcp_tools") or [])
+    configured: list[Any] = []
+    try:
+        from zall.mcp.config import load_mcp_config
+        configured = list(load_mcp_config(project_path=str(Path.cwd())))
+    except Exception:
+        configured = []
+    pairs: list[tuple[str, Any]] = [
+        ("configured servers", str(len(configured))),
+        ("registered tools", str(len(tools))),
+    ]
+    if configured:
+        names = ", ".join(getattr(s, "name", "?") for s in configured)
+        pairs.append(("servers", names))
+    if verbose and tools:
+        by_server: dict[str, list[str]] = {}
+        for t in tools:
+            by_server.setdefault(str(getattr(t, "server_name", "?")), []).append(
+                str(getattr(t, "tool_id", "?"))
+            )
+        for srv, tids in sorted(by_server.items()):
+            pairs.append((srv, ", ".join(sorted(tids))))
+    kv_table(out, "mcp", pairs,
+             caption="(deferred loading: tools appear once connected)"
+                     if not tools and configured else "")
+    return "handled"
 
 
 @slash_command("/checkpoint", description="manage file snapshots", category=_CATEGORY_TOOLS)

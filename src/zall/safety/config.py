@@ -56,6 +56,9 @@ def load_config() -> dict[str, Any]:
     config: dict[str, Any] = {
         "api_key": "", "model": DEFAULT_MODEL, "api_base": DEFAULT_API_BASE,
         "timeout": 120.0, "providers": [], "provider": "",
+        # 多供应商: [keys].<provider> = "sk-..." — 一家一个 key, 切换时各用各的
+        # (通用 [auth].api_key 仍是默认/兜底, 见 cli.model_switch.provider_endpoint)
+        "provider_keys": {},
         # F2a: 采样参数 + 上下文窗口 (None = 未设置, 不发送给 API)
         "temperature": None, "max_tokens": None, "top_p": None,
         "reasoning_effort": None, "window_size": None,
@@ -102,6 +105,12 @@ def load_config() -> dict[str, Any]:
         _merge_model_section(data)
         if "providers" in data:
             config["providers"] = data["providers"]
+        if "keys" in data:
+            _keys = data.get("keys") or {}
+            if isinstance(_keys, dict):
+                config["provider_keys"].update(
+                    {str(k): str(v) for k, v in _keys.items() if v}
+                )
 
     # 2. Project-level config (overrides user)
     project_cfg = Path.cwd() / ".zall" / "config.toml"
@@ -121,6 +130,12 @@ def load_config() -> dict[str, Any]:
         _merge_model_section(data)
         if "providers" in data:
             config["providers"] = data["providers"]
+        if "keys" in data:
+            _keys = data.get("keys") or {}
+            if isinstance(_keys, dict):
+                config["provider_keys"].update(
+                    {str(k): str(v) for k, v in _keys.items() if v}
+                )
 
     # 3. Env vars (override files)
     if os.environ.get("ZALL_API_KEY"):

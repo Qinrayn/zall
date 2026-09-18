@@ -57,8 +57,12 @@ class OpenAICompatAdapter(BaseAdapter):
         max_tokens: int | None = None,
         top_p: float | None = None,
         reasoning_effort: str | None = None,
+        # Codex 对标: 缓存亲和键 (同一会话稳定) — None 时不发送该字段
+        # (未知字段对严格网关可能是 400, 所以由调用方按 provider 白名单决定)
+        cache_key: str | None = None,
     ) -> None:
         super().__init__(api_key, api_base, model, timeout)
+        self._cache_key = (cache_key or "").strip() or None
         if not self._api_key:
             raise ValueError("API key required - set ZALL_API_KEY or add to ~/.zall/config.toml")
         if not self._model:
@@ -156,6 +160,10 @@ class OpenAICompatAdapter(BaseAdapter):
             # Only send when explicitly enabled to avoid HTTP 400 errors.
             if self._stream_usage:
                 body["stream_options"] = {"include_usage": True}
+        # 缓存亲和 (Codex prompt_cache_key 对标): 会话内稳定 → 服务端把同一前缀
+        # 路由到同一缓存分片。OpenAI/DeepSeek/GLM 等接受该字段; 其余由调用方决定。
+        if self._cache_key:
+            body["prompt_cache_key"] = self._cache_key
         return body
 
     def _call(
@@ -257,11 +265,29 @@ class OpenAICompatAdapter(BaseAdapter):
         max_conn_retries = 3
         stream_ctx: Any = None
         http_response: Any = None
+        _stream_options_dropped = False
         for conn_attempt in range(max_conn_retries):
             try:
                 stream_ctx = self._client.stream("POST", url, json=body, headers=headers,
                                                   timeout=stream_timeout)
                 http_response = stream_ctx.__enter__()
+                # 自愈降级: 有的 provider 不认 stream_options.include_usage (400)。
+                # 关掉该字段重建 body 立刻重试一次 —— 拿不到 usage 只是统计降级,
+                # 请求本身不能因此失败。
+                if (http_response.status_code == 400 and self._stream_usage
+                        and not _stream_options_dropped):
+                    try:
+                        _err_body = http_response.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        _err_body = ""
+                    if "stream_options" in _err_body or "include_usage" in _err_body:
+                        _stream_options_dropped = True
+                        self._stream_usage = False
+                        body = self._build_body(messages, tools, tool_choice, stream=True)
+                        stream_ctx.__exit__(None, None, None)
+                        stream_ctx = None
+                        self._dispatch_retry("api", 0.0, conn_attempt + 1, max_conn_retries)
+                        continue
                 break  # Connection succeeded
             except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
                 if stream_ctx is not None:
@@ -360,15 +386,52 @@ class OpenAICompatAdapter(BaseAdapter):
             return None
 
     @staticmethod
+    def _parse_usage(usage_raw: dict[str, Any]) -> dict[str, int]:
+        """usage → 规范键 (含缓存命中记账)。
+
+        缓存命中字段各家不同名, 这里一次收齐 (Codex 对标: 缓存命中要可观测):
+          prompt_tokens_details.cached_tokens   — OpenAI / 兼容网关
+          prompt_cache_hit_tokens               — DeepSeek (命中部分)
+          cache_read_input_tokens               — Anthropic 风格网关
+          cached_tokens                         — 少数 provider 顶层给
+        语义: prompt_tokens 已包含命中部分 (DeepSeek 的 hit+miss=prompt_tokens),
+        所以 cached 是 prompt 的子集, 不重复累加。
+        """
+        from zall.core.cache_stats import canonical_usage
+
+        if not usage_raw:
+            return {}
+        details = usage_raw.get("prompt_tokens_details") or {}
+        cached = (
+            details.get("cached_tokens")
+            or usage_raw.get("prompt_cache_hit_tokens")
+            or usage_raw.get("cache_read_input_tokens")
+            or usage_raw.get("cached_tokens")
+            or 0
+        )
+        cache_write = (
+            details.get("cache_creation_tokens")
+            or usage_raw.get("cache_creation_input_tokens")
+            or 0
+        )
+        out = canonical_usage(
+            prompt=int(usage_raw.get("prompt_tokens", 0) or 0),
+            completion=int(usage_raw.get("completion_tokens", 0) or 0),
+            cached=int(cached or 0),
+            cache_write=int(cache_write or 0),
+        )
+        provider_total = int(usage_raw.get("total_tokens", 0) or 0)
+        if provider_total > 0:
+            out["total"] = provider_total
+        return out
+
+    @staticmethod
     def _capture_chunk_usage(data: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
         """Extract token usage from a chunk (may share a chunk with finish_reason)."""
         usage_raw = data.get("usage")
         if usage_raw:
-            return {
-                "prompt": usage_raw.get("prompt_tokens", 0),
-                "completion": usage_raw.get("completion_tokens", 0),
-                "total": usage_raw.get("total_tokens", 0),
-            }
+            parsed = OpenAICompatAdapter._parse_usage(usage_raw)
+            return parsed or current
         return current
 
     def _process_stream_delta(self, delta: dict[str, Any], state: _StreamState) -> Any:
@@ -541,11 +604,9 @@ class OpenAICompatAdapter(BaseAdapter):
         if stop_reason == StopReason.TOOL_USE and not tool_calls:
             stop_reason = StopReason.STOP
         usage_raw = data.get("usage", {})
-        usage = {
-            "prompt": usage_raw.get("prompt_tokens", 0),
-            "completion": usage_raw.get("completion_tokens", 0),
-            "total": usage_raw.get("total_tokens", 0),
-        }
+        usage = self._parse_usage(usage_raw) if usage_raw else {}
+        if not usage:
+            usage = {"prompt": 0, "completion": 0, "total": 0}
         return ModelResponse(
             content=content, reasoning=reasoning, tool_calls=tuple(tool_calls),
             stop_reason=stop_reason, raw=data, usage=usage,

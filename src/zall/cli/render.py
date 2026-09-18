@@ -72,6 +72,7 @@ class _C:
 class _G:
     """Unicode glyph vocabulary for the Obsidian theme."""
     TOOL = "\u25b8"          # ▸ right-pointing triangle: tool invocation
+    BAR = "\u258c"           # ▌ left half block: exec/tool cell 左侧命令条 (Codex 口径)
     OK = "\u2713"            # ✓ check: success
     FAIL = "\u2717"          # ✗ cross: failure
     MET = "\u25cf"           # ● filled circle: goal met
@@ -114,7 +115,7 @@ class _G:
 # ── ASCII 回退字形 (跨平台: 终端/编码不支持 unicode 时切换, 杜绝 tofu) ──
 # 注: 无法探测字体缺字形 (那由默认选用通用字形规避); 此回退处理编码受限终端。
 _G_ASCII: dict[str, Any] = {
-    "TOOL": ">", "OK": "+", "FAIL": "x", "MET": "*", "UNDECIDABLE": "o",
+    "TOOL": ">", "BAR": "|", "OK": "+", "FAIL": "x", "MET": "*", "UNDECIDABLE": "o",
     "WARN": "!", "SPINNER": ".", "DEPTH": "|", "DEPTH_END": "`",
     "ARROW": "->", "BULLET": "-", "LINE": "-",
     "CORNER_TL": "+", "CORNER_TR": "+", "CORNER_BL": "+", "CORNER_BR": "+",
@@ -253,6 +254,20 @@ def _strip_think_tags(text: str) -> str:
     cleaned = _RE_THINK_OPEN.sub("", text)
     cleaned = _RE_THINK_CLOSE.sub("", cleaned)
     return cleaned
+
+
+def fmt_elapsed_compact(elapsed: float) -> str:
+    """工作态耗时紧凑格式 (Codex fmt_elapsed_compact 口径)。
+
+    <60s 保留 0.1s 精度 ("12.4s"); 更长转人读格式: "1m 05s", "59m 59s",
+    "1h 00m 00s" — 长任务下 "125.3s" 这类秒数串一眼读不出量级。
+    """
+    if elapsed < 59.95:  # 四舍五入后仍 <60s 才走亚分钟分支, 防 "60.0s"
+        return f"{elapsed:.1f}s"
+    secs = int(round(elapsed))  # 59.96 → 60 → "1m 00s" (int 截断会得 "0m 59s")
+    if secs < 3600:
+        return f"{secs // 60}m {secs % 60:02d}s"
+    return f"{secs // 3600}h {(secs % 3600) // 60:02d}m {secs % 60:02d}s"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -681,6 +696,9 @@ class CliRenderer:
         self._status_goal: str = ""
         self._status_plan: bool = False
         self._status_tokens: str = ""
+        # 吸收轮: 上下文剩余 + 缓存命中 (Codex footer 对标)
+        self._status_context: str = ""
+        self._status_cache: str = ""
         self._status_dirty: bool = True
         # v0.6.0: 活动状态
         self._activity_label: str = ""
@@ -873,15 +891,17 @@ class CliRenderer:
                 dim = _ANSI_MAP.get(_C.DIM, "")
                 subtle = _ANSI_MAP.get(_C.SUBTLE, "")
                 rst = _ANSI_RESET
-                # v1.4: 恢复丰富 spinner 行 (frame+label+time+tok+hint), 保留 ANSI 修复
+                # 工作态状态行 (Codex StatusIndicator 对标):
+                #   ‹frame› ‹label›  (12s • ctrl-c to interrupt)  1.2k tok
+                # 括号段固定位置, 用户随时知道"跑了多久/怎么打断"; 详情在标签里。
                 parts = f"  {frame_color}{frame}{rst} {frame_color}{label}{stall_hint}{rst}"
                 if elapsed > 0.8:
-                    parts += f" {dim}{elapsed:.1f}s{rst}"
+                    inner = fmt_elapsed_compact(elapsed)
+                    if elapsed > 2.0:
+                        inner += f" {_G.BULLET} ctrl-c to interrupt"
+                    parts += f" {dim}({inner}){rst}"
                 if self._spinner_token_count > 0:
                     parts += f" {subtle}{self._spinner_token_count} tok{rst}"
-                # 超过 2s 显示 interrupt 提示
-                if elapsed > 2.0:
-                    parts += f"  {subtle}ctrl-c interrupt{rst}"
                 with self._write_lock:
                     if self._spinner_stop.is_set() or self._spinner_shutdown.is_set():
                         break
@@ -935,14 +955,18 @@ class CliRenderer:
         goal: str = "",
         plan: bool = False,
         tokens: str = "",
+        context: str = "",
+        cache: str = "",
     ) -> None:
-        """更新状态栏信息。"""
+        """更新状态栏信息 (context/cache 为吸收轮新增: 上下文剩余 + 缓存命中)。"""
         changed = (
             model != self._status_model
             or branch != self._status_branch
             or goal != self._status_goal
             or plan != self._status_plan
             or tokens != self._status_tokens
+            or context != self._status_context
+            or cache != self._status_cache
         )
         if changed:
             self._status_model = model
@@ -950,6 +974,8 @@ class CliRenderer:
             self._status_goal = goal
             self._status_plan = plan
             self._status_tokens = tokens
+            self._status_context = context
+            self._status_cache = cache
             self._status_dirty = True
 
     def render_status_bar(self, force: bool = False) -> None:
@@ -974,6 +1000,12 @@ class CliRenderer:
         # 规划模式
         if self._status_plan:
             parts.append(f"[{_C.THINKING}]plan[/]")
+        # 上下文剩余 (Codex "NN% context left" 对标)
+        if self._status_context:
+            parts.append(f"[{_C.DIM}]{self._status_context}[/]")
+        # 缓存命中 (Codex "(+ N cached)" 对标)
+        if self._status_cache:
+            parts.append(f"[{_C.SUCCESS}]{self._status_cache}[/]")
         # token 用量
         if self._status_tokens:
             parts.append(f"[{_C.DIM}]{self._status_tokens}[/]")
@@ -1059,7 +1091,7 @@ class CliRenderer:
         display = self._thinking_display_buf.replace("\n", " | ")
         if len(display) > MAX_LINE - 20:
             display = "..." + display[-(MAX_LINE - 21):]
-        display_line = f"  [{_C.THINKING}]{_G.BULLET}[/] [{_C.DIM}]{display}[/]  [{_C.SUBTLE}]({elapsed:.1f}s)[/]"
+        display_line = f"  [{_C.THINKING}]{_G.BULLET}[/] [{_C.DIM}]{display}[/]  [{_C.SUBTLE}]({fmt_elapsed_compact(elapsed)})[/]"
         self._clear_line()
         with self._write_lock:
             self._console.print(display_line, end="")
@@ -1135,7 +1167,7 @@ class CliRenderer:
         self._thinking_full = reasoning
         elapsed = ""
         if self._thinking_start_time > 0:
-            elapsed = f" {time.time() - self._thinking_start_time:.1f}s"
+            elapsed = f" {fmt_elapsed_compact(time.time() - self._thinking_start_time)}"
         if self._is_tty:
             lines = reasoning.strip().split("\n")
             # v1.3: 只显示第一行摘要 (克制、不喇叨)
@@ -1282,7 +1314,7 @@ class CliRenderer:
             t = time.time() - self._model_call_start_time
             self._model_call_elapsed = t
             if t >= 1.0:
-                elapsed = f"  {_G.BULLET} {t:.1f}s"
+                elapsed = f"  {_G.BULLET} {fmt_elapsed_compact(t)}"
 
         usage = p.get("usage", {})
         if not usage or not isinstance(usage, dict):
@@ -1359,9 +1391,22 @@ class CliRenderer:
             depth_prefix = "  " * self._call_depth
 
         if preview:
+            # Codex exec cell 口径 (TTY): ▌ 命令条 + 工具名 + 参数预览 (dim);
+            # 非 TTY 保持原形态 (管道/CI 输出契约不变)。
+            if self._is_tty:
+                self._console.print(
+                    f"{depth_prefix}[{color}]{_G.BAR}[/] "
+                    f"[{color}]{name}[/] "
+                    f"[{_C.DIM}]{rich_escape(str(preview))}[/]"
+                )
+            else:
+                self._console.print(
+                    f"{depth_prefix}[{color}]{_G.TOOL} {name}[/] "
+                    f"[{_C.DIM}]{rich_escape(str(preview))}[/]"
+                )
+        elif self._is_tty:
             self._console.print(
-                f"{depth_prefix}[{color}]{_G.TOOL} {name}[/] "
-                f"[{_C.DIM}]{rich_escape(str(preview))}[/]"
+                f"{depth_prefix}[{color}]{_G.BAR}[/] [{color}]{name}[/]"
             )
         else:
             self._console.print(
@@ -1385,7 +1430,7 @@ class CliRenderer:
         rst = _ANSI_RESET
         with self._write_lock:
             self._raw_stream.write(
-                f"\r  {accent}{frame} {name}{rst} {dim}{elapsed:.1f}s{rst}"
+                f"\r  {accent}{frame} {name}{rst} {dim}{fmt_elapsed_compact(elapsed)}{rst}"
             )
             self._raw_stream.flush()
 
@@ -1452,19 +1497,27 @@ class CliRenderer:
         tool_idx = self._tool_step_counter
         summary = self._summarize_tool_output(tool_id, body)
         name = _display_tool_name(tool_id)
+        # TTY: Codex exec cell 口径 — ▌ 开命令条, └ 收结果行 (工具名不重复);
+        # 非 TTY (管道/CI): 保留 "icon + 工具名" 形态, 输出契约不变。
+        if self._is_tty:
+            head = f"{depth_prefix}[{_C.SUBTLE}]{_G.DEPTH_END}[/] [{color}]{icon}[/]"
+            tail_name = ""
+        else:
+            head = f"{depth_prefix}{icon}"
+            tail_name = f" {name}"
         duration = ""
         if isinstance(artifacts, dict):
             dur = artifacts.get("duration")
             if dur is not None:
                 try:
-                    duration = f" [{_C.SUBTLE}]{float(dur):.1f}s[/]"
+                    duration = f" [{_C.SUBTLE}]{fmt_elapsed_compact(float(dur))}[/]"
                 except (ValueError, TypeError):
                     pass
         # v1.2: 如果 artifacts 没有 duration, 用 _tool_start_time 计算 (借鉴 Claude Code)
         if not duration and self._tool_start_time > 0:
             elapsed = time.time() - self._tool_start_time
             if elapsed >= 0.5:
-                duration = f" [{_C.SUBTLE}]{elapsed:.1f}s[/]"
+                duration = f" [{_C.SUBTLE}]{fmt_elapsed_compact(elapsed)}[/]"
             self._tool_start_time = 0.0
 
         body_lines = body.split("\n")
@@ -1483,7 +1536,7 @@ class CliRenderer:
             preview_lines = body_lines[:MAX_PREVIEW_LINES]
             remaining = len(body_lines) - MAX_PREVIEW_LINES
             self._console.print(
-                f"{depth_prefix}[{color}]{icon}[/] [{_C.ACCENT}]{name}[/]"
+                f"{head}{tail_name}"
                 f" [{_C.DIM}]{rich_escape(str(summary))}[/]{duration}"
             )
             for line in preview_lines:
@@ -1495,7 +1548,7 @@ class CliRenderer:
             )
         else:
             self._console.print(
-                f"{depth_prefix}[{color}]{icon}[/] [{_C.ACCENT}]{name}[/]"
+                f"{head}{tail_name}"
                 f" [{_C.DIM}]{rich_escape(str(summary))}[/]{duration}"
             )
 

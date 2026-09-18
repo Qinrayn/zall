@@ -148,6 +148,12 @@ def _config_to_dict(cfg_path: Path) -> dict[str, Any]:
                 result["reasoning_effort"] = val
     if "providers" in data:
         result["providers"] = data["providers"]
+    if "keys" in data:
+        _keys = data.get("keys") or {}
+        if isinstance(_keys, dict):
+            result["provider_keys"] = {
+                str(k): str(v) for k, v in _keys.items() if v
+            }
     return result
 
 
@@ -198,6 +204,8 @@ DEFAULTS: dict[str, Any] = {
     "timeout": 120.0,
     "providers": [],
     "provider": "",
+    # 多供应商: 一家一个 key, 切换时各用各的 (与 safety.config.load_config 对齐)
+    "provider_keys": {},
     # F2a 对齐 safety.config: 采样参数 + 窗口 (None = 未设置, 不发送给 API)
     "temperature": None, "max_tokens": None, "top_p": None,
     "reasoning_effort": None, "window_size": None,

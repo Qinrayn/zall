@@ -432,19 +432,47 @@ def inject_ask_user_interaction(
 
 
 def make_usage_observer(inner: Any, state: dict[str, Any]) -> Any:
-    """包装 observer: 累计 token usage 到 state["usage"]。"""
+    """包装 observer: 累计 token usage 到 state["usage"] + 缓存命中统计。
+
+    吸收轮 (Codex 口径): 除 prompt/completion 累计外, 还维护
+      state["cache_stats"]  — CacheStats 实例 (命中率/缓存写入/前缀失效次数)
+      state["ctx_tokens"]   — 最近一次输入量 (≈当前上下文大小, 状态栏用)
+    前缀指纹来自 timeline payload (loop_model_call 写入), 变化即缓存前缀失效。
+    """
 
     def _obs(event: Any) -> None:
         if event.kind == "model_call":
-            usage = event.payload.get("usage") or {}
+            payload = event.payload or {}
+            usage = payload.get("usage") or {}
+            stats = state.get("cache_stats")
+            if stats is None:
+                try:
+                    from zall.core.cache_stats import CacheStats
+                    stats = CacheStats()
+                    state["cache_stats"] = stats
+                except Exception:
+                    stats = None
             if usage:
                 u = state.setdefault("usage", {"prompt": 0, "completion": 0})
                 u["prompt"] += int(usage.get("prompt", 0) or 0)
                 u["completion"] += int(usage.get("completion", 0) or 0)
+                # 缓存键只在真有缓存数据时出现 — 无缓存 provider 的 usage 形状不变
+                _cached = int(usage.get("cached", 0) or 0)
+                _write = int(usage.get("cache_write", 0) or 0)
+                if _cached:
+                    u["cached"] = int(u.get("cached", 0) or 0) + _cached
+                if _write:
+                    u["cache_write"] = int(u.get("cache_write", 0) or 0) + _write
                 # 上下文占用 (bottom toolbar 用): 最近一次调用的 input tokens = 当前 context 大小
                 _pt = int(usage.get("prompt", 0) or 0)
                 if _pt:
                     state["ctx_tokens"] = _pt
+            if stats is not None:
+                try:
+                    stats.record(usage)
+                    stats.record_prefix(str(payload.get("prefix_fp", "") or ""))
+                except Exception:
+                    pass
         inner(event)
 
     return _obs

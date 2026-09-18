@@ -90,8 +90,13 @@ def _detect_configured_providers() -> dict[str, bool]:
         if env_var and os.environ.get(env_var, "").strip():
             configured[provider] = True
             continue
-        # Check provider-specific config key
-        prov_key = cfg.get(f"{provider}_api_key", "") if isinstance(cfg, dict) else ""
+        # Check provider-specific config key ([keys].<provider>, 旧字段 fallback)
+        prov_key = ""
+        if isinstance(cfg, dict):
+            _pkeys = cfg.get("provider_keys") or {}
+            if isinstance(_pkeys, dict):
+                prov_key = str(_pkeys.get(provider) or "").strip()
+            prov_key = prov_key or str(cfg.get(f"{provider}_api_key", "") or "").strip()
         if prov_key and prov_key != "your-api-key-here":
             configured[provider] = True
             continue
@@ -521,69 +526,152 @@ def _show_model_guide(out: Any) -> None:
         out.write("   ZALL_MODEL=my-model ZALL_API_BASE=... ZALL_API_KEY=...\n")
 
 
-@slash_command("/provider", description="show/switch model provider", category=_CATEGORY_MODEL)
+def _print_switch_result(
+    res: Any, out: Any, *, show_endpoint: bool = False, as_model_cmd: bool = False,
+) -> None:
+    """渲染切换结果 (命令共用; 一眼看清"现在用谁、key 从哪来")。
+
+    Argus `_announce_selected` 对标: 切 provider 成功 = "选中仪式" —
+    居中 Selected 面板头 + KV 信息表 (model/endpoint/key 来源), 切完即验。
+    """
+    if not res.ok:
+        out.write(f"  \u2717 switch failed: {res.error}\n")
+        return
+    tag = get_provider_tag(res.provider)
+    live = "  [takes effect now]" if res.live else ""
+    if as_model_cmd:
+        out.write(f"  model \u2192 {res.model}  [provider: {res.display}]{live}\n")
+    else:
+        out.write(f"  provider \u2192 {res.display} [{tag}]  [model: {res.model}]{live}\n")
+    ep = res.endpoint
+    if ep is not None:
+        # 平时一行带过; 端点/key 有变化 (切换 provider、命令行给了 key/base) 才展开
+        show = show_endpoint or ep.base_source.startswith("inline") or ep.key_source.startswith("inline")
+        if show and hasattr(out, "isatty") and out.isatty():
+            from zall.cli.render import kv_table
+            pairs = [("model", res.model)]
+            if ep.api_base:
+                pairs.append(("endpoint", f"{ep.api_base}  ({ep.base_source})"))
+            pairs.append(("key", ep.key_source if ep.key_source != "none" else "NOT SET"))
+            kv_table(out, f"selected: {res.display}", pairs,
+                     highlight=("model", "endpoint", "key"))
+        elif show:
+            if ep.api_base:
+                out.write(f"    endpoint: {ep.api_base}  ({ep.base_source})\n")
+            out.write(f"    key: {ep.key_source if ep.key_source != 'none' else 'NOT SET'}\n")
+    for note in res.notes:
+        out.write(f"  \u26a0 {note}\n")
+    if res.persisted:
+        out.write("  \u2713 persisted to ~/.zall/config.toml\n")
+
+
+def _switch_model_and_report(
+    state: dict[str, Any], loop: Any | None, model: str, persist: bool, out: Any,
+    *, as_model_cmd: bool = False,
+) -> None:
+    """切换 model (走统一热切换通路); 目标 adapter 建不起来时只记 model 名。
+
+    统一走 apply_switch 的好处: 正在运行的 loop + 持有旧 adapter 引用的子代理
+    工具一并换新 (无需 /clear); 缺 key 等不可恢复错误时降级为纯 state 写入,
+    下一轮对话重建 adapter 时生效, 不中断用户。
+    """
+    from zall.cli.model_switch import apply_switch
+
+    res = apply_switch(state, loop, model=model, persist=persist)
+    if res.ok:
+        _print_switch_result(res, out, as_model=as_model_cmd)
+        return
+    # 降级: 只记 model 名, 等 adapter 可重建时再起效
+    state["model"] = _resolve_model_alias(model)
+    out.write(f"  ✗ switch failed: {res.error}\n")
+    out.write(f"  (model recorded as {state['model']}; "
+              f"takes effect on the next new conversation)\n")
+
+
+def _parse_switch_args(parts: list[str]) -> dict[str, Any]:
+    """解析 /provider、/model 的公共参数 (位置参 + key=/base=/model= + -p)。"""
+    parsed: dict[str, Any] = {
+        "persist": False, "positional": [], "key": "", "base": "", "model": "",
+    }
+    for p in parts:
+        if p in ("-p", "--persist"):
+            parsed["persist"] = True
+        elif p.startswith("key=") or p.startswith("--key="):
+            parsed["key"] = p.split("=", 1)[1].strip()
+        elif p.startswith("base=") or p.startswith("--base="):
+            parsed["base"] = p.split("=", 1)[1].strip()
+        elif p.startswith("model=") or p.startswith("--model="):
+            parsed["model"] = p.split("=", 1)[1].strip()
+        else:
+            parsed["positional"].append(p)
+    return parsed
+
+
+@slash_command("/provider", aliases=("/prov", "/p"),
+               description="show/switch model provider (takes effect immediately)",
+               category=_CATEGORY_MODEL)
 def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
-    """列出或切换模型提供商 (registry 驱动, 无硬编码)。
+    """列出或切换模型提供商。**切换立即生效, 无需 /clear**。
+
+    任意 OpenAI 兼容端点三件套即可接入, 不必预注册:
+      /provider mygw base=https://x.com/v1 key=sk-... model=my-model
 
     用法:
-      /provider              列出所有提供商 (TTY 下可输数字选择) + 配置状态 + 当前
-      /provider <name>       切换到该提供商 (自动选其默认模型)
-      /provider <name> -p    切换并持久化到 config
+      /provider                       列出所有提供商 (TTY 下可输数字选择) + 配置状态 + 当前
+      /provider <name>                切换到该提供商 (自动选其默认模型, 当前会话立即生效)
+      /provider <name> <model>        切换提供商 + 指定模型
+      /provider <name> -p             切换并持久化 (下次启动仍用它)
+      /provider <name> key=sk-...     切换并保存该 provider 的 key (config [keys] 段)
+      /provider <name> base=<url> key=<key> [model=<id>]
+                                      三件套直接接入 (base URL + API key + model id);
+                                      配 -p 时连 provider 一起记住, 之后 /provider <name> 一键切回
     """
     if state is None:
         state = {}
-    cur_model = state.get("model") or _config_status().get("model") or ""
-    cur_provider = _detect_provider(cur_model) if cur_model else ""
+    from zall.cli.model_switch import apply_switch
+
+    parsed = _parse_switch_args(arg.split() if arg else [])
+    pos = parsed["positional"]
+    target = pos[0] if pos else ""
+    model_arg = " ".join(pos[1:]).strip() if len(pos) > 1 else ""
     ready = _detect_configured_providers()
     providers = list_providers()  # (key, display, env_var, key_url)
 
-    parts = arg.split() if arg else []
-    persist = False
-    if parts and parts[0] in ("--persist", "-p"):
-        persist = True
-        parts = parts[1:]
-    target = parts[0].lower() if parts else ""
+    cur_model = state.get("model") or _config_status().get("model") or ""
+    cur_provider = state.get("provider") or (_detect_provider(cur_model) if cur_model else "")
 
-    is_tty = hasattr(out, "isatty") and out.isatty()
-    _input_fn = state.get("_input_fn")
-
-    def _do_switch(prov: str) -> str:
-        if prov not in _PROVIDER_REGISTRY:
-            valid = ", ".join(_PROVIDER_REGISTRY.keys())
-            out.write(f"  unknown provider '{prov}'. valid: {valid}\n")
-            return "handled"
-        default_model = get_provider_default_model(prov)
-        if not default_model:
-            out.write(f"  provider '{prov}' has no preset model; use /model <name> to pick one.\n")
-            return "handled"
-        state["model"] = default_model
-        # 切换 provider 后强制重建 adapter (key/base 变更 + httpx 连接池)
-        _ad = state.pop("_adapter", None)
-        if _ad is not None and hasattr(_ad, "close"):
-            try:
-                _ad.close()
-            except Exception:
-                pass
-        out.write(f"  provider \u2192 {get_provider_display(prov)}  [model: {default_model}]\n")
-        if not ready.get(prov, False):
-            _meta = _PROVIDER_REGISTRY[prov]
-            env_var, key_url = _meta[1], _meta[3]
-            if env_var:
-                out.write(f"  \u26a0 no API key detected. set {env_var} or add to ~/.zall/config.toml\n")
-                out.write(f"    get a key: {key_url}\n")
-        if persist:
-            _persist_model_to_config(default_model)
-            out.write("  \u2713 persisted to ~/.zall/config.toml\n")
+    def _do_switch(prov: str, model: str = "", persist: bool = False,
+                   key: str = "", base: str = "") -> str:
+        res = apply_switch(
+            state, loop, provider=prov, model=model or None, persist=persist,
+            inline_key=key or None, inline_base=base or None, persist_key=bool(key),
+        )
+        _print_switch_result(res, out, show_endpoint=True)
         return "handled"
 
     if target:
-        return _do_switch(target)
+        persist = bool(parsed["persist"])
+        if parsed["key"]:
+            persist = True  # key 只给了这一次机会, 顺带落盘才叫"便捷"
+        model_arg = parsed["model"] or model_arg
+        # Argus `use N` 对标: /provider 4 直接切列表第 4 家 — 记住序号就能盲切
+        if target.isdigit():
+            n = int(target)
+            if 1 <= n <= len(providers):
+                return _do_switch(providers[n - 1][0], model_arg, persist,
+                                  parsed["key"], parsed["base"])
+            out.write(f"  invalid selection {n} (1-{len(providers)}) — run /provider to list\n")
+            return "handled"
+        return _do_switch(target, model_arg, persist, parsed["key"], parsed["base"])
 
     # ── 列出 (TTY 下可交互数字选择) ──
     cur_disp = get_provider_display(cur_provider) if cur_provider else "(unset)"
+    is_tty = hasattr(out, "isatty") and out.isatty()
+    _input_fn = state.get("_input_fn")
     if is_tty:
         c = _shared_console(out)
-        c.print(f"  [bold]current provider:[/] [cyan]{cur_disp}[/]")
+        c.print(f"  [bold]current provider:[/] [cyan]{cur_disp}[/]"
+                + (f"  [dim]model: {cur_model}[/]" if cur_model else ""))
         c.print()
         for i, (key, display, _env, _url) in enumerate(providers, 1):
             cfg = "[green]\u00b7 configured[/]" if ready.get(key, False) else "[dim]\u00b7 needs key[/]"
@@ -604,15 +692,17 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
                     return _do_switch(providers[n - 1][0])
                 out.write(f"  invalid selection {n}\n")
                 return "handled"
-            return _do_switch(sel.lower())
-        c.print("  [dim]usage: /provider <name>  (e.g. /provider anthropic)[/]")
+            return _do_switch(sel)
+        c.print("  [dim]usage: /provider <name>  (e.g. /provider anthropic)  \u00b7 takes effect immediately[/]")
     else:
         out.write(f"  current provider: {cur_disp}\n")
         for i, (key, display, _env, _url) in enumerate(providers, 1):
             cfg = "configured" if ready.get(key, False) else "needs key"
             marker = "  <- current" if key == cur_provider else ""
             out.write(f"    {i:2d}. [{get_provider_tag(key)}] {key:12s} {display}  ({cfg}){marker}\n")
-        out.write("  usage: /provider <name>\n")
+        out.write("  usage: /provider <name> [model] [-p] [key=...] [base=...]\n")
+        out.write("         three fields for any OpenAI-compatible endpoint:\n")
+        out.write("         /provider mygw base=https://x.com/v1 key=sk-... model=my-model\n")
     return "handled"
 
 
@@ -703,13 +793,7 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
         if not model_arg:
             _show_model_usage(out)
             return "handled"
-        name = _resolve_model_alias(model_arg)
-        state["model"] = name
-        provider = _detect_provider(name)
-        out.write(f"  model \u2192 {name}  [provider: {_PROVIDER_DISPLAY.get(provider, provider)}]\n")
-        if persist:
-            _persist_model_to_config(name)
-            out.write("  \u2713 persisted to ~/.zall/config.toml\n")
+        _switch_model_and_report(state, loop, model_arg, persist, out, as_model_cmd=True)
         return "handled"
 
     cur = state.get("model") or _config_status().get("model") or "(unset)"
@@ -853,9 +937,7 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
                 c.print(f"  [dim]multiple matches:[/] {', '.join(matches)}")
                 c.print(f"  [dim]selected:[/] {name} [dim](use number to pick specific)[/]")
 
-    state["model"] = name
-    provider = _detect_provider(name)
-    c.print(f"  model → [bold cyan]{name}[/]  [dim]·[/] {_PROVIDER_DISPLAY.get(provider, provider)}")
+    _switch_model_and_report(state, loop, name, False, out)
     return "handled"
 
 

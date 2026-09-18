@@ -57,6 +57,7 @@ class AnthropicAdapter:
         model: str | None = None,
         max_tokens: int = 4096,
         timeout: float = 120.0,
+        prompt_cache: bool | None = None,
     ) -> None:
         cfg = load_config()
         # Try Anthropic-specific key first, then fallback to generic api_key
@@ -90,6 +91,20 @@ class AnthropicAdapter:
                 "Anthropic API key required — set ANTHROPIC_API_KEY env var "
                 "or add api_key to ~/.zall/config.toml"
             )
+
+        # 提示缓存断点 (Codex 对标: 显式缓存控制)。
+        # Anthropic 需要显式 cache_control 断点才有缓存命中; 默认开启 (官方推荐,
+        # 命中后输入成本约 1/10), 兼容网关不支持时可用 config cache.anthropic=false
+        # 或 ZALL_ANTHROPIC_CACHE=0 关掉。
+        if prompt_cache is None:
+            _env = os.environ.get("ZALL_ANTHROPIC_CACHE", "").strip().lower()
+            if _env in ("0", "false", "no", "off"):
+                prompt_cache = False
+            elif _env in ("1", "true", "yes", "on"):
+                prompt_cache = True
+            else:
+                prompt_cache = bool(cfg.get("anthropic_cache", True))
+        self._prompt_cache = bool(prompt_cache)
 
         self._client = None
         if self._api_key:
@@ -189,7 +204,17 @@ class AnthropicAdapter:
         }
 
         if system_parts:
-            body["system"] = "\n".join(system_parts)
+            system_text = "\n".join(system_parts)
+            if self._prompt_cache:
+                # 缓存断点 1: system。Anthropic 前缀顺序是 tools → system → messages,
+                # 所以这个断点同时把工具 schema 纳入缓存 (两者合计通常上万 token)。
+                body["system"] = [{
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"},
+                }]
+            else:
+                body["system"] = system_text
 
         # Convert zall tool schemas to Anthropic format
         # v0.5.0 (B2 fix): zall tool schema uses OpenAI format:
@@ -218,6 +243,14 @@ class AnthropicAdapter:
                 ToolChoice.NONE: {"type": "none"},
             }
             body["tool_choice"] = tc_map.get(tool_choice, {"type": "auto"})
+
+        if self._prompt_cache and api_messages:
+            # 缓存断点 2: 对话滚动断点 (最多 4 个) — 下一轮命中的是"到上一轮为止"的
+            # 前缀。断点打在最后一条消息的最后一个 content block 上。
+            _last_content = api_messages[-1].get("content")
+            if isinstance(_last_content, list) and _last_content:
+                _last_content[-1] = {**_last_content[-1],
+                                     "cache_control": {"type": "ephemeral"}}
 
         # G16: 发前钳制 max_tokens 到剩余窗口 (防 input+requested 超窗 400)。
         # 在 tools 注入后估算 (含 schema 开销), thinking 逻辑之前 —
@@ -344,14 +377,12 @@ class AnthropicAdapter:
                     elif event.type == "message_delta":
                         if event.delta.stop_reason:
                             finish_reason = event.delta.stop_reason
-                        # B6 fix: 捕获stream式 usage 数据
+                        # B6 fix + 缓存记账: 捕获stream式 usage 数据 (含 cache_read/write)
                         if event.usage:
-                            pu = getattr(event.usage, "input_tokens", None) or 0
-                            cu = getattr(event.usage, "output_tokens", None) or 0
-                            if pu:
-                                stream_usage["prompt"] = pu
-                            if cu:
-                                stream_usage["completion"] = cu
+                            parsed_usage = self._usage_from(event.usage)
+                            for _k, _v in parsed_usage.items():
+                                if _v:  # 零值不覆盖 (message_start 给输入, delta 给输出)
+                                    stream_usage[_k] = _v
 
                     elif event.type == "message_stop":
                         break
@@ -395,6 +426,33 @@ class AnthropicAdapter:
             usage=stream_usage if any(stream_usage.values()) else {},
         ))
 
+    @staticmethod
+    def _usage_from(obj: Any) -> dict[str, int]:
+        """Anthropic usage → 规范键 {prompt, cached, cache_write, completion, total}。
+
+        语义换算 (与 OpenAI 系对齐, 便于跨 provider 统计命中率):
+          Anthropic 的 input_tokens **不含** cache_read / cache_creation,
+          所以 prompt = input_tokens + cache_read + cache_creation,
+          cached 是其中的命中部分 (cache_read)。
+        """
+        from zall.core.cache_stats import canonical_usage
+
+        if obj is None:
+            return {}
+        try:
+            it = int(getattr(obj, "input_tokens", 0) or 0)
+            cached = int(getattr(obj, "cache_read_input_tokens", 0) or 0)
+            write = int(getattr(obj, "cache_creation_input_tokens", 0) or 0)
+            out = int(getattr(obj, "output_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            return {}
+        if not (it or cached or write or out):
+            return {}
+        return canonical_usage(
+            prompt=it + cached + write, completion=out,
+            cached=cached, cache_write=write,
+        )
+
     def _parse_response(self, resp: Any) -> ModelResponse:
         """Parse Anthropic response into zall ModelResponse."""
         content = ""
@@ -420,12 +478,7 @@ class AnthropicAdapter:
 
         usage = {}
         if hasattr(resp, "usage") and resp.usage:
-            usage = {
-                "prompt": getattr(resp.usage, "input_tokens", 0),
-                "completion": getattr(resp.usage, "output_tokens", 0),
-                "total": (getattr(resp.usage, "input_tokens", 0) +
-                         getattr(resp.usage, "output_tokens", 0)),
-            }
+            usage = self._usage_from(resp.usage)
 
         return ModelResponse(
             content=content, reasoning=reasoning,

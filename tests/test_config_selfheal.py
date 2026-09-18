@@ -48,6 +48,44 @@ class TestLoaderRobustness:
         assert data["auth"]["api_key"] != "sk-FIRST"
         assert data["model"]["name"] != "agnes-2.5-flash"
 
+    def test_utf8_bom_still_parses_strict(self, tmp_path) -> None:
+        """2026-09-18 实测: 编辑器留下的 UTF-8 BOM 让 tomllib 拒收, 静默回落
+        宽松解析器后 [[providers]] 的数组/数字全部失效 (model_prefixes 变成
+        单字符元组, window_size 失效 → 状态栏显示 32k)。修复: 读取时剥 BOM。"""
+        import sys
+
+        from zall._util.toml import load_toml_simple, _load_toml_fallback
+        body = ('# zall config\n'
+                '[model]\nname = "m"\nwindow_size = 128000\nprice_in = 0.14\n'
+                'flag = true\n'
+                '[[providers]]\nname = "gw"\n'
+                'model_prefixes = ["deepseek-v4-flash", "gw-"]\n')
+        p = tmp_path / "config.toml"
+        p.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+
+        data = load_toml_simple(p)
+        assert data["model"]["window_size"] == 128000
+        assert isinstance(data["model"]["window_size"], int)
+        assert data["model"]["price_in"] == 0.14
+        assert data["model"]["flag"] is True
+        assert data["providers"][0]["model_prefixes"] == ["deepseek-v4-flash", "gw-"]
+        # counterexample: 不再退化为字符串/单字符序列
+        assert data["providers"][0]["model_prefixes"] != '["deepseek-v4-flash", "gw-"]'
+
+        # 宽松解析器自身也要给出一致结果 (3.10 无 tomli 时是唯一路径)
+        if sys.version_info >= (3, 11):
+            fb = _load_toml_fallback(p)
+            assert fb["providers"][0]["model_prefixes"] == ["deepseek-v4-flash", "gw-"]
+            assert fb["model"]["window_size"] == 128000
+
+    def test_quoted_bracket_string_is_not_an_array(self, tmp_path) -> None:
+        """Counterexample: 带引号的 "[...]" 是字符串, 不被当数组拆开。"""
+        from zall._util.toml import _load_toml_fallback
+        p = tmp_path / "cfg.toml"
+        p.write_text('k = "[not, an, array]"\n', encoding="utf-8")
+        data = _load_toml_fallback(p)
+        assert data["k"] == "[not, an, array]"
+
 
 class TestSaveApiKeyDedup:
     def test_save_collapses_duplicate_sections(self, tmp_path, monkeypatch) -> None:

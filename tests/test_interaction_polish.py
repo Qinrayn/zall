@@ -267,6 +267,67 @@ class TestAutosaveRecoveryShowsSummary:
             f"expected saved time in recovery prompt, got: {written}"
         )
 
+    def test_typed_task_during_restore_prompt_is_not_swallowed(
+            self, tmp_path: Path, monkeypatch) -> None:
+        """2026-09-18 实测: 启动恢复提示弹出时用户已在打首条任务, 整行被
+        ask() 吃掉后静默丢弃, 会话空等。修复: 非 y/N 长答案转交 REPL
+        作为 _pending_first_input, 不再吞输入。"""
+        from zall.cli import session as session_mod
+        autosave_path = tmp_path / ".zall" / ".repl_autosave.json"
+        monkeypatch.setattr(session_mod, "_REPL_AUTOSAVE", autosave_path)
+
+        data = {
+            "model": "test-model",
+            "verbose": False,
+            "usage": {"prompt": 10, "completion": 20},
+            "messages": [
+                {"role": "user", "content": "hello", "tool_call_id": None, "tool_calls": []},
+            ],
+            "saved_at": "2026-09-18T10:00:00",
+            "pid": 99999996,
+        }
+        autosave_path.parent.mkdir(parents=True, exist_ok=True)
+        autosave_path.write_text(json.dumps(data), encoding="utf-8")
+
+        out = MagicMock()
+        out.isatty.return_value = True
+        task = "用一句话介绍你自己"
+        state = {"_input_fn": lambda _: task}
+        result = session_mod._check_repl_autosave(out, state)
+
+        assert result is False  # 恢复被拒绝
+        assert state.get("_pending_first_input") == task
+        assert not autosave_path.exists()  # 旧自动存档仍被清理
+
+    def test_explicit_no_does_not_create_pending_input(
+            self, tmp_path: Path, monkeypatch) -> None:
+        """Counterexample: 显式 n/no/空 不产生 pending 输入。"""
+        from zall.cli import session as session_mod
+        for answer in ("n", "no", ""):
+            autosave_path = tmp_path / ".zall" / ".repl_autosave.json"
+            monkeypatch.setattr(session_mod, "_REPL_AUTOSAVE", autosave_path)
+            data = {
+                "model": "test-model",
+                "verbose": False,
+                "usage": {"prompt": 0, "completion": 0},
+                "messages": [
+                    {"role": "user", "content": "hi", "tool_call_id": None, "tool_calls": []},
+                ],
+                "saved_at": "2026-09-18T10:00:00",
+                "pid": 99999995,
+            }
+            autosave_path.parent.mkdir(parents=True, exist_ok=True)
+            autosave_path.write_text(json.dumps(data), encoding="utf-8")
+
+            out = MagicMock()
+            out.isatty.return_value = True
+            state = {"_input_fn": lambda _: answer}
+            session_mod._check_repl_autosave(out, state)
+            assert "_pending_first_input" not in state, (
+                f"answer {answer!r} should not become pending input"
+            )
+            assert not autosave_path.exists()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. HTTP 422 error message contains specific tool schema hint

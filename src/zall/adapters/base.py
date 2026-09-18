@@ -314,11 +314,19 @@ class BaseAdapter:
         """Build a user-friendly error ModelResponse.
 
         Maps common HTTP error codes to readable hints, avoiding raw JSON exposure.
+        404 + "model is not found" 上游语义 (实测 sensenova: api_base 正确但模型 id
+        过期) 时指向模型切换, 而非误导用户去查 api_base。
         """
         hint = _ERROR_MAP.get(
             status_code,
             f"API error (HTTP {status_code}). Check your config with /doctor.",
         )
+        if status_code == 404 and "model" in body.lower() and "not found" in body.lower():
+            hint = (
+                "Model not found on this endpoint (api_base is reachable, the model "
+                "id is not). Run /model to pick a valid model, or check the "
+                "provider's model list."
+            )
         error_raw = {"status": status_code, "body": body[:500]}
         if raw:
             error_raw.update(raw)

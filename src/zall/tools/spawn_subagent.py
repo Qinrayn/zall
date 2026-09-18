@@ -313,6 +313,13 @@ class SpawnSubagentTool:
         self._rules = rules
         self._scope = scope
 
+    def swap_model_provider(self, model_provider: Any) -> None:
+        """替换子代理使用的 model adapter (CLI 层热切换 provider 时同步)。
+
+        tools/rules/scope 保持不变 — 只换"由谁生成子代理的 token"。
+        """
+        self._model_provider = model_provider
+
     @staticmethod
     def _get_parent_cwd_meta() -> Any:
         """获取当前工作目录的 git 信息 (子 agent 与主 agent 同 cwd)。"""

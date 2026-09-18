@@ -215,6 +215,88 @@ def _detect_provider(model_name: str | None = None) -> str:
     return "openai"
 
 
+def _api_base_for(provider: str, cfg: dict[str, Any]) -> str:
+    """解析生效的 api_base (config 优先, 回落 provider 注册表默认)。"""
+    api_base = str(cfg.get("api_base") or "")
+    if not api_base:
+        try:
+            from zall._util.model_registry import _provider_api_bases
+            api_base = _provider_api_bases.get(provider, "") or ""
+        except Exception:
+            api_base = ""
+    return api_base
+
+
+def _host_in_allowlist(api_base: str) -> bool:
+    """api_base 的 host 是否在"已知支持缓存亲和/流式 usage"白名单内。"""
+    from urllib.parse import urlparse as _urlparse
+    try:
+        host = _urlparse(api_base).hostname or ""
+    except ValueError:
+        return False
+    return bool(host) and any(host == h or host.endswith("." + h) for h in _CACHE_KEY_HOSTS)
+
+
+def _prompt_cache_key(cfg: dict[str, Any], provider: str, model: str | None) -> str | None:
+    """缓存亲和键 (Codex prompt_cache_key 对标)。返回 None = 不发送该字段。
+
+    服务端按此键把同一前缀路由到同一缓存分片 → 命中率更高。默认只对已知
+    接受该字段的白名单 host 开启 (未知网关可能因未知字段 400):
+      - ZALL_PROMPT_CACHE_KEY=1/0 或 config [cache] key = true/false 强制/关闭
+    键值取 host + model + cwd 的稳定摘要: 同一项目同一模型 → 同一分片。
+    """
+    import hashlib as _hashlib
+
+    env = os.environ.get("ZALL_PROMPT_CACHE_KEY", "").strip().lower()
+    enabled: bool | None = None
+    if env in ("0", "false", "no", "off"):
+        enabled = False
+    elif env in ("1", "true", "yes", "on"):
+        enabled = True
+    else:
+        v = cfg.get("prompt_cache_key")
+        if isinstance(v, bool):
+            enabled = v
+
+    api_base = _api_base_for(provider, cfg)
+    if enabled is None:
+        enabled = _host_in_allowlist(api_base)
+    if not enabled:
+        return None
+    seed = f"{api_base}|{model or cfg.get('model') or ''}|{os.getcwd()}"
+    return "zall-" + _hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()[:24]
+
+
+def _stream_usage_default(cfg: dict[str, Any], provider: str) -> bool:
+    """流式 usage (include_usage) 默认值。
+
+    缓存命中统计的前提是服务端把 usage 回传; 已知支持的 host 默认开,
+    其余 provider 由 config/ZALL_STREAM_USAGE 显式开 (adapter 遇 400 会自动降级)。
+    """
+    env = os.environ.get("ZALL_STREAM_USAGE", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    v = cfg.get("stream_usage")
+    if isinstance(v, bool):
+        return v
+    return _host_in_allowlist(_api_base_for(provider, cfg))
+
+
+# 已知接受 prompt_cache_key 的 host (OpenAI Chat Completions / Responses 均支持,
+# 或官方文档明示忽略未知字段)。其余 host 走显式开启。
+_CACHE_KEY_HOSTS: tuple[str, ...] = (
+    "api.openai.com",
+    "api.deepseek.com",
+    "open.bigmodel.cn",
+    "dashscope.aliyuncs.com",
+    "api.moonshot.cn",
+    "api.siliconflow.cn",
+    "openrouter.ai",
+)
+
+
 def _build_adapter(provider: str, model: str | None = None, timeout: float | None = None, **extra_kwargs: Any) -> Any:
     """根据 provider typeconstructcorresponds to adapter (Item D: importlib dynamicload, 零 if/elif)。
 
@@ -252,21 +334,56 @@ def _build_adapter(provider: str, model: str | None = None, timeout: float | Non
         # 未知 provider -> fallback 到 OpenAI compatible
         from zall.adapters import OpenAICompatAdapter
         cls = OpenAICompatAdapter
-    kwargs: dict[str, Any] = {"model": model}
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    # F2b: 从 config 注入采样参数 (调用方显式传入的 extra_kwargs 优先)
+    # F2b: 从 config 取采样参数 + provider 作用域的接入点 (一家一个 key,
+    # 切 provider 时各走各的端点; 调用方显式传入的 api_key/api_base 优先)
+    _cfg_for_cache: dict[str, Any] = {}
+    api_key_out = extra_kwargs.pop("api_key", None)
+    api_base_out = extra_kwargs.pop("api_base", None)
     try:
         from zall.safety.config import load_config as _load_cfg
         cfg = _load_cfg()
+        _cfg_for_cache = dict(cfg)
         for k in ("temperature", "max_tokens", "top_p", "reasoning_effort"):
             if k not in extra_kwargs:  # 调用方显式值优先
                 v = cfg.get(k)
                 if v is not None:
                     extra_kwargs[k] = v
+        if api_key_out is None or api_base_out is None:
+            try:
+                from zall.cli.model_switch import provider_endpoint
+                _ep = provider_endpoint(provider, cfg=cfg)
+            except Exception:
+                _ep = None
+            if _ep is not None:
+                if api_key_out is None:
+                    api_key_out = _ep.api_key or None
+                if api_base_out is None:
+                    api_base_out = _ep.api_base or None
     except Exception:
         pass  # config 读取失败不阻塞 adapter 构建
+
+    try:
+        from zall.cli.model_switch import _adapter_ctor_params
+        _params = _adapter_ctor_params(provider, _fallback=cls)
+    except Exception:
+        _params = None
+
+    kwargs: dict[str, Any] = {"model": model}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if api_key_out:
+        kwargs["api_key"] = api_key_out
+    if api_base_out:
+        # api_base → host (ollama 只认 host, 其他 provider 走 api_base)
+        if _params is None or "api_base" in _params:
+            kwargs["api_base"] = api_base_out
+        if _params is not None and "host" in _params and "api_base" not in _params:
+            kwargs["host"] = api_base_out
     kwargs.update(extra_kwargs)
+    # 只把目标构造器真正接受的字段传下去: anthropic/gemini 没有 api_base,
+    # 混传会 TypeError。
+    if _params is not None:
+        kwargs = {k: v for k, v in kwargs.items() if k in _params}
     adapter = cls(**kwargs)
 
     # G15: 故障注入包装 (错误恢复链路的真实会话检验)
@@ -318,7 +435,10 @@ def _merge_custom_providers() -> dict[str, Any]:
     custom_windows: dict[str, int] = {}
     custom_prices: dict[str, tuple[float, float]] = {}
     try:
-        config_path = Path.home() / ".zall" / "config.toml"
+        # 与 load_config 层级单源对齐: 用户级走 safety.config.CONFIG_DIR
+        # (Windows 中文用户名时 Path.home() 可能解析错位), 项目级走 cwd。
+        from zall.safety.config import CONFIG_DIR as _user_config_dir
+        config_path = Path(_user_config_dir) / "config.toml"
         if not config_path.exists():
             config_path = Path.cwd() / ".zall" / "config.toml"
         if not config_path.exists():
@@ -390,8 +510,16 @@ def _clear_provider_registry_cache() -> None:
     _get_provider_registry.cache_clear()
 
 
-def _persist_model_to_config(model_name: str) -> None:
-    """将model名write ~/.zall/config.toml，preserve现有其他段 (fix B1: 不再全量覆写)。"""
+def _persist_model_to_config(
+    model_name: str, api_base: str | None = None, provider: str | None = None
+) -> None:
+    """将model名write ~/.zall/config.toml，preserve现有其他段 (fix B1: 不再全量覆写)。
+
+    api_base: 显式指定要落盘的端点 (切换 provider 时跟随写)。None 时保留
+    config 里已有的值; 没有则按模型名推断 (旧行为)。
+    provider: 同时落盘 provider (切换 provider -p 时写, 使下次启动自动路由到
+              该 provider, 不必依赖模型名前缀匹配)。
+    """
     from zall._util.toml import load_toml_simple as _load_toml_simple
     from zall.safety.config import CONFIG_DIR
     config_path = CONFIG_DIR / "config.toml"
@@ -469,13 +597,19 @@ def _persist_model_to_config(model_name: str) -> None:
                     if has_model:
                         continue  # 去重: 丢弃多余的 [model] 段 (自愈历史损坏)
                     model_cfg = data.get("model", {})
-                    api_base = model_cfg.get("api_base", default_api_base)
+                    # 显式 api_base (切换 provider) > 配置现值 > 按模型推断
+                    api_base = api_base or model_cfg.get("api_base") or default_api_base
                     new_lines.append("[model]\n")
                     new_lines.append(_emit_kv("name", model_name))
                     new_lines.append(_emit_kv("api_base", api_base))
+                    # 显式 provider (切换 provider -p) > 配置现值 > 无则不写
+                    if provider:
+                        new_lines.append(_emit_kv("provider", provider))
+                    elif model_cfg.get("provider"):
+                        new_lines.append(_emit_kv("provider", model_cfg["provider"]))
                     # 保留 [model] 内其他 key (如 timeout / max_tokens)
                     for k, v in model_cfg.items():
-                        if k not in ("name", "api_base"):
+                        if k not in ("name", "api_base", "provider"):
                             new_lines.append(_emit_kv(k, v))
                     has_model = True
                 else:
@@ -493,16 +627,19 @@ def _persist_model_to_config(model_name: str) -> None:
 
     # file不存在或不可parse → 写新template
     # 新文件也写入 api_key = "" 占位（用户需手动配置）
-    config_path.write_text(
+    # 显式 api_base/provider (切换落盘) 优先于按模型名推断的默认值
+    lines_out = (
         "# zall config\n"
         "[auth]\n"
         'api_key = ""\n'
         "\n"
         "[model]\n"
         f'name = "{model_name}"\n'
-        f'api_base = "{default_api_base}"\n',
-        encoding="utf-8",
+        f'api_base = "{api_base or default_api_base}"\n'
     )
+    if provider:
+        lines_out += f'provider = "{provider}"\n'
+    config_path.write_text(lines_out, encoding="utf-8")
 
 
 # _extract_section_name moved to zall._util.toml (O3/B5)

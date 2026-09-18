@@ -463,6 +463,19 @@ class AgentLoop:
         """当前 model adapter (只读)。"""
         return self._model
 
+    def set_model_adapter(self, adapter: ModelAdapter) -> ModelAdapter:
+        """热替换 model adapter (供 CLI /model、/provider 切换使用)。
+
+        返回**旧** adapter — 调用方负责在换入之后关闭它 (顺序不能反: 先换再关,
+        否则运行中的会话会拿着已关闭的连接池发请求, 下一次调用必然失败)。
+
+        loop 的 model 调用点全部实时读 self._model, 所以替换立即生效;
+        持有 adapter 引用的外部组件 (spawn_subagent 等) 由 CLI 层负责同步。
+        """
+        previous = self._model
+        self._model = adapter
+        return previous
+
     @property
     def tool_call_count(self) -> int:
         """当前累计tool调用次数。"""

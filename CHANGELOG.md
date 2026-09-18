@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### 真人实测轮: 4 个实测 bug 修复 + Codex 视觉细节收尾 (2026-09-18)
+
+ConPTY 真实终端驱动 (`scripts/pty_drive2.py`) 模拟真人键入, 对 sensenova (deepseek-v4-flash) 跑通多轮真实对话: 启动 banner、`/status` `/keys` `/mcp` `/stats` `/doctor`、`!shell` 直执行、`@file` 注入、补全菜单、恢复提示、`/quit` 干净退出、429 限流自动重试。
+
+- **修复: 自定义 provider 合并不认 `CONFIG_DIR`** — `_merge_custom_providers` 硬编码 `Path.home()/.zall` 且优先于 cwd, 与 `safety.config` 的单源/层级口径脱节 (Windows 中文用户名下 `Path.home()` 还可能解析错位)。改读 `safety.config.CONFIG_DIR`, cwd 级保留为项目层 fallback。
+- **修复: 404 "model is not found" 误导方向** — api_base 可达但模型 id 过期时 (实测 sensenova 下线 `deepseek-chat`), 旧文案让用户去查 api_base。`make_error_response` 识别 404+model-not-found 语义, 改为指向 `/model` 切换。
+- **修复: 启动恢复提示吞首条任务** — 有残留 autosave 时启动弹 `restore? [y/N]`, 用户此刻已开始打的任务整行被 `ask()` 吃掉且静默丢弃, 会话空等 (实测卡 290s)。非 y/N 长答案现转交 REPL 作为 `_pending_first_input` 首输入, 并提示 "restore declined — your typed text runs as the first task"。
+- **修复: UTF-8 BOM 静默击穿配置解析** — 编辑器/旧版写入留下的 BOM 使 tomllib 拒收, 静默回落宽松解析器, 而 `[[providers]]` 的字符串数组与数字全部失效 (`model_prefixes` 变单字符元组、`window_size=128000` 失效 → 状态栏显示 32k)。`load_toml_simple` 读时剥 BOM; 宽松解析器补齐 单层数组/int/float/bool 解析, 两条路径输出一致。
+- **视觉: 工作态耗时紧凑格式** (Codex `fmt_elapsed_compact` 口径) — spinner/思考/工具/用量行的 elapsed ≥60s 转 `1m 05s` / `59m 59s` / `1h 00m 00s`, 亚分钟保留 0.1s 精度; 长任务一眼读出量级。
+
+### Codex 吸纳轮: 提示缓存工程 + 控制台交互/视觉对齐 (2026-09-17)
+
+学习源: OpenAI Codex CLI (Rust 源码按需研读) — 概念与工程口径吸收, 全原创实现, 不抄代码。zall 自有框架 (可证伪/可复现: 链哈希 timeline、Proof Gate、IPR-3 model-agnostic) 保持不变。
+
+#### 提示缓存 (缓存命中) — 从"看不见"到"可观测 + 可优化"
+- **`core/cache_stats.py` (新)**: `canonical_usage` 把各家 usage 归一为固定键集 (`prompt/cached/cache_write/completion/total`); `CacheStats` 逐次累加出命中率/缓存写入/前缀失效次数; `context_remaining_percent` 用 Codex 口径 (baseline 12k 归一) 算"上下文剩余 %"; `prefix_fingerprint` 给 system+tools 一个稳定摘要。
+- **适配器记账**: openai-compat 收 `prompt_tokens_details.cached_tokens` / DeepSeek `prompt_cache_hit_tokens` / 顶层 `cached_tokens`; Anthropic 收 `cache_read_input_tokens` + `cache_creation_input_tokens` (并把 `prompt` 归一为 input+read+write, 修掉"上下文被低估"的口径问题); Gemini 收 `cached_content_token_count`。流式与非流式同源解析。
+- **请求侧** (Codex `prompt_cache_key` 对标): 已知支持的 host 默认发会话稳定的缓存亲和键 (同项目同模型 → 同一缓存分片); Anthropic 默认打两个 `cache_control: ephemeral` 断点 (system 兼缓存工具 schema + 对话滚动断点), `ZALL_ANTHROPIC_CACHE=0` / config `anthropic_cache=false` 可关。
+- **可观测性**: 缓存命中率进底部状态栏、`/status`、verbose 逐回合用量行; `MODEL_CALL` timeline payload 新增 `prefix_fp` (复现时可核对前缀一致性), 前缀变化计入统计 — 命中与否是**观测量**, 不是估计。
+- **流式 usage 自愈**: 已知 host 默认开 `stream_options.include_usage` (缓存统计的前提); 若 provider 以 400 拒绝该字段, adapter 自动关掉并立即重试一次 — 统计降级但请求不失败。
+
+#### 控制台交互 (Codex 对标)
+- **底部状态栏重排**: 左侧快捷键提示, 右侧右对齐状态 — `ctx NN% left / 128k`(baseline 归一) 与 `cache NN%`; strict/plan 模式徽标随之显示。
+- **工作态状态行**: `⠋ 活动标签 (12s · ctrl-c to interrupt) 1.2k tok` — 括号段固定位置 (Codex StatusIndicator 口径), 长任务一眼掌握"跑了多久/怎么打断"。
+- **审批措辞与范围**: 选项改为"会发生什么"式 (`Yes, proceed` / `No, and tell zall what to do differently` / `Yes, and don't ask again`); **always-allow 收窄到命令前缀** (`git status` 放行不等于放行所有 `git`), 非 bash 工具仍按整工具持久化, 旧 `tool_ids` 文件继续兼容。
+- **新命令/入口**: `/status`(会话配置+用量+缓存+链哈希头)、`/keys`(键位卡片, 裸 `?` 同效)、`/mcp`(配置的 server 与已注册工具)、`/new`(/clear 同义); `!<cmd>` 直接执行 shell (用户显式命令, 不经模型/确认门); verbose 下逐回合打印会话用量行。
+- **压缩摘要** (Codex handoff 口径): 摘要头部改为接手口吻("另一个模型开始了这个任务…接着做而不是重做")并新增 `Objective (latest user request)` 段 — 压缩后模型知道要往哪走, 不只知道做过什么。
+
+#### 视觉 (Codex exec/reasoning cell 口径)
+- 工具调用行改用 Codex 的 `▌` 左侧命令条 + 类型色, 工具结果前缀 `└`, 元信息 (耗时/状态/折叠) 统一 dim 后缀; 与既有 `_C` 槽位/ASCII 回退契约一致 (非 TTY 输出不变)。
+
 ### 控制台交互对齐 Argus: 参数补全 + runall/last + banner/history (2026-09-14)
 - **参数位 TAB 补全** (补齐与 Argus/cmd2 的最大交互差距): 首参之后也有候选 — `/science <TAB>` 全部子命令、`/science run|use|fav add <TAB>` 模块 id (名字前缀命中时给引号名, 与 shlex 解析兼容)、`/science set <TAB>` 选中模块的选项键、`/science profile <TAB>` 预设、`/science fav <TAB>` 子命令、`/science auto <TAB>` 旗标、`/help <TAB>` 全部命令、`/model <TAB>` 模型预设、`/mode <TAB>` 模式。非命令输入 (裸文本/任务) 不受影响 (反例冒烟锁定)。
 - **`/science runall <section|tag:x>`** (Argus do_runall 对标): 整组批跑; 无参 = 全部目录。

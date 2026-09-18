@@ -407,10 +407,16 @@ class ModelCompactor:
         summary = self._generate_summary(to_compact, model)
 
         # 4. construct压缩后的messagelist
+        # 吸收轮 (Codex SUMMARY_PREFIX 对标): 摘要以"接手"口吻给出 —
+        # "另一个模型开始了这个任务, 下面是它的总结, 工具状态就是你看到的那些,
+        #  接着做而不是重做"。比裸摘要更能压制重复劳动。
         compaction_msg = Message(
             role="system",
             content=(
                 f"[CONVERSATION HISTORY SUMMARY — compacted {len(to_compact)} messages]\n"
+                f"Earlier turns of this task were summarized below. The tool results in the "
+                f"current context are real work already done — build on them instead of "
+                f"redoing that work.\n"
                 f"{summary}\n"
                 f"[/SUMMARY — full timeline preserved in Verifiability §6.1]"
             ),
@@ -488,7 +494,17 @@ class ModelCompactor:
         errors = list(dict.fromkeys(errors))[:8]
 
         # build结构化digest (kimi 优先序: errors > decisions > files/commands > 计数)
+        # 吸收轮 (Codex compaction 对标): 摘要必须带"目标" — Codex 的 handoff
+        # summary 首项就是 current progress / next steps; 否则压缩后模型知道
+        # 做过什么、却不知道要往哪走。
         parts: list[str] = []
+        objective = ""
+        for m in reversed(messages):
+            if m.role == "user" and (m.content or "").strip():
+                objective = (m.content or "").strip().split("\n")[0][:160]
+                break
+        if objective:
+            parts.append(f"Objective (latest user request): {objective}")
         if errors:
             parts.append(f"Errors seen: {' || '.join(errors)}")
         if key_decisions:

@@ -54,16 +54,42 @@ class TestAnthropicBuildBody:
         return AnthropicAdapter(api_key="fake-key-test", model="claude-sonnet-4-20250514")
 
     def test_system_prompt_extracted(self) -> None:
-        """system message extracted to top-level system parameter."""
+        """system message extracted to top-level system parameter.
+
+        吸收轮: 默认开启缓存断点时 system 是 block 列表 (文本与断点都在);
+        两种形态都必须保持"内容逐字节不变 + 消息列表不含 system"。
+        """
         adapter = self._make_adapter()
         msgs = [
             Message(role="system", content="You are a helpful assistant."),
             Message(role="user", content="Hello"),
         ]
         body = adapter._build_body(msgs, [], ToolChoice.AUTO)
-        assert body.get("system") == "You are a helpful assistant."
+        system = body.get("system")
+        if isinstance(system, str):
+            assert system == "You are a helpful assistant."
+        else:
+            assert system[0]["text"] == "You are a helpful assistant."
         assert len(body["messages"]) == 1
         assert body["messages"][0]["role"] == "user"
+
+    def test_prompt_cache_breakpoints_toggle(self) -> None:
+        """缓存断点: 默认开 (system + 末条消息); 关掉后请求体回到纯字符串形态。"""
+        from zall.adapters.anthropic import AnthropicAdapter
+        msgs = [
+            Message(role="system", content="sys"),
+            Message(role="user", content="Hello"),
+        ]
+        on = AnthropicAdapter(
+            api_key="fake-key-test", model="claude-sonnet-4-20250514", prompt_cache=True,
+        )._build_body(msgs, [], ToolChoice.AUTO)
+        assert on["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert on["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+        off = AnthropicAdapter(
+            api_key="fake-key-test", model="claude-sonnet-4-20250514", prompt_cache=False,
+        )._build_body(msgs, [], ToolChoice.AUTO)
+        assert off["system"] == "sys"
+        assert "cache_control" not in off["messages"][-1]["content"][-1]
 
     def test_tool_role_mapped_to_user(self) -> None:
         """tool role messages map to user (Anthropic protocol requirement)."""
@@ -489,3 +515,29 @@ class TestGeminiMapStopReasonEdgeCases:
         """Counterexample: "None" string → STOP (does not crash)."""
         from zall.adapters.gemini import GeminiAdapter
         assert GeminiAdapter._map_stop_reason("None") == StopReason.STOP
+
+class TestErrorHintMapping:
+    """make_error_response 404 语义区分 (2026-09-18 实测: sensenova 404
+    "model is not found" 时 api_base 是对的, 旧文案误导用户去查 endpoint)。"""
+
+    def _make_response(self, status: int, body: str) -> Any:
+        from zall.adapters.openai_compat import OpenAICompatAdapter
+        adapter = OpenAICompatAdapter.__new__(OpenAICompatAdapter)
+        return adapter.make_error_response(status, body)
+
+    def test_404_model_not_found_points_to_model_switch(self) -> None:
+        resp = self._make_response(
+            404, '{"error":{"message":"model is not found","type":"not_found_error"}}')
+        assert "Model not found" in resp.content
+        assert "api_base setting" not in resp.content
+        assert "/model" in resp.content
+
+    def test_404_generic_still_points_to_api_base(self) -> None:
+        resp = self._make_response(404, "<html>Not Found</html>")
+        assert "endpoint not found" in resp.content
+        assert "api_base setting" in resp.content
+
+    def test_404_model_word_alone_does_not_trigger(self) -> None:
+        """Counterexample: 404 body 提到 model 但没说 not found → 仍是 endpoint 提示。"""
+        resp = self._make_response(404, '{"error":{"message":"path /v1/chat missing"}}')
+        assert "endpoint not found" in resp.content

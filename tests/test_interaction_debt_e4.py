@@ -365,7 +365,11 @@ class TestAlwaysAllowPersisted:
     """'a' option persists across sessions."""
 
     def test_always_allow_saves_to_disk(self, tmp_path: Path, monkeypatch) -> None:
-        """Pressing 'a' writes the tool_id to always_allow.json."""
+        """Pressing 'a' persists the allow scope to always_allow.json.
+
+        吸收轮 (Codex "don't ask again for commands that start with X" 对标):
+        bash 的 always-allow 存**命令前缀** (范围更窄更安全), 非 bash 工具仍存 tool_id。
+        """
         # Override the always_allow_path to use tmp_path
         def _fake_path() -> Path:
             return tmp_path / ".zall" / "always_allow.json"
@@ -392,7 +396,31 @@ class TestAlwaysAllowPersisted:
         assert allow_path.exists(), "always_allow.json not created"
         data = json.loads(allow_path.read_text(encoding="utf-8"))
         assert "tool_ids" in data, "missing tool_ids key"
-        assert "bash" in data["tool_ids"], "bash not in tool_ids"
+        assert "echo" in data.get("command_prefixes", []), "prefix not persisted"
+        # 同前缀命令不再询问; 不同命令仍然询问 (scope 收窄, 不放大权限)
+        same = r.ask(Action(tool_id="bash", args={"command": "echo again"}), judgement)
+        assert same.response_type == UserResponseType.ACCEPT
+        r._ask = lambda _: "n"  # type: ignore[assignment]
+        other = r.ask(Action(tool_id="bash", args={"command": "rm -rf build"}), judgement)
+        assert other.response_type == UserResponseType.REJECT
+
+    def test_always_allow_tool_scope_for_non_bash(self, tmp_path: Path, monkeypatch) -> None:
+        """非 bash 工具: 'a' 仍按整工具持久化 (前缀只对命令有意义)。"""
+        def _fake_path() -> Path:
+            return tmp_path / ".zall" / "always_allow.json"
+        monkeypatch.setattr("zall.cli.responder._always_allow_path", _fake_path)
+
+        answers = iter(["a"])
+        r = CliUserResponder(yes=False, is_tty=True, ask_fn=lambda _: next(answers),
+                             print_fn=lambda _: None)
+        from zall.core.action import Action
+        from zall.core.gate import UserResponseType
+        from zall.core.safety import Judgement, SafeLevel
+        judgement = Judgement(level=SafeLevel.GREYLIST, matched_rule_ids=("grey_1",))
+        resp = r.ask(Action(tool_id="edit_file", args={"path": "x.py"}), judgement)
+        assert resp.response_type == UserResponseType.ACCEPT
+        data = json.loads(_fake_path().read_text(encoding="utf-8"))
+        assert "edit_file" in data["tool_ids"]
 
     def test_always_allow_loaded_on_new_session(self, tmp_path: Path, monkeypatch) -> None:
         """Counterexample: new session loads persisted permissions."""

@@ -21,13 +21,24 @@ def load_toml_simple(path: Path) -> dict[str, Any]:
 
     Falls back to the built-in minimal parser when neither is available.
     Handles simple [section] / key = value format.
+
+    BOM: 编辑器/旧版写入可能留下 UTF-8 BOM, tomllib 会拒收 (实测 2026-09-18:
+    用户 config 带 BOM → 静默回落宽松解析器 → [[providers]] 数组/数字全失效),
+    故读取时统一剥离。
     """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return _load_toml_fallback(path)
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    text = raw.decode("utf-8", errors="replace")
+
     # Try Python 3.11+ stdlib
     if sys.version_info >= (3, 11):
         try:
             import tomllib
-            with open(path, "rb") as f:
-                return dict(tomllib.load(f))
+            return dict(tomllib.loads(text))
         except ImportError:
             pass
         except Exception:
@@ -39,8 +50,7 @@ def load_toml_simple(path: Path) -> dict[str, Any]:
     # Try tomli backport (optional dependency for Python 3.10)
     try:
         import tomli  # type: ignore[import-not-found]
-        with open(path, "rb") as f:
-            return dict(tomli.load(f))
+        return dict(tomli.loads(text))
     except ImportError:
         pass
     except Exception:
@@ -56,11 +66,15 @@ def _load_toml_fallback(path: Path) -> dict[str, Any]:
 
     Uses shared strip_inline_comment / unquote_value from this module.
     Supports [section] headers, key = value pairs, and [[array-of-tables]].
+
+    值类型: 字符串 / 数字 (int·float) / 布尔 / 单层字符串数组 — 2026-09-18:
+    此前一律返回字符串, [[providers]] 的 model_prefixes (数组) 与
+    window_size/price_* (数字) 全部静默失效。
     """
     config: dict[str, Any] = {}
     current: dict[str, Any] = config
     current_array: list[dict[str, Any]] | None = None
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:
         for line in f:
             s = line.strip()
             if not s or s.startswith("#"):
@@ -83,10 +97,61 @@ def _load_toml_fallback(path: Path) -> dict[str, Any]:
             elif "=" in s:
                 key, _, val = s.partition("=")
                 key = key.strip()
+                # 注意顺序: 先判数组/标量类型再解引号 — 引号内的 "[...]" 是
+                # 字符串不是数组; 数字/布尔/数组由 _parse_scalar_or_array 收敛
                 val = strip_inline_comment(val)
-                val = unquote_value(val.strip())
-                current[key] = val
+                current[key] = _parse_scalar_or_array(val.strip())
     return config
+
+
+def _parse_scalar_or_array(val: str) -> Any:
+    """宽松解析器专用的值解析: 字符串数组 / 数字 / 布尔 / 字符串。
+
+    只支持单层数组 (TOML 多维数组在 zall 配置中无使用场景)。
+    """
+    if val.startswith("[") and val.endswith("]"):
+        inner = val[1:-1].strip()
+        if not inner:
+            return []
+        items: list[str] = []
+        buf: list[str] = []
+        quote: str | None = None
+        i = 0
+        while i < len(inner):
+            ch = inner[i]
+            if quote:
+                if ch == "\\" and quote == '"' and i + 1 < len(inner):
+                    buf.append(ch)
+                    buf.append(inner[i + 1])
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                else:
+                    buf.append(ch)
+            elif ch in ('"', "'"):
+                quote = ch
+            elif ch == ",":
+                items.append("".join(buf).strip())
+                buf = []
+            else:
+                buf.append(ch)
+            i += 1
+        tail = "".join(buf).strip()
+        if tail:
+            items.append(tail)
+        return [unquote_value(item) for item in items if item != ""]
+    if val in ("true", "false"):
+        return val == "true"
+    # 数字 (int / float, 含负号)
+    if val and (val[0].isdigit() or (val[0] in "+-" and len(val) > 1 and val[1].isdigit())):
+        try:
+            if any(c in val for c in ".eE") and "0x" not in val.lower():
+                return float(val)
+            return int(val)
+        except ValueError:
+            pass
+    return unquote_value(val)
 
 
 def strip_inline_comment(val: str) -> str:

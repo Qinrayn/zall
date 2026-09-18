@@ -224,16 +224,21 @@ def _show_guide(out: Any) -> str:
     return "handled"
 
 
-def _rebuild_adapter(state: dict[str, Any] | None) -> None:
-    """设置采样参数后重建 adapter, 使下次对话生效 (复用 /thinking 模式)。"""
+def _rebuild_adapter(state: dict[str, Any] | None, loop: Any | None = None) -> None:
+    """设置配置后重建 adapter — 正在运行的会话立即生效 (不走 /clear)。
+
+    复用 model_switch 热切换: 新 adapter 先换进 loop + 子代理工具, 再关旧的,
+    避免 RuntimeError: client has been closed。
+    """
+    from zall.cli.model_switch import apply_switch
+
     if state is None:
-        return
-    _ad = state.pop("_adapter", None)
-    if _ad is not None and hasattr(_ad, "close"):
-        try:
-            _ad.close()
-        except Exception:
-            pass
+        state = {}
+    cur_model = state.get("model") or ""
+    if not cur_model:
+        return  # 没模型可切, 下一轮对话自然重建
+    cur_provider = state.get("provider") or _detect_provider(cur_model)
+    apply_switch(state, loop, model=cur_model, provider=cur_provider)
 
 
 @slash_command("/config", description="show/set configuration (api_key, api_base, window_size, sampling params)", category=_CATEGORY_CONFIG)

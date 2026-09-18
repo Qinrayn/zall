@@ -30,6 +30,42 @@ from zall.core.gate import UserResponder, UserResponse, UserResponseType
 from zall.core.safety import Judgement, SafeLevel
 
 
+# 多词命令: "don't ask again for commands that start with X" 需要把子命令一起
+# 纳入前缀, 否则 `git` 一个词会把所有 git 动作都放行 (范围过宽)。
+_MULTIWORD_COMMANDS: frozenset[str] = frozenset({
+    "git", "npm", "pnpm", "yarn", "docker", "kubectl", "cargo", "go", "pip",
+    "pip3", "python", "python3", "uv", "poetry", "dotnet", "gh", "make",
+    "pytest", "ruff", "mypy", "terraform", "aws", "gcloud", "az",
+})
+
+
+def _command_prefix(action: Action) -> str | None:
+    """从 action 提取命令前缀 (Codex "commands that start with `X`" 对标)。
+
+    仅对 bash 类命令给前缀; 其他工具返回 None (保持整工具粒度的 always-allow)。
+    前缀 = 首词 (+ 第二词, 当首词是已知多词命令时): `git status --short` → "git status",
+    `pytest -q tests/` → "pytest"。
+    """
+    try:
+        if getattr(action, "tool_id", "") != "bash":
+            return None
+        cmd = str((action.args or {}).get("command", "") or "").strip()
+    except Exception:
+        return None
+    if not cmd:
+        return None
+    # 跳过前导环境变量赋值 (FOO=1 bar → bar)
+    import re as _re
+    cmd = _re.sub(r"^(?:\w+=\S*\s+)+", "", cmd)
+    toks = cmd.split()
+    if not toks:
+        return None
+    first = toks[0]
+    if first in _MULTIWORD_COMMANDS and len(toks) > 1 and not toks[1].startswith("-"):
+        return f"{first} {toks[1]}"
+    return first
+
+
 def _always_allow_path() -> Path:
     """Return the path to the persistent always-allow permissions file."""
     from zall._util.win32 import resolve_home_dir
@@ -94,16 +130,21 @@ class CliUserResponder(UserResponder):
         self._choose_fn = choose_fn
         # v0.0.12: plan_mode (§9.2.5 只读姿态) 标注, 仅影响prompt文案
         self._plan_mode = plan_mode
-        # v0.0.12: session级 "本次允许" 集合 (greylist `a` 触发) —— 不豁免 blacklist
+# v0.0.12: session级 "本次允许" 集合 (greylist `a` 触发) —— 不豁免 blacklist
         self._session_allow: set[str] = set()
         # E4: 跨会话持久化 always_allow 集合
         self._persistent_allow: set[str] = set()
+        # 吸收轮 (Codex 对标): 命令前缀粒度的 always-allow —
+        # "don't ask again for commands that start with `git status`" 比整工具粒度安全
+        self._session_allow_prefixes: set[str] = set()
+        self._persistent_allow_prefixes: set[str] = set()
         self._load_always_allow()
 
     def clear_allow_cache(self) -> None:
         """v0.1.3: 清除session级允许cache。AgentLoop 重建时调用,
         防止上一个对话的 allow 权限泄漏到下一个对话 (B10 fix)。"""
         self._session_allow.clear()
+        self._session_allow_prefixes.clear()
         # E4: 不清除 _persistent_allow (跨会话持久化, 需要显式 /forget-permissions)
 
     # ── E4: 跨会话权限持久化 ──
@@ -112,10 +153,12 @@ class CliUserResponder(UserResponder):
         """E4: 清除所有持久化权限 (对应 /forget-permissions 命令)。"""
         self._persistent_allow.clear()
         self._session_allow.clear()
+        self._persistent_allow_prefixes.clear()
+        self._session_allow_prefixes.clear()
         self._save_always_allow()
 
     def _load_always_allow(self) -> None:
-        """E4: 从磁盘加载 always_allow 权限集。"""
+        """E4: 从磁盘加载 always_allow 权限集 (含前缀粒度)。"""
         try:
             path = _always_allow_path()
             if path.exists():
@@ -123,6 +166,9 @@ class CliUserResponder(UserResponder):
                 raw = data.get("tool_ids", [])
                 if isinstance(raw, list):
                     self._persistent_allow = {str(t) for t in raw if t}
+                raw_p = data.get("command_prefixes", [])
+                if isinstance(raw_p, list):
+                    self._persistent_allow_prefixes = {str(t) for t in raw_p if t}
         except Exception:
             self._persistent_allow = set()
 
@@ -132,6 +178,8 @@ class CliUserResponder(UserResponder):
             path = _always_allow_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             data = {"tool_ids": sorted(self._persistent_allow)}
+            if self._persistent_allow_prefixes:
+                data["command_prefixes"] = sorted(self._persistent_allow_prefixes)
             # E4: 原子写入 (tmp + os.replace), 防止中断损坏文件
             tmp_path = path.with_suffix(".json.tmp")
             tmp_path.write_text(
@@ -145,13 +193,18 @@ class CliUserResponder(UserResponder):
     def ask(self, action: Action, judgement: Judgement) -> UserResponse:
         """根据 judgement.level 决定如何问 user (§4.5)。"""
         # §3.4.4 GoalDowngrade: 专gate的downgradeconfirmprompt (downgrade是 Goal 层面,
-        # 不走 greylist/blacklist 通路; 之前 CliUserResponder 从不return
-        # ACCEPT_DOWNGRADE, 导致downgrade特性是死代码)
+        # 不走 greylist/blacklist 通路; 之前 CliUserResponder 从不return ACCEPT_DOWNGRADE,
+        # 导致downgrade特性是死代码)
         if action.tool_id == "__goal_downgrade__":
             return self._ask_downgrade(action, judgement)
         if judgement.level == SafeLevel.GREYLIST:
             # E4: 检查持久化 + session级 allow (不豁免 blacklist)
             if action.tool_id in self._persistent_allow or action.tool_id in self._session_allow:
+                return UserResponse(response_type=UserResponseType.ACCEPT)
+            # 前缀粒度 allow (Codex 对标): 只放行同一命令前缀
+            prefix = _command_prefix(action)
+            if prefix and (prefix in self._persistent_allow_prefixes
+                           or prefix in self._session_allow_prefixes):
                 return UserResponse(response_type=UserResponseType.ACCEPT)
             return self._ask_greylist(action, judgement)
         if judgement.level == SafeLevel.BLACKLIST:
@@ -397,16 +450,25 @@ class CliUserResponder(UserResponder):
         if self._ask is input:
             flush_stdin_typeahead()
 
-        raw = self._collect_greylist_choice()
+        raw = self._collect_greylist_choice(action)
 
         if raw in ("y", "yes"):
             return UserResponse(response_type=UserResponseType.ACCEPT)
         if raw in ("a", "always"):
-            # E4: 跨会话持久化允许该tool
-            self._session_allow.add(action.tool_id)
-            self._persistent_allow.add(action.tool_id)
-            self._save_always_allow()
-            self._print(f"  \u2713 always allowed: {action.tool_id}")
+            # 吸收轮 (Codex 对标): 能推导命令前缀时按前缀放行 (范围更窄更安全);
+            # 否则退回整工具粒度。
+            prefix = _command_prefix(action)
+            if prefix:
+                self._session_allow_prefixes.add(prefix)
+                self._persistent_allow_prefixes.add(prefix)
+                self._save_always_allow()
+                self._print(f"  \u2713 always allowed: commands starting with `{prefix}`")
+            else:
+                # E4: 跨会话持久化允许该tool
+                self._session_allow.add(action.tool_id)
+                self._persistent_allow.add(action.tool_id)
+                self._save_always_allow()
+                self._print(f"  \u2713 always allowed: {action.tool_id}")
             return UserResponse(response_type=UserResponseType.ACCEPT)
         if raw in ("e", "edit"):
             # MODIFY: 让用户就地修改parameter, return新 Action 经 gate 重判
@@ -433,24 +495,43 @@ class CliUserResponder(UserResponder):
         # default / n / no / 空 → reject
         return UserResponse(response_type=UserResponseType.REJECT)
 
-    # greylist 主选择项 (value 必须匹配下方 _ask_greylist 的 raw 解析)
+    # greylist 主选择项 (value 必须匹配下方 _ask_greylist 的 raw 解析)。
+    # 措辞走 Codex 口径 (Yes, proceed / don't ask again / tell the model what to
+    # do differently): 选项读起来是"会发生什么", 而不是抽象动词。
     _GREYLIST_CHOICES: list[tuple[str, str, str]] = [
-        ("y", "allow once", "run this tool call"),
-        ("n", "reject", "skip this tool call"),
-        ("f", "reject + why", "reject and tell the model what to do instead"),
-        ("a", "always allow", "auto-allow this tool this session"),
-        ("e", "edit params", "modify parameters then decide"),
+        ("y", "Yes, proceed", "run this tool call once"),
+        ("n", "No, continue without it", "skip this tool call"),
+        ("f", "No, and tell zall what to do differently",
+         "reject with a reason the model can act on"),
+        ("a", "Yes, and don't ask again", "auto-allow this tool this session"),
+        ("e", "Yes, but edit the parameters first", "modify parameters then decide"),
     ]
 
-    def _collect_greylist_choice(self) -> str:
+    def _greylist_choices_for(self, action: Action) -> list[tuple[str, str, str]]:
+        """greylist 选项 (Codex 措辞对标): 可推导命令前缀时, 'always' 说清作用域。
+
+        值集固定 y/n/f/a/e — 决策映射仍是唯一真源; 只有展示文案随 action 变化。
+        """
+        prefix = _command_prefix(action)
+        if not prefix:
+            return list(self._GREYLIST_CHOICES)
+        out: list[tuple[str, str, str]] = []
+        for value, label, desc in self._GREYLIST_CHOICES:
+            if value == "a":
+                desc = f"auto-allow commands starting with `{prefix}` this session"
+            out.append((value, label, desc))
+        return out
+
+    def _collect_greylist_choice(self, action: Action) -> str:
         """收集 greylist 主选择, 返回 y/n/a/e/s 之一 (小写)。
 
         choose_fn (方向/数字键选择器) 优先; 否则文本回退 (原 [y]es[n]o... + Allow?)。
         空/异常/EOF → 'n' (reject, 安全默认)。决策映射仍在 _ask_greylist (唯一真源)。
         """
+        choices = self._greylist_choices_for(action)
         if self._choose_fn is not None:
             try:
-                return (self._choose_fn(self._GREYLIST_CHOICES) or "n").strip().lower()
+                return (self._choose_fn(choices) or "n").strip().lower()
             except Exception:
                 return "n"
         if self._is_tty:

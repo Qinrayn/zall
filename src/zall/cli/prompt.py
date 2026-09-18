@@ -80,31 +80,84 @@ def _build_pt_style() -> Any:
         return None
 
 
-def build_toolbar_text(state: dict[str, Any] | None) -> str | None:
-    """组成底部状态行文本 (学 Pi/Claude): model · 上下文占用% · 模式 · 键位提示。
+def _footer_right_segments(state: dict[str, Any]) -> list[str]:
+    """footer 右侧状态段 (Codex footer 对标): 模式 · context left · cache 命中。
 
-    纯函数 (无 prompt_toolkit 依赖), 可单测。state=None/空 → None (不显 toolbar)。
-    ctx_tokens 由 usage observer 实时刷新; window 查自 model_registry。
+    - 模式: plan / fast (strict 为默认, 不占位)
+    - context left: baseline-normalized (Codex 口径, 见 core.cache_stats)
+    - cache: 命中率 (有缓存数据才显示, 无则省略 — 不显示"0%"误导)
     """
-    if not state:
-        return None
-    model = state.get("model") or "zall"
-    parts = [str(model)]
+    right: list[str] = []
+    if state.get("strict"):
+        right.append("strict mode")
+    if state.get("plan_mode"):
+        right.append("plan mode")
+    model = str(state.get("model") or "")
     ctx = int(state.get("ctx_tokens", 0) or 0)
     if ctx:
         try:
             from zall._util.model_registry import get_window_size
-            window = int(get_window_size(str(model)) or 0)
+            from zall.core.cache_stats import context_remaining_percent
+            window = int(get_window_size(model) or 0)
+            pct = context_remaining_percent(ctx, window)
+            if pct is not None:
+                right.append(f"ctx {pct}% left / {window // 1000}k")
+            else:
+                right.append(f"ctx {ctx} tok")
         except Exception:
-            window = 0
-        if window > 0:
-            parts.append(f"ctx {min(100, ctx * 100 // window)}% / {window // 1000}k")
+            right.append(f"ctx {ctx} tok")
+    stats = state.get("cache_stats")
+    try:
+        if stats is not None and getattr(stats, "has_cache_data", False):
+            right.append(stats.format_summary(with_write=False))
         else:
-            parts.append(f"ctx {ctx} tok")
-    if state.get("plan_mode"):
-        parts.append("plan")
-    parts.append("/ commands \u00b7 @ files \u00b7 Ctrl-D exit")
-    return "  " + "  \u00b7  ".join(parts)
+            usage = state.get("usage") or {}
+            c = int(usage.get("cached", 0) or 0)
+            p = int(usage.get("prompt", 0) or 0)
+            if c and p:
+                right.append(f"cache {round(c * 100 / p)}%")
+    except Exception:
+        pass
+    return right
+
+
+def build_footer_line(state: dict[str, Any] | None, *, width: int | None = None) -> str | None:
+    """Codex 式 footer: 左侧快捷键提示, 右侧状态 (右对齐; 窄终端退化为单空格连接)。
+
+    width=None → 不做右对齐 (纯连接, 供非 TTY/测试断言使用)。
+    """
+    if not state:
+        return None
+    model = str(state.get("model") or "zall")
+    left_segs = [model, "? shortcuts", "/ commands", "@ files"]
+    left = "  " + "  \u00b7  ".join(left_segs)
+    right_segs = _footer_right_segments(state)
+    if not right_segs:
+        return left
+    right = "  \u00b7  ".join(right_segs) + "  "
+    if not width or width <= 0:
+        return f"{left}    {right}"
+    pad = width - len(left) - len(right)
+    if pad < 2:
+        return f"{left}  {right.strip()}"
+    return f"{left}{' ' * pad}{right}"
+
+
+def build_toolbar_text(state: dict[str, Any] | None) -> str | None:
+    """底部状态行文本 (学 Pi/Claude/Codex): model · 键位提示 ……… ctx% left · cache。
+
+    纯函数 (无 prompt_toolkit 依赖), 可单测。state=None/空 → None (不显 toolbar)。
+    ctx_tokens 由 usage observer 实时刷新; window 查自 model_registry;
+    右对齐宽度取终端列数 (取不到则不做对齐)。
+    """
+    if not state:
+        return None
+    try:
+        import shutil as _shutil
+        width = int(_shutil.get_terminal_size((100, 24)).columns)
+    except Exception:
+        width = 0
+    return build_footer_line(state, width=width)
 
 
 # ── 参数位补全 (Argus/cmd2 子命令+choices 补全对标) ──
@@ -226,6 +279,27 @@ def _complete_argument(cmd: str, prev: list[str], frag: str) -> list[tuple[str, 
             return _prefixed([(a, f"{n} · {p}") for a, n, _note, p in _MODEL_PRESETS], frag)
         except Exception:
             return []
+    if cmd in ("/provider", "/prov"):
+        # Argus `use N` 补全对标: provider 名 + 数字序号 + 三件套标记 (key=/base=/-p)
+        try:
+            from zall._util.model_registry import list_providers
+            cands = [(k, f"{d} · {('env ' + str(env)) if env else 'key required'}")
+                     for k, d, env, _url in list_providers()]
+        except Exception:
+            cands = []
+        if not prev:
+            numbered = [(str(i), f"{k} · {d}") for i, (k, d, _e, _u)
+                        in enumerate(list_providers(), 1)] if cands else []
+            return _prefixed(cands + numbered + [("-p", "persist")], frag)
+        last = prev[-1].lower()
+        if last.startswith("key=") or last.startswith("base="):
+            return _prefixed([("model=", "model id")], frag)
+        if last.startswith("model="):
+            return []
+        flags = [("key=", "api key (saved to [keys])"),
+                 ("base=", "custom endpoint url"),
+                 ("model=", "model id"), ("-p", "persist")]
+        return _prefixed(flags, frag)
     if cmd == "/mode" and not prev:
         return _prefixed([("strict", "full confirm/downgrade gates"),
                           ("fast", "skip confirmation extras")], frag)

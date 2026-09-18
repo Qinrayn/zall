@@ -329,15 +329,17 @@ class GeminiAdapter:
         if stop_reason == StopReason.TOOL_USE and not tool_calls:
             stop_reason = StopReason.STOP
 
-        # Extract usage if available
+        # Extract usage if available (含缓存: Gemini 的 cached_content_token_count
+        # 是 prompt_token_count 的子集 — 命中已缓存的上下文)
         usage = {}
         if hasattr(resp, "usage_metadata") and resp.usage_metadata:
-            usage = {
-                "prompt": getattr(resp.usage_metadata, "prompt_token_count", 0),
-                "completion": getattr(resp.usage_metadata, "candidates_token_count", 0),
-                "total": (getattr(resp.usage_metadata, "prompt_token_count", 0) +
-                         getattr(resp.usage_metadata, "candidates_token_count", 0)),
-            }
+            from zall.core.cache_stats import canonical_usage
+            _meta = resp.usage_metadata
+            usage = canonical_usage(
+                prompt=int(getattr(_meta, "prompt_token_count", 0) or 0),
+                completion=int(getattr(_meta, "candidates_token_count", 0) or 0),
+                cached=int(getattr(_meta, "cached_content_token_count", 0) or 0),
+            )
 
         # SAFETY/RECITATION 映射为 STOP 但附加截断警告，
         # 避免掩盖内容被安全策略截断的事实 (与 openai_compat content_filter 处理一致)

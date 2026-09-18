@@ -19,6 +19,7 @@ import time
 from typing import Any
 
 from zall._util.logging import get_zall_logger as _get_zall_logger
+from zall.core.cache_stats import prefix_fingerprint
 from zall.core.loop_events import LoopEvent
 from zall.core.model import ModelResponse, StopReason, ToolChoice
 from zall.core.verifiability import EventType
@@ -69,6 +70,14 @@ def call_model(loop: Any, *, emit_model_call: bool = True) -> ModelResponse:
             tool_choice=ToolChoice.AUTO,
         )
 
+    # 缓存前缀指纹 (吸收轮: Codex prompt-cache 口径) — 静态前缀 (system + tools)
+    # 的稳定摘要。变化 = 缓存前缀失效的可观测证据 (呈现层据此提示, 不猜)。
+    # 只覆盖静态前缀: 历史是 append-only (含动态注入), 天然保持缓存友好。
+    system_text = ""
+    if loop._chat_state.messages and loop._chat_state.messages[0].role == "system":
+        system_text = loop._chat_state.messages[0].content or ""
+    prefix_fp = prefix_fingerprint(system_text, tool_schemas)
+
     # 记录 model_call event (stream式/blocking共用同一record point)
     # §6.2 replay 要求 timeline 存完整 ModelResponse (不只digest)
     # B2 fix: 同时存储真实 usage 数据, 供 /undo 校正使用
@@ -90,7 +99,10 @@ def call_model(loop: Any, *, emit_model_call: bool = True) -> ModelResponse:
                 for tc in resp.tool_calls
             ],
             # B2: 真实 usage 数据, 供 _recalc_usage_from_timeline 使用
+            # (规范键含 cached/cache_write — 缓存命中率可从 timeline 复算)
             "usage": dict(resp.usage) if resp.usage else {},
+            # 缓存前缀指纹 (§6.1 全保真): 复现时可比对前缀是否与当时一致
+            "prefix_fp": prefix_fp,
         },
     )
     # §6.1 呈现层投影: 同一record pointbroadcast给 observer

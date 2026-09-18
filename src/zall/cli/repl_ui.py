@@ -117,7 +117,19 @@ def _read_multiline_input(prompt: str, input_fn: Any) -> str | None:
 
 def _print_banner(out: Any, *, model: str | None, branch: str | None,
                   max_steps: int, verbose: bool, plan: bool = False) -> None:
-    """REPL banner — Obsidian 框式 header (v1.4: 恢复框式设计 + 呼吸空行)。"""
+    """REPL 启动屏 — Codex 式信息盒 (v0.6: 左对齐键值, 弃居中字距版)。
+
+    布局对标 Codex CLI:
+      ╭──────────────────────────────╮
+      │ >_ zall (vX.Y.Z)             │
+      │                              │
+      │ model:     <model>  /model   │
+      │ directory: ~/zall            │
+      │ branch:    master            │
+      ╰──────────────────────────────╯
+        Tip: / commands · @ files · ? shortcuts · ! shell
+    非 TTY (管道/CI) 降级为单行文本 — 输出契约不变。
+    """
     try:
         import os as _os
         if _os.name == "nt":
@@ -133,22 +145,7 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
     else:
         from zall.cli.config import _config_status
         display_model = _config_status().get("model") or "unset"
-    # 简洁大气版启动屏 — 单层圆角细框: 顶边中置 ◆ 徽记 (过闸的证明),
-    # 底边嵌版本装备行; 框内: 字距舒展的 zall + 一句描述 + 运行态。
-    # 无块字/无噪声; 非 TTY 或 ASCII 字形回退时降级为纯文本 (管道/CI 契约不变)。
     from zall import __version__
-    equip_parts = [f"v{__version__}"]
-    try:
-        from zall.cli.commands import get_palette_commands
-        equip_parts.append(f"{len(get_palette_commands())} commands")
-    except Exception:
-        pass
-    try:
-        from zall.extensions.science.catalog import load_catalog
-        equip_parts.append(f"{len(load_catalog())} research modules")
-    except Exception:
-        pass
-    equip_line = "  \u00b7  ".join(equip_parts)
 
     from zall.cli.render import _is_tty
     if not _is_tty(out):
@@ -167,57 +164,192 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
     except Exception:
         ascii_mode = False
 
-    if ascii_mode:
-        # ASCII 回退: 名字上边框, 框内不再重复; 无 ◆ (异体宽字符免错位)
-        name = None
-        border_title = "zall"
-        panel_box = _box.ASCII
-    else:
-        name = _Text("z a l l", style=f"bold {_C.ACCENT}", justify="center")
-        border_title = "\u25c6"
-        panel_box = _box.ROUNDED
+    # 目录显示: home 折叠为 ~ (Codex 口径)
+    try:
+        cwd_str = str(__import__("pathlib").Path.cwd())
+        home_str = str(__import__("pathlib").Path.home())
+        if cwd_str == home_str:
+            cwd_disp = "~"
+        elif cwd_str.startswith(home_str + __import__("os").sep):
+            cwd_disp = "~" + cwd_str[len(home_str):]
+        else:
+            cwd_disp = cwd_str
+    except Exception:
+        cwd_disp = "."
 
-    desc = _Text("a falsifiable, reproducible coding agent", style=_C.SUBTLE, justify="center")
-    meta_parts = [display_model]
+    def _kv(label: str, value: str, hint: str = "") -> _Text:
+        t = _Text()
+        t.append(f"{label:<11}", style=_C.DIM)
+        t.append(value, style=_C.STATUS_BAR_TEXT)
+        if hint:
+            t.append(f"   {hint}", style=_C.DIM)
+        return t
+
+    header = _Text()
+    header.append(">_", style=_C.DIM)
+    header.append(" zall ", style=f"bold {_C.ACCENT}")
+    header.append(f"(v{__version__})", style=_C.DIM)
+
+    body: list[Any] = [header, _Text("")]
+    body.append(_kv("model:", display_model, "/model to change"))
+    body.append(_kv("directory:", cwd_disp))
     if branch:
-        meta_parts.append(branch)
+        body.append(_kv("branch:", branch))
     if plan:
-        meta_parts.append("plan")
+        body.append(_kv("mode:", "plan (read-only)"))
     if verbose:
-        meta_parts.append("verbose")
-    meta = _Text("  \u00b7  ".join(meta_parts), style=_C.DIM, justify="center")
+        body.append(_kv("verbose:", "on"))
 
-    body_parts: list[Any] = [_Text("")]
-    if name is not None:
-        body_parts.append(name)
-    body_parts.extend([desc, _Text(""), meta, _Text("")])
     panel = _Panel(
-        _Group(*body_parts),
-        title=border_title,
-        subtitle=equip_line,
-        title_align="center",
-        subtitle_align="center",
-        border_style=_C.ACCENT2,
-        box=panel_box,
-        padding=(0, 6),
+        _Group(*body),
+        box=_box.ASCII if ascii_mode else _box.ROUNDED,
+        border_style=_C.SUBTLE,
+        padding=(0, 2),
         expand=False,
     )
     console.print()
     console.print(_Align(panel, align="center"))
+    # Tip 行 (Codex "Tip:" 对标)
+    console.print(
+        f"  [{_C.SUBTLE}]Tip:[/] "
+        f"[{_C.DIM}]/ commands \u00b7 @ files \u00b7 ? shortcuts \u00b7 ! shell \u00b7 Ctrl-D exit[/]"
+    )
     console.print()
+
+
+def _format_status_context(state: dict[str, Any]) -> str:
+    """上下文剩余短句 ("62% left") — 供状态行/命令后回显 (Codex footer 口径)。"""
+    ctx = int(state.get("ctx_tokens", 0) or 0)
+    if not ctx:
+        return ""
+    model = str(state.get("model") or "")
+    try:
+        from zall._util.model_registry import get_window_size
+        from zall.core.cache_stats import context_remaining_percent
+        pct = context_remaining_percent(ctx, int(get_window_size(model) or 0))
+    except Exception:
+        pct = None
+    return f"ctx {pct}% left" if pct is not None else f"ctx {ctx} tok"
+
+
+def _format_status_cache(state: dict[str, Any]) -> str:
+    """缓存命中短句 — CacheStats 优先, 回落 usage 累计 (无数据 → 空串)。"""
+    stats = state.get("cache_stats")
+    if stats is not None and getattr(stats, "has_cache_data", False):
+        try:
+            return stats.format_summary(with_write=False)
+        except Exception:
+            pass
+    usage = state.get("usage") or {}
+    cached = int(usage.get("cached", 0) or 0)
+    prompt = int(usage.get("prompt", 0) or 0)
+    if cached and prompt:
+        return f"cache {round(cached * 100 / prompt)}%"
+    return ""
+
+
+def _run_shell_passthrough(cmd: str, out: Any) -> None:
+    """`!cmd` — 直接执行 shell 命令 (Codex "! for shell commands" 对标)。
+
+    这是用户显式敲的命令 (不是模型提议), 所以不进确认门; 走 zall 自己的 bash
+    执行器 (同一 shell 选择/超时/截断纪律), 输出只进 transcript —
+    不进模型上下文 (与 Codex 语义一致: 想看就自己贴回去)。
+    """
+    if not cmd:
+        out.write("  usage: !<shell command>   (runs directly, bypassing the agent)\n")
+        out.flush()
+        return
+    try:
+        from zall.tools.bash import BashTool
+        result = BashTool().execute({"command": cmd, "timeout": 120})
+    except Exception as e:  # 执行器异常不吞: 明确报出
+        out.write(f"  \u2717 shell error: {e}\n")
+        out.flush()
+        return
+    body = (result.output or "").rstrip("\n")
+    out.write(f"  $ {cmd}\n")
+    # BashTool 的 output 是给模型看的 (首行 exit_code + stdout:/stderr: 段头);
+    # 直接执行时剥掉这些包装, 只留命令自己的输出 (stderr 段保留并标出)。
+    lines = body.split("\n") if body else []
+    if lines and lines[0].startswith("exit_code:"):
+        lines = lines[1:]
+    clean: list[str] = []
+    in_stderr = False
+    _err_prefix = "\u2502 "
+    for ln in lines:
+        if ln.strip() == "stdout:":
+            in_stderr = False
+            continue
+        if ln.strip() == "stderr:":
+            in_stderr = True
+            continue
+        clean.append(_err_prefix + ln if in_stderr else ln)
+    body = "\n".join(clean).strip("\n")
+    if body:
+        out.write(body + "\n")
+    code = (getattr(result, "artifacts", None) or {}).get("exit_code")
+    if code is None:
+        code = 0 if getattr(result, "success", False) else 1
+    marker = "\u2713" if int(code) == 0 else "\u2717"
+    out.write(f"  {marker} exit {int(code)}\n")
+    out.flush()
+
+
+def _format_turn_usage(state: dict[str, Any]) -> str:
+    """会话累计用量行 (Codex FinalOutput 展示口径, verbose 时逐回合打印)。"""
+    usage = state.get("usage") or {}
+    if not usage:
+        return ""
+    from zall.core.cache_stats import format_tokens
+    prompt = int(usage.get("prompt", 0) or 0)
+    cached = int(usage.get("cached", 0) or 0)
+    completion = int(usage.get("completion", 0) or 0)
+    blended = max(0, prompt - cached) + completion
+    line = f"session tokens: total {format_tokens(blended)} input {format_tokens(max(0, prompt - cached))}"
+    if cached:
+        line += f" (+ {format_tokens(cached)} cached)"
+    line += f" output {format_tokens(completion)}"
+    cache_note = _format_status_cache(state)
+    if cache_note:
+        line += f" \u00b7 {cache_note}"
+    return line
 
 
 def _echo_status(state: dict[str, Any]) -> None:
     """命令后回显状态行 (Argus _print_status_bar 纪律)。
 
+    吸收轮: 回显前先把实时用量 (上下文剩余/缓存命中) 推给 renderer —
+    用户每条命令后都能看到"现在什么状态"。
     renderer 缺席/非 TTY 时静默 — 管道与 CI 输出契约不受影响。
     """
     renderer = state.get("_renderer")
-    if renderer is not None and hasattr(renderer, "render_status_bar"):
-        try:
-            renderer.render_status_bar(force=True)
-        except Exception:
-            pass
+    if renderer is None or not hasattr(renderer, "render_status_bar"):
+        return
+    try:
+        if hasattr(renderer, "update_status"):
+            from zall.cli.environment import get_cached_cwd_meta
+            loop = state.get("_loop")
+            goal = ""
+            try:
+                if loop is not None and hasattr(getattr(loop, "goal", None), "statement"):
+                    goal = loop.goal.statement.goal_type.value
+            except Exception:
+                goal = ""
+            try:
+                branch = get_cached_cwd_meta(state).git_branch or ""
+            except Exception:
+                branch = ""
+            renderer.update_status(
+                model=str(state.get("model") or ""),
+                branch=branch,
+                goal=goal,
+                plan=bool(state.get("plan_mode", False)),
+                context=_format_status_context(state),
+                cache=_format_status_cache(state),
+            )
+        renderer.render_status_bar(force=True)
+    except Exception:
+        pass
 
 
 def build_repl_loop(
@@ -477,8 +609,15 @@ def repl(
         while True:
             try:
                 _ensure_new_line()  # G10: 工具输出无尾换行时补行, 提示符不接行尾
-                prompt = _prompt(state)
-                line = _read_multiline_input(prompt, input_fn)
+                # 恢复提示期间被提前敲入的首条任务 (session._check_repl_autosave 转交)
+                pending = state.pop("_pending_first_input", None)
+                if pending is not None:
+                    line = pending
+                    out.write(f"{_prompt(state)}{line}\n")
+                    out.flush()
+                else:
+                    prompt = _prompt(state)
+                    line = _read_multiline_input(prompt, input_fn)
             except EOFError:
                 out.write("\n  bye\n")
                 return 0
@@ -523,6 +662,17 @@ def repl(
                     # Argus _print_status_bar 纪律: 命令后回显当前状态行
                     _echo_status(state)
                     continue
+
+            # Codex 交互对标: 裸 "?" = 快捷键卡片 (TUI 内 ? 浮层的控制台同源)
+            if line == "?":
+                from zall.cli.commands.system import _print_shortcuts
+                _print_shortcuts(out)
+                _echo_status(state)
+                continue
+            # Codex "! for shell commands": 用户显式命令直接执行, 不经过模型
+            if line.startswith("!") and len(line) > 1:
+                _run_shell_passthrough(line[1:].strip(), out)
+                continue
 
             # v2.x: @file 引用展开 — 把 @path 解析到的真实文件内容注入消息 (Claude Code 式)。
             # 只展开真实文件; 非文件 @token 原样保留。slash 命令已在上方返回, 不受影响。
@@ -669,6 +819,11 @@ def repl(
                     # v1.2: 上下文 footer 提示 (借鉴 Claude Code)
                     if renderer is not None and hasattr(renderer, "render_contextual_hint"):
                         renderer.render_contextual_hint("idle")
+                    # verbose: 会话累计用量行 (Codex FinalOutput 口径)
+                    if state.get("verbose"):
+                        _usage_line = _format_turn_usage(state)
+                        if _usage_line:
+                            out.write(f"  {_usage_line}\n")
                     out.write("\n")
                     break
             out.flush()

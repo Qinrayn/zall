@@ -417,3 +417,26 @@ class TestGoalCard:
         buf = io.StringIO()
         render_goal_card(self._goal(), "none", buf)
         assert "\x1b[" not in buf.getvalue()
+
+
+class TestFmtElapsedCompact:
+    """工作态耗时紧凑格式 (Codex fmt_elapsed_compact 口径, 2026-09-18)。"""
+
+    def test_sub_minute_keeps_precision(self) -> None:
+        from zall.cli.render import fmt_elapsed_compact
+        assert fmt_elapsed_compact(0.4) == "0.4s"
+        assert fmt_elapsed_compact(12.45) == "12.4s"
+        assert fmt_elapsed_compact(59.96) == "1m 00s"  # 边界: 不出现 "60.0s"
+
+    def test_minutes_and_hours(self) -> None:
+        from zall.cli.render import fmt_elapsed_compact
+        assert fmt_elapsed_compact(60) == "1m 00s"
+        assert fmt_elapsed_compact(65.3) == "1m 05s"
+        assert fmt_elapsed_compact(3599) == "59m 59s"
+        assert fmt_elapsed_compact(3600) == "1h 00m 00s"
+        assert fmt_elapsed_compact(7389) == "2h 03m 09s"
+
+    def test_counterexample_negative_not_crash(self) -> None:
+        """Counterexample: 时钟回拨产生的负值不崩, 按亚分钟格式化。"""
+        from zall.cli.render import fmt_elapsed_compact
+        assert fmt_elapsed_compact(-1.2).endswith("s")
