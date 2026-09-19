@@ -628,7 +628,12 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
     """
     if state is None:
         state = {}
-    from zall.cli.model_switch import apply_switch
+    from zall.cli.model_switch import (
+        _KNOWN_GATEWAYS,
+        apply_switch,
+        probe_models,
+        resolve_gateway,
+    )
 
     parsed = _parse_switch_args(arg.split() if arg else [])
     pos = parsed["positional"]
@@ -666,6 +671,80 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
                 return _do_switch(prov, key=k)
         return _do_switch(prov)
 
+    # ── 智能网关 (2026-09-19 反馈: "只能选列表里的提供商") ──
+    # 目录名/别名/任意 URL 直接接: base 自动补全, key 询问一次, 模型列表
+    # 自动探测并让用户挑 — "三件套"压缩成"一个名字 + 一把 key"。
+    is_tty = hasattr(out, "isatty") and out.isatty()
+    _input_fn = state.get("_input_fn")
+
+    def _gateway_ask_key(name: str, display: str, base: str) -> str | None:
+        """网关接入必问 key; 回车取消整个切换。"""
+        inline_key = str(parsed["key"] or "")
+        if inline_key:
+            return inline_key
+        if _input_fn is None:
+            out.write(f"  \u2717 {name} needs a key \u2014 non-interactive: "
+                      f"/provider {name} key=<key> base={base}\n")
+            return None
+        try:
+            k = (_input_fn(f"  API key for {name} ({display} \u2192 {base}) "
+                           f"\u2014 paste, Enter to cancel: ") or "").strip()
+        except (EOFError, KeyboardInterrupt):
+            out.write("\n")
+            return None
+        if not k:
+            out.write("  \u00b7 cancelled\n")
+            return None
+        return k
+
+    def _gateway_pick_model(base: str, key: str) -> str:
+        """探测网关模型列表并让用户挑; 失败不阻断 (落当前模型 + 提示手设)。"""
+        ids = probe_models(base, key)
+        if not ids:
+            out.write(f"  \u26a0 couldn't list models at {base} "
+                      f"(key rejected or no /models endpoint)\n")
+            out.write("    switch proceeds \u2014 set the model with /model <id>\n")
+            return ""
+        if cur_model and cur_model in ids:
+            out.write(f"  \u00b7 gateway has {len(ids)} models; keeping {cur_model}\n")
+            return ""
+        if _input_fn is None or not is_tty:
+            preview = ", ".join(ids[:8])
+            out.write(f"  \u00b7 {len(ids)} models: {preview}"
+                      + (" \u2026" if len(ids) > 8 else "") + "\n")
+            out.write("    set with /model <id>\n")
+            return ""
+        shown = ids[:15]
+        for i, mid in enumerate(shown, 1):
+            out.write(f"    {i:2d}. {mid}\n")
+        if len(ids) > len(shown):
+            out.write(f"    \u2026 (+{len(ids) - len(shown)} more \u2014 type the id)\n")
+        try:
+            pick = (_input_fn(f"  model [1-{len(shown)}] / id "
+                              f"(Enter = {shown[0]}): ") or "").strip()
+        except (EOFError, KeyboardInterrupt):
+            out.write("\n")
+            return ""
+        if not pick:
+            return shown[0]
+        if pick.isdigit() and 1 <= int(pick) <= len(shown):
+            return shown[int(pick) - 1]
+        return pick
+
+    def _gateway_switch(gw: tuple[str, str, str], model: str, persist: bool) -> str:
+        name, base, display = gw
+        key = _gateway_ask_key(name, display, base)
+        if key is None:
+            return "handled"
+        if not model:
+            model = _gateway_pick_model(base, key)
+        res = apply_switch(
+            state, loop, provider=name, model=model or None, persist=persist,
+            inline_key=key or None, inline_base=base, persist_key=bool(key),
+        )
+        _print_switch_result(res, out, show_endpoint=True)
+        return "handled"
+
     if target:
         persist = bool(parsed["persist"])
         if parsed["key"]:
@@ -679,12 +758,15 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
                                   parsed["key"], parsed["base"])
             out.write(f"  invalid selection {n} (1-{len(providers)}) — run /provider to list\n")
             return "handled"
+        # 不在注册表 → 试智能网关 (目录名/别名/URL); 都不是才走三件套报错
+        if target not in merged and target.lower() not in merged:
+            gw = resolve_gateway(target)
+            if gw is not None:
+                return _gateway_switch(gw, model_arg, persist)
         return _do_switch(target, model_arg, persist, parsed["key"], parsed["base"])
 
     # ── 列出 (TTY 下可交互数字选择) ──
     cur_disp = get_provider_display(cur_provider) if cur_provider else "(unset)"
-    is_tty = hasattr(out, "isatty") and out.isatty()
-    _input_fn = state.get("_input_fn")
     if is_tty:
         c = _shared_console(out)
         c.print(f"  [bold]current provider:[/] [accent]{cur_disp}[/]"
@@ -708,8 +790,11 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
             c.print(f"    [dim]{i:2d}[/]  [dim][{get_provider_tag(key)}][/] {name}"
                     f"  {cfg}  [dim]{note}[/]{marker}")
         c.print()
-        c.print("  [dim]switch:[/] type a number or name + Enter \u2014 e.g. [accent]3[/], "
-                "[accent]deepseek[/], [accent]sensenova[/]")
+        c.print("  [dim]switch:[/] number \u00b7 name \u00b7 gateway name \u00b7 URL \u2014 e.g. "
+                "[accent]3[/], [accent]deepseek[/], [accent]zhipu[/], [accent]glm[/], "
+                "[accent]https://api.x.ai/v1[/]")
+        c.print(f"  [dim]known gateways ({len(_KNOWN_GATEWAYS)}, name + key = done, "
+                "base auto):[/] [accent]" + " ".join(sorted(_KNOWN_GATEWAYS)) + "[/]")
         c.print("  [dim]add any gateway:[/] [accent]/provider <name> base=<url> key=<key> "
                 "[model=<id>][/]  [dim]\u00b7 -p persists[/]")
         c.print()
@@ -740,6 +825,8 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
             out.write(f"    {i:2d}. [{get_provider_tag(key)}] {key:12s} {display}"
                       f"  ({cfg})  {host_disp}{custom_tag}{marker}\n")
         out.write("  switch: /provider <name-or-number> [model] [-p] [key=...] [base=...]\n")
+        out.write(f"  known gateways ({len(_KNOWN_GATEWAYS)}): {' '.join(sorted(_KNOWN_GATEWAYS))}"
+                  "  — name + key is enough (base auto)\n")
         out.write("  add any gateway (three fields): /provider mygw base=https://x.com/v1 key=sk-... model=my-model\n")
     return "handled"
 

@@ -474,3 +474,67 @@ class TestProviderListIncludesCustom:
         # 反例: 内置 6 家仍然都在
         for builtin in ("openai", "anthropic", "gemini", "deepseek", "ollama", "agnes"):
             assert builtin in text, f"builtin {builtin} missing"
+
+
+class TestSmartGateway:
+    """2026-09-19 反馈"只能选列表里的提供商": 目录名/别名/URL 直接接入,
+    base 自动补全, 模型列表自动探测。"""
+
+    def test_resolve_gateway_by_name_and_alias(self) -> None:
+        from zall.cli.model_switch import resolve_gateway
+        name, base, display = resolve_gateway("zhipu") or ("", "", "")
+        assert name == "zhipu"
+        assert base == "https://open.bigmodel.cn/api/paas/v4"
+        assert display
+        # 别名: glm → zhipu, moonshot → kimi
+        assert resolve_gateway("glm")[0] == "zhipu"
+        assert resolve_gateway("moonshot")[0] == "kimi"
+        assert resolve_gateway("xai")[0] == "grok"
+
+    def test_resolve_gateway_url_host_match_normalizes(self) -> None:
+        from zall.cli.model_switch import resolve_gateway
+        name, base, _d = resolve_gateway("https://open.bigmodel.cn/api/paas/v4") \
+            or ("", "", "")
+        assert name == "zhipu"  # host 命中目录 → 归一为目录名
+        assert base.startswith("https://open.bigmodel.cn")
+
+    def test_resolve_gateway_unknown_url_derives_slug(self) -> None:
+        from zall.cli.model_switch import resolve_gateway
+        name, base, _d = resolve_gateway("https://api.examplegw.com/v1") \
+            or ("", "", "")
+        assert name == "examplegw"
+        assert base == "https://api.examplegw.com/v1"
+
+    def test_resolve_gateway_rejects_plain_unknown_word(self) -> None:
+        """Counterexample: 目录外的裸词不误判为网关 (走三件套报错路径)。"""
+        from zall.cli.model_switch import resolve_gateway
+        assert resolve_gateway("mygw") is None
+        assert resolve_gateway("") is None
+
+    def test_probe_models_parses_ids(self) -> None:
+        import httpx
+
+        from zall.cli.model_switch import probe_models
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path.endswith("/models")
+            assert request.headers["Authorization"] == "Bearer sk-t"
+            return httpx.Response(200, json={"data": [
+                {"id": "glm-5.2"}, {"id": "glm-4.7"}, {"id": "glm-5.2"}]})
+
+        ids = probe_models("https://x.example/v1", "sk-t",
+                           transport=httpx.MockTransport(handler))
+        assert ids == ["glm-4.7", "glm-5.2"]  # 排序 + 去重
+
+    def test_probe_models_failure_returns_none(self) -> None:
+        """Counterexample: 401/404/网络失败 → None (不猜模型列表)。"""
+        import httpx
+
+        from zall.cli.model_switch import probe_models
+        assert probe_models("https://x.example/v1", "bad",
+                            transport=httpx.MockTransport(
+                                lambda r: httpx.Response(401))) is None
+        assert probe_models("https://x.example/v1", "k",
+                            transport=httpx.MockTransport(
+                                lambda r: httpx.Response(404))) is None
+        assert probe_models("", "k") is None

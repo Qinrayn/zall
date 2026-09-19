@@ -34,7 +34,114 @@ __all__ = [
     "apply_switch",
     "build_provider_adapter",
     "provider_endpoint",
+    "probe_models",
+    "resolve_gateway",
 ]
+
+
+# ── 智能网关目录 (2026-09-19 实测反馈: "只能选列表里的提供商") ──
+# 常见 OpenAI 兼容网关: 名字即接入 (/provider zhipu), 免背 api_base —
+# 此前用智谱/通义必须显式写 base, 打错就打到 api.openai.com。目录 +
+# 模型探测把"三件套"压缩成"一个名字 + 一把 key"。
+_KNOWN_GATEWAYS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    # name: (api_base, display, aliases)
+    "zhipu": ("https://open.bigmodel.cn/api/paas/v4", "Zhipu AI (GLM)",
+              ("glm", "zhipuai", "bigmodel")),
+    "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "Alibaba Qwen",
+             ("dashscope", "tongyi", "aliyun")),
+    "kimi": ("https://api.moonshot.cn/v1", "Moonshot Kimi", ("moonshot",)),
+    "grok": ("https://api.x.ai/v1", "xAI Grok", ("xai", "x-ai")),
+    "openrouter": ("https://openrouter.ai/api/v1", "OpenRouter", ()),
+    "siliconflow": ("https://api.siliconflow.cn/v1", "SiliconFlow (硅基流动)",
+                    ("silicon",)),
+    "groq": ("https://api.groq.com/openai/v1", "Groq", ()),
+    "volcengine": ("https://ark.cn-beijing.volces.com/api/v3", "Volcengine Ark (豆包)",
+                   ("doubao", "ark")),
+    "minimax": ("https://api.minimax.chat/v1", "MiniMax", ()),
+    "yi": ("https://api.lingyiwanwu.com/v1", "01.AI (Yi)", ("01ai", "lingyi")),
+    "stepfun": ("https://api.stepfun.com/v1", "StepFun (阶跃星辰)", ("step",)),
+    "together": ("https://api.together.xyz/v1", "Together AI", ()),
+    "mistral": ("https://api.mistral.ai/v1", "Mistral AI", ()),
+    "fireworks": ("https://api.fireworks.ai/inference/v1", "Fireworks AI", ()),
+}
+
+_GATEWAY_ALIASES: dict[str, str] = {
+    alias: name
+    for name, (_b, _d, aliases) in _KNOWN_GATEWAYS.items()
+    for alias in aliases
+}
+
+
+def resolve_gateway(token: str) -> tuple[str, str, str] | None:
+    """把用户输入解析成 (name, api_base, display)。
+
+    接受: 目录名 (zhipu) / 别名 (glm, moonshot) / 完整 URL (https://api.x.ai/v1
+    — host 命中目录时归一为目录名, 未命中时从 host 派生名字)。
+    注册表里已有的 provider 名不在此处理 (走正常切换)。
+    """
+    t = (token or "").strip()
+    if not t:
+        return None
+    low = t.lower()
+    if low in _KNOWN_GATEWAYS:
+        base, display, _a = _KNOWN_GATEWAYS[low]
+        return low, base, display
+    if low in _GATEWAY_ALIASES:
+        name = _GATEWAY_ALIASES[low]
+        base, display, _a = _KNOWN_GATEWAYS[name]
+        return name, base, display
+    # URL: https://host/path — host 命中目录 base → 归一; 否则派生名字
+    if "://" in low or low.startswith("www."):
+        candidate = t if "://" in t else f"https://{t}"
+        try:
+            host = (urlparse(candidate).hostname or "").lower()
+        except Exception:
+            return None
+        if not host:
+            return None
+        for name, (base, display, _a) in _KNOWN_GATEWAYS.items():
+            try:
+                if (urlparse(base).hostname or "").lower() == host:
+                    return name, base, display
+            except Exception:
+                continue
+        slug = host
+        for prefix in ("api.", "www.", "open.", "gateway.", "token.", "cdn.",
+                       "app.", "dashboard."):
+            if slug.startswith(prefix):
+                slug = slug[len(prefix):]
+                break
+        slug = slug.split(".")[0].strip("-")
+        if not slug:
+            return None
+        return slug, candidate.rstrip("/"), slug
+    return None
+
+
+def probe_models(api_base: str, api_key: str, timeout: float = 8.0,
+                 transport: Any = None) -> list[str] | None:
+    """探测 OpenAI 兼容网关的模型列表 (GET /models)。
+
+    返回排序后的模型 id 列表; 端点不支持 / key 被拒 / 网络失败 → None
+    (调用方据此提示, 不猜)。transport 参数供测试注入 httpx.MockTransport。
+    """
+    if not api_base:
+        return None
+    url = api_base.rstrip("/") + "/models"
+    try:
+        import httpx
+
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        with httpx.Client(timeout=timeout, transport=transport) as client:
+            resp = client.get(url, headers=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("data", [])
+        ids = sorted({str(m.get("id")) for m in data
+                      if isinstance(m, dict) and m.get("id")})
+        return ids or None
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)

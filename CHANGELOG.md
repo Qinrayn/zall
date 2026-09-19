@@ -12,6 +12,7 @@
 - **API 错误不再刷三遍**: model_call 事件带 `api_error` 标记, 错误响应的 content 不再被当正文 (Markdown) 渲染 — `✗ error` 行是唯一出口; retry 期间只留一行 `· retry N/3 in Xs · ctrl-c to stop`, 不再重复错误全文; 用户中断后不再补"API still unavailable"。
 - **裸 `!` 给用法提示**: 不再作为任务发给模型 (实测曾撞上限流刷屏)。
 - **checkpoint 锚点防复读**: `[CHECKPOINT k]` 锚点加 internal 说明 — 实测裸标记会被模型复读进回答。
+- **智能网关接入**: 目录外不再只能走三件套 — 内置 14 家常见 OpenAI 兼容网关目录 (zhipu/qwen/kimi/grok/openrouter/siliconflow/groq/volcengine/minimax/yi/stepfun/together/mistral/fireworks, 含别名 glm→zhipu、moonshot→kimi), `/provider zhipu` 即接入 (base 自动补全, 消灭"用智谱/通义必须显式写 base"的坑); 贴任意 URL 也行 (host 命中目录自动归一, 未命中从 host 派生名字); 接上后自动 GET /models 探测模型列表, 当前模型在列则保留, 否则编号菜单挑选; 配 -p 自动落盘 [[providers]] 成正式 provider。
 
 ### 真人实测轮: 4 个实测 bug 修复 + Codex 视觉细节收尾 (2026-09-18)
 
