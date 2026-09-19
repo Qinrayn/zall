@@ -604,6 +604,12 @@ def repl(
         _log.warning("background update check failed: %s", _update_err)  # 更新检查失败不阻断
 
     loop: AgentLoop | None = None
+    # 干活期间打字排队 (Codex queued-message 口径): 采集线程接管回合期间的
+    # 键盘输入 — Enter 提交进队列, 回合结束后逐条作为后续消息发出; 此前
+    # 打进去的字会被 flush_stdin_typeahead() 整个丢弃 ("中途干活不能发信息")。
+    from zall.cli.typeahead import TypeaheadCollector as _TypeaheadCollector
+    _ta: _TypeaheadCollector = _TypeaheadCollector()
+    _queued_turns: list[str] = []
 
     try:
         while True:
@@ -614,6 +620,14 @@ def repl(
                 if pending is not None:
                     line = pending
                     out.write(f"{_prompt(state)}{line}\n")
+                    out.flush()
+                elif _queued_turns:
+                    # 上一回合结束 — 提交干活期间排队的消息 (不回提示符)
+                    line = _queued_turns.pop(0)
+                    remaining = len(_queued_turns)
+                    out.write(f"{_prompt(state)}{line}\n")
+                    if remaining:
+                        out.write(f"  · {remaining} more queued\n")
                     out.flush()
                 else:
                     prompt = _prompt(state)
@@ -673,6 +687,13 @@ def repl(
             if line.startswith("!") and len(line) > 1:
                 _run_shell_passthrough(line[1:].strip(), out)
                 continue
+            if line == "!":
+                # 实测反馈: 裸 "!" 落到模型变成一个 goal, 还可能撞上 API 错误刷屏。
+                # 这里给用法提示 (与快捷键卡片口径一致)。
+                out.write("  ! <command> runs a shell command directly, without the model\n")
+                out.write("  e.g. !git status · !ls · !python -V\n")
+                out.flush()
+                continue
 
             # v2.x: @file 引用展开 — 把 @path 解析到的真实文件内容注入消息 (Claude Code 式)。
             # 只展开真实文件; 非文件 @token 原样保留。slash 命令已在上方返回, 不受影响。
@@ -728,6 +749,10 @@ def repl(
             else:
                 loop.add_user_message(line)
 
+            # 回合开始: 采集键盘输入 (Enter 排队), spinner 状态行实时回显
+            from zall.cli.render import set_typeahead_source as _set_ta_src
+            _ta.start()
+            _set_ta_src(lambda: (_ta.buffer, _ta.queued_count))
             while True:
                 try:
                     pre_step_msg_count = len(loop.messages)
@@ -764,15 +789,17 @@ def repl(
                     if result.egress and result.egress.error:
                         err = result.egress.error
                         if is_transient_error(err):
-                            out.write(f"  \u26a0 {err[:100]}\n")
+                            # 噪声收敛 (2026-09-19 实测反馈): 错误全文已由 ✗ error
+                            # 行打印, 这里不再重复 ⚠ 全文 — 只留一行紧凑重试提示
                             # auto-retry up to 3 times with backoff
                             import time as _time
 
                             from zall._util.backoff import backoff_delay
                             retried = False
+                            interrupted = False
                             for attempt in range(1, 4):
                                 delay = round(backoff_delay(attempt), 1)  # G13: 指数+抖动
-                                out.write(f"  · retry {attempt}/3 in {delay}s...\n")
+                                out.write(f"  · retry {attempt}/3 in {delay}s · ctrl-c to stop\n")
                                 out.flush()
                                 _time.sleep(delay)
                                 try:
@@ -782,8 +809,9 @@ def repl(
                                         renderer._stop_spinner()
                                     result = loop.retry_step()  # v0.4.9 (A2): no step_count drift
                                 except KeyboardInterrupt:
-                                    out.write("  \u00b7 interrupted\n")
+                                    out.write("  · interrupted\n")
                                     out.flush()
+                                    interrupted = True
                                     break
                                 if result.is_terminal and result.egress and result.egress.error:
                                     if not is_transient_error(result.egress.error):
@@ -794,8 +822,14 @@ def repl(
                                     break  # step succeeded
                             if retried:
                                 continue  # go back to step loop
+                            if interrupted:
+                                # 用户已主动中断 — 不再补"API 仍不可用" (实测反馈: 明明
+                                # 是我停的, 还刷 API 错误信息)
+                                loop = None
+                                state.pop("_loop", None)
+                                break
                             # all retries exhausted
-                            out.write("  \u00b7 API still unavailable after 3 retries. Try /model to switch models.\n")
+                            out.write("  · API still unavailable after 3 retries. Try /model to switch models.\n")
                             out.flush()
                             break
                         if "max_steps" in err or "MAX_STEPS" in err:
@@ -826,6 +860,12 @@ def repl(
                             out.write(f"  {_usage_line}\n")
                     out.write("\n")
                     break
+            # 回合结束: 停采集, 排队消息转交外层循环逐条提交 (不回提示符)
+            _ta.stop()
+            _set_ta_src(None)
+            _queued_turns.extend(_ta.drain())
+            if _ta.buffer:
+                out.write(f"  \u00b7 typed ahead \"{_ta.buffer[:40]}\" (not sent — Enter would have queued it)\n")
             out.flush()
     finally:
         # v0.4.9 (A3): 退出时停止持久 spinner 线程

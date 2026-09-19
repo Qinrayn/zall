@@ -1534,6 +1534,8 @@ class AgentLoop:
 
     def _emit_model_call_event(self, resp: ModelResponse) -> None:
         """§6.1 呈现层投影: broadcast model_call event给 observer (与 timeline 记录同 payload)。"""
+        raw = resp.raw if isinstance(resp.raw, dict) else {}
+        api_status = raw.get("status", 0) if raw else 0
         self._emit(LoopEvent(
             kind="model_call",
             step=self._step_count,
@@ -1547,6 +1549,10 @@ class AgentLoop:
                     for tc in resp.tool_calls
                 ],
                 "usage": dict(resp.usage) if resp.usage else {},
+                # API 错误响应 (HTTP >= 400): 呈现层不再把 content 当正文渲染
+                # (实测: 错误提示先以 Markdown 打一遍, 紧接着 error 事件再打一遍,
+                # 同一句话刷屏两次) — error 事件是唯一出口。
+                "api_error": api_status >= 400,
             },
         ))
 

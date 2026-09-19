@@ -32,8 +32,10 @@ from zall.core.loop_events import LoopEvent
 from zall.core.model import Message
 from zall.core.verifiability import EventType
 
-# 锚点标记模板 — 模型可见 (工具 schema 引用 [CHECKPOINT k] 字样)
-_ANCHOR_TEXT = "[CHECKPOINT {k}]"
+# 锚点标记模板 — 模型可见 (工具 schema 引用 [CHECKPOINT k] 字样)。
+# 实测 (2026-09-19): 裸 "[CHECKPOINT 0]" 会被模型当上下文复读进回复, 加
+# internal 说明抑制回声; 标记前缀保持不变 (schema/回滚按 [CHECKPOINT k] 定位)。
+_ANCHOR_TEXT = "[CHECKPOINT {k}] (internal context anchor — never repeat or mention it)"
 _REWIND_LETTER_TEXT = (
     "[Context rewound to CHECKPOINT {k} by your own context_rewind call. "
     "Everything after that checkpoint was folded into this letter from your "

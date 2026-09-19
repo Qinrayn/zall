@@ -107,22 +107,22 @@ class Theme:
 # 陶土红 (黑绘陶器) 为失败; 橄榄绿为成功。低饱和, 如帕特农石面的柔光。
 ATTIC = Theme(
     name="attic",
-    accent="#c9a227", accent2="#8f7a2e",
-    success="#7fa370", fail="#c96a5a",
-    warn="#d19a3f", danger="#b8443a bold",
-    info="#4f93b8", dim="#8c8c86", subtle="#5f5f5a",
-    model="", thinking="#6e8ca0",
-    status_bar="#8c8c86", status_bar_text="#d8d4c8",
-    tool_read="#4f93b8", tool_write="#c9a227",
-    tool_bash="#d19a3f", tool_code="#7fa370",
-    queue="#4f93b8", steer="#6e8ca0", select="#4f93b8",
-    mode_normal="#c9a227", mode_plan="#4f93b8",
-    mode_accept="#7fa370", mode_strict="#c96a5a",
+    accent="#d4af37", accent2="#b3953a",
+    success="#8bb37f", fail="#d47868",
+    warn="#dca54e", danger="#e06c5c bold",
+    info="#5aa3c8", dim="#9c9c95", subtle="#74746d",
+    model="", thinking="#7f9fb5",
+    status_bar="#9c9c95", status_bar_text="#e6e2d6",
+    tool_read="#5aa3c8", tool_write="#d4af37",
+    tool_bash="#dca54e", tool_code="#8bb37f",
+    queue="#5aa3c8", steer="#7f9fb5", select="#5aa3c8",
+    mode_normal="#d4af37", mode_plan="#5aa3c8",
+    mode_accept="#8bb37f", mode_strict="#d47868",
     code_theme="nord", code_bg="#16181d",
-    tui_primary="#c9a227", tui_accent="#c9a227", tui_secondary="#4f93b8",
+    tui_primary="#d4af37", tui_accent="#d4af37", tui_secondary="#5aa3c8",
     tui_background="#15171a", tui_surface="#1c1f23", tui_panel="#262a30",
-    tui_foreground="#d8d4c8",
-    tui_success="#7fa370", tui_warning="#d19a3f", tui_error="#c96a5a",
+    tui_foreground="#e6e2d6",
+    tui_success="#8bb37f", tui_warning="#dca54e", tui_error="#d47868",
     # 橄榄绿/陶土红调的 diff 背景 (与 attic 色板同座标系)
     diff_add_bg="#1a2418", diff_del_bg="#2a1713",
     diff_add_hl="#2e4527", diff_del_hl="#552b22",
@@ -234,6 +234,8 @@ def apply(theme: Theme) -> None:
     render._ANSI_MAP.update(build_ansi_map(theme))
     render.CODE_THEME = theme.code_theme
     render.CODE_BG = theme.code_bg
+    # 共享 console 缓存持有旧主题的 rich Theme (语义样式名字典) — 清掉重建
+    render.clear_console_cache()
 
 
 def switch(name: str) -> Theme:

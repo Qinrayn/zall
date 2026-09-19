@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### 实测反馈轮: /provider 重做 + 干活排队打字 + 对比度/噪声 (2026-09-19)
+
+用户实测反馈四条: 颜色对比差、provider 列表列不全也不知道咋换、干活时不能发信息、裸 `!` 变成任务还刷一屏 API 错误。
+
+- **`/provider` 菜单重做**: 列表改读合并注册表 (内置 6 家 + `[[providers]]` 自定义, 此前自定义 provider 根本不出现); 每行显示 key 状态 (`✓ ready` / `· needs key`)、端点 host、custom 标记, 当前 provider `●` 高亮; 底部两行说明"怎么换" (输入编号或名称) 与"怎么接任意网关" (三件套语法); 选中未配 key 的 provider 时内联询问 key (回车跳过)。
+- **干活期间打字排队** (`cli/typeahead.py` 新): 回合进行中键盘输入由采集线程接管 — 此前会被 `flush_stdin_typeahead()` 整个丢弃。打字逐字符回显在光标处 (流式输出期间也可见, 实测反馈"下一行输入根本看不到"), spinner 状态行同步显示 `▌ buffer` 尾部; Enter 提交进队列 (`· 1 queued`), 回合结束后逐条自动作为后续消息发出; 打到一半没提交的提示后丢弃。Ctrl-C 转主线程中断。Windows 走 msvcrt, POSIX 走 cbreak+select (ISIG 保持, 真 Ctrl-C 仍走 SIGINT)。
+- **attic 主题对比度提升**: dim `#8c8c86→#9c9c95`、subtle `#5f5f5a→#74746d`、accent2/info/success/fail 同步提亮一档; `_shared_console` 注册语义样式名 (`[accent]`/`[dim]`/`[success]`… 跟随主题), 代码不再写 rich 内置色名。
+- **API 错误不再刷三遍**: model_call 事件带 `api_error` 标记, 错误响应的 content 不再被当正文 (Markdown) 渲染 — `✗ error` 行是唯一出口; retry 期间只留一行 `· retry N/3 in Xs · ctrl-c to stop`, 不再重复错误全文; 用户中断后不再补"API still unavailable"。
+- **裸 `!` 给用法提示**: 不再作为任务发给模型 (实测曾撞上限流刷屏)。
+- **checkpoint 锚点防复读**: `[CHECKPOINT k]` 锚点加 internal 说明 — 实测裸标记会被模型复读进回答。
+
 ### 真人实测轮: 4 个实测 bug 修复 + Codex 视觉细节收尾 (2026-09-18)
 
 ConPTY 真实终端驱动 (`scripts/pty_drive2.py`) 模拟真人键入, 对 sensenova (deepseek-v4-flash) 跑通多轮真实对话: 启动 banner、`/status` `/keys` `/mcp` `/stats` `/doctor`、`!shell` 直执行、`@file` 注入、补全菜单、恢复提示、`/quit` 干净退出、429 限流自动重试。

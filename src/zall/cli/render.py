@@ -201,14 +201,40 @@ def _shared_console(out: Any) -> Console:
     c = _CONSOLE_CACHE.get(key)
     if c is not None and getattr(c, "file", None) is out:
         return c
+    # 语义样式名注册 ([accent]/[dim]/[success]...): markup 跟随主题槽位,
+    # 代码里不再写 rich 内置名 (cyan/green) — 换主题自动跟随 (G6 单一色源)。
     c = Console(file=out, color_system="auto", force_terminal=None,
-                legacy_windows=None)
+                legacy_windows=None, theme=_semantic_rich_theme())
     # LRU eviction: remove oldest entry when full
     if len(_CONSOLE_CACHE) >= _CONSOLE_CACHE_MAX:
         # dict preserves insertion order in Python 3.7+ — pop first inserted key
         _CONSOLE_CACHE.pop(next(iter(_CONSOLE_CACHE)))
     _CONSOLE_CACHE[key] = c
     return c
+
+
+def _semantic_rich_theme() -> Any:
+    """zall 语义槽位 → rich Theme (共享 console 的样式名字典)。"""
+    from rich.theme import Theme as _RichTheme
+    return _RichTheme({
+        "accent": _C.ACCENT, "accent2": _C.ACCENT2,
+        "success": _C.SUCCESS, "fail": _C.FAIL,
+        "warn": _C.WARN, "danger": _C.DANGER, "info": _C.INFO,
+        "dim": _C.DIM, "subtle": _C.SUBTLE, "model": _C.MODEL,
+        "thinking": _C.THINKING, "queue": _C.QUEUE, "steer": _C.STEER,
+        "select": _C.SELECT,
+    })
+
+
+# 干活期间打字排队 (cli/typeahead.py) — spinner 帧回显的数据源钩子。
+# render 不 import typeahead (单向依赖), repl_ui 启动采集器后注入回调。
+_typeahead_source: Callable[[], tuple[str, int]] | None = None
+
+
+def set_typeahead_source(fn: Callable[[], tuple[str, int]] | None) -> None:
+    """注入/清除 spinner 的 typeahead 回显数据源 (fn() -> (buffer, queued_n))。"""
+    global _typeahead_source
+    _typeahead_source = fn
 
 
 def clear_console_cache() -> None:
@@ -902,6 +928,18 @@ class CliRenderer:
                     parts += f" {dim}({inner}){rst}"
                 if self._spinner_token_count > 0:
                     parts += f" {subtle}{self._spinner_token_count} tok{rst}"
+                # 干活期间打字排队 (Codex queued-message 口径): live buffer 尾部
+                # 回显 + 已提交条数。采集线程只更新数据, 回显统一由本帧渲染。
+                if _typeahead_source is not None:
+                    try:
+                        _buf, _qn = _typeahead_source()
+                    except Exception:
+                        _buf, _qn = "", 0
+                    if _buf:
+                        tail = _buf[-32:] if len(_buf) > 32 else _buf
+                        parts += f" {_ANSI_MAP.get(_C.SELECT, '')}\u258c {tail}{rst}"
+                    if _qn:
+                        parts += f" {_ANSI_MAP.get(_C.QUEUE, '')}\u00b7 {_qn} queued{rst}"
                 with self._write_lock:
                     if self._spinner_stop.is_set() or self._spinner_shutdown.is_set():
                         break
@@ -1281,6 +1319,11 @@ class CliRenderer:
 
         content = p.get("content", "")
         tool_calls = p.get("tool_calls", [])
+
+        if p.get("api_error"):
+            # HTTP >= 400 错误响应: error 事件 (✗ 行) 是唯一出口, 不重复渲染
+            self._render_token_usage(p)
+            return
 
         if content:
             # think-tag fix: 剥离偶发泄漏到 content 的 <think>/<​/think> 标记。

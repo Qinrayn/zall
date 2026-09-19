@@ -116,9 +116,9 @@ def test_attic_fills_every_slot() -> None:
 
 def test_apply_attic_populates_render() -> None:
     theme.apply(theme.ATTIC)
-    assert render._C.ACCENT == "#c9a227"          # attic laurel gold
+    assert render._C.ACCENT == "#d4af37"          # attic laurel gold (2026-09-19 提对比度)
     assert render.CODE_THEME == "nord"
-    assert "#c9a227" in render._ANSI_MAP           # ANSI 表随主题重建
+    assert "#d4af37" in render._ANSI_MAP           # ANSI 表随主题重建
     # 反例孪生: 旧默认 (obsidian gold1) 不得回归
     assert render._C.ACCENT != "gold1"
 

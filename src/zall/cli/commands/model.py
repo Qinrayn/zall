@@ -579,7 +579,7 @@ def _switch_model_and_report(
 
     res = apply_switch(state, loop, model=model, persist=persist)
     if res.ok:
-        _print_switch_result(res, out, as_model=as_model_cmd)
+        _print_switch_result(res, out, as_model_cmd=as_model_cmd)
         return
     # 降级: 只记 model 名, 等 adapter 可重建时再起效
     state["model"] = _resolve_model_alias(model)
@@ -635,7 +635,11 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
     target = pos[0] if pos else ""
     model_arg = " ".join(pos[1:]).strip() if len(pos) > 1 else ""
     ready = _detect_configured_providers()
-    providers = list_providers()  # (key, display, env_var, key_url)
+    # 合并表 (内置 + [[providers]] 自定义) — 实测反馈: 只列内置 6 家时用户
+    # 配好的自定义 provider 看不见, 也不知道"这是啥, 咋换"。
+    from zall.cli.config import _get_provider_registry as _merged_reg
+    merged = _merged_reg()
+    providers = list_providers(merged)  # (key, display, env_var, key_url)
 
     cur_model = state.get("model") or _config_status().get("model") or ""
     cur_provider = state.get("provider") or (_detect_provider(cur_model) if cur_model else "")
@@ -648,6 +652,19 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
         )
         _print_switch_result(res, out, show_endpoint=True)
         return "handled"
+
+    def _interactive_switch(prov: str) -> str:
+        """选择后切换; 目标 provider 没有 key 时内联询问一次 (回车跳过)。"""
+        if not ready.get(prov, False) and prov != "ollama" and _input_fn is not None:
+            disp = get_provider_display(prov)
+            try:
+                k = (_input_fn(f"  API key for {prov} ({disp}) — paste, Enter to skip: ") or "").strip()
+            except (EOFError, KeyboardInterrupt):
+                c.print()
+                return "handled"
+            if k:
+                return _do_switch(prov, key=k)
+        return _do_switch(prov)
 
     if target:
         persist = bool(parsed["persist"])
@@ -670,17 +687,35 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
     _input_fn = state.get("_input_fn")
     if is_tty:
         c = _shared_console(out)
-        c.print(f"  [bold]current provider:[/] [cyan]{cur_disp}[/]"
+        c.print(f"  [bold]current provider:[/] [accent]{cur_disp}[/]"
                 + (f"  [dim]model: {cur_model}[/]" if cur_model else ""))
         c.print()
         for i, (key, display, _env, _url) in enumerate(providers, 1):
-            cfg = "[green]\u00b7 configured[/]" if ready.get(key, False) else "[dim]\u00b7 needs key[/]"
-            marker = " [cyan]\u2190 current[/]" if key == cur_provider else ""
-            c.print(f"    {i:2d}. [dim][{get_provider_tag(key)}][/] {key:12s} [dim]{display}[/]  {cfg}{marker}")
+            host = str((merged.get(key) or ("", "", "", "", [], ""))[2] or _url or "")
+            host_disp = host.replace("https://", "").replace("http://", "").rstrip("/")
+            custom = key not in _PROVIDER_REGISTRY
+            note = f"{host_disp}  [dim](custom)[/]" if custom else host_disp
+            if ready.get(key, False):
+                cfg = f"[success]\u2713 ready[/]"
+            else:
+                cfg = f"[dim]\u00b7 needs key[/]"
+            if key == cur_provider:
+                name = f"[accent bold]\u25cf {key}[/]"
+                marker = f"  [accent]current[/]"
+            else:
+                name = f"[accent]{key}[/]"
+                marker = ""
+            c.print(f"    [dim]{i:2d}[/]  [dim][{get_provider_tag(key)}][/] {name}"
+                    f"  {cfg}  [dim]{note}[/]{marker}")
+        c.print()
+        c.print("  [dim]switch:[/] type a number or name + Enter \u2014 e.g. [accent]3[/], "
+                "[accent]deepseek[/], [accent]sensenova[/]")
+        c.print("  [dim]add any gateway:[/] [accent]/provider <name> base=<url> key=<key> "
+                "[model=<id>][/]  [dim]\u00b7 -p persists[/]")
         c.print()
         if _input_fn:
             try:
-                sel = (_input_fn("  select [N] / provider name: ") or "").strip()
+                sel = (_input_fn("  select [N] / provider name (empty to stay): ") or "").strip()
             except (EOFError, KeyboardInterrupt):
                 c.print()
                 return "handled"
@@ -689,20 +724,23 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
             if sel.isdigit():
                 n = int(sel)
                 if 1 <= n <= len(providers):
-                    return _do_switch(providers[n - 1][0])
+                    return _interactive_switch(providers[n - 1][0])
                 out.write(f"  invalid selection {n}\n")
                 return "handled"
-            return _do_switch(sel)
+            return _interactive_switch(sel)
         c.print("  [dim]usage: /provider <name>  (e.g. /provider anthropic)  \u00b7 takes effect immediately[/]")
     else:
         out.write(f"  current provider: {cur_disp}\n")
         for i, (key, display, _env, _url) in enumerate(providers, 1):
             cfg = "configured" if ready.get(key, False) else "needs key"
             marker = "  <- current" if key == cur_provider else ""
-            out.write(f"    {i:2d}. [{get_provider_tag(key)}] {key:12s} {display}  ({cfg}){marker}\n")
-        out.write("  usage: /provider <name> [model] [-p] [key=...] [base=...]\n")
-        out.write("         three fields for any OpenAI-compatible endpoint:\n")
-        out.write("         /provider mygw base=https://x.com/v1 key=sk-... model=my-model\n")
+            host = str((merged.get(key) or ("", "", "", "", [], ""))[2] or _url or "")
+            host_disp = host.replace("https://", "").replace("http://", "").rstrip("/")
+            custom_tag = " (custom)" if key not in _PROVIDER_REGISTRY else ""
+            out.write(f"    {i:2d}. [{get_provider_tag(key)}] {key:12s} {display}"
+                      f"  ({cfg})  {host_disp}{custom_tag}{marker}\n")
+        out.write("  switch: /provider <name-or-number> [model] [-p] [key=...] [base=...]\n")
+        out.write("  add any gateway (three fields): /provider mygw base=https://x.com/v1 key=sk-... model=my-model\n")
     return "handled"
 
 

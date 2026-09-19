@@ -434,3 +434,43 @@ class _Tools:
 
     def get(self, key: str) -> Any:
         return self._spawn if key == "spawn_subagent" else None
+
+class TestProviderListIncludesCustom:
+    """2026-09-19 实测反馈: /provider 列表只列内置 6 家, 用户配好的自定义
+    provider 看不见, "列不完所有的提供商"。修复: 列表读合并注册表。"""
+
+    def test_custom_provider_shown_in_list(self, tmp_path: Any, monkeypatch: Any,
+                                           capsys: Any) -> None:
+        import io as _io
+
+        import zall.safety.config as safety_mod
+        from zall.cli.commands.model import cmd_provider
+        from zall.cli.config import _clear_provider_registry_cache
+
+        home = tmp_path / "home"
+        home.mkdir(parents=True)
+        monkeypatch.setattr(safety_mod, "CONFIG_DIR", home / ".zall")
+        (home / ".zall").mkdir()
+        (home / ".zall" / "config.toml").write_text(
+            '[model]\nname = "my-model"\napi_base = "https://gw.example.com/v1"\n'
+            '[auth]\napi_key = "sk-x"\n'
+            "[[providers]]\n"
+            'name = "mygw"\n'
+            'display = "My Gateway"\n'
+            'adapter = "openai-compat"\n'
+            'api_base = "https://gw.example.com/v1"\n',
+            encoding="utf-8")
+        _clear_provider_registry_cache()
+        try:
+            out = _io.StringIO()
+            out.isatty = lambda: False  # type: ignore[method-assign]
+            cmd_provider("", out, loop=None, state={})
+            text = out.getvalue()
+        finally:
+            _clear_provider_registry_cache()
+        assert "mygw" in text, f"custom provider missing from list:\n{text}"
+        assert "(custom)" in text
+        assert "gw.example.com" in text
+        # 反例: 内置 6 家仍然都在
+        for builtin in ("openai", "anthropic", "gemini", "deepseek", "ollama", "agnes"):
+            assert builtin in text, f"builtin {builtin} missing"

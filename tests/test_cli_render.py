@@ -440,3 +440,55 @@ class TestFmtElapsedCompact:
         """Counterexample: 时钟回拨产生的负值不崩, 按亚分钟格式化。"""
         from zall.cli.render import fmt_elapsed_compact
         assert fmt_elapsed_compact(-1.2).endswith("s")
+
+
+class TestApiErrorNotRenderedAsMessage:
+    """2026-09-19 实测反馈: API 错误提示先被当正文 (Markdown) 渲染一遍,
+    error 事件再打一遍 — 同一句话刷屏两次。修复: api_error 载荷跳过正文渲染。"""
+
+    def _renderer(self) -> Any:
+        from zall.cli.render import CliRenderer
+
+        class _S:
+            buf = ""
+
+            def write(self, s: str) -> None:
+                self.buf += s
+
+            def flush(self) -> None:
+                pass
+
+            def isatty(self) -> bool:
+                return False
+
+        return CliRenderer(json_mode=False, stream=_S(), verbose=False,
+                           disable_spinner=True)
+
+    def test_api_error_payload_skips_content(self) -> None:
+        r = self._renderer()
+        r._render_model_call(step=1, p={
+            "model": "m", "stop_reason": "stop",
+            "content": "[API rate limit exceeded. ...]", "reasoning": "",
+            "tool_calls": [], "usage": {}, "api_error": True,
+        })
+        assert "rate limit" not in r._raw_stream.buf
+
+    def test_normal_payload_still_renders_content(self) -> None:
+        """Counterexample: 正常回复不受影响。"""
+        r = self._renderer()
+        r._render_model_call(step=1, p={
+            "model": "m", "stop_reason": "stop",
+            "content": "hello world", "reasoning": "",
+            "tool_calls": [], "usage": {}, "api_error": False,
+        })
+        assert "hello world" in r._raw_stream.buf
+
+    def test_payload_flag_defaults_false(self) -> None:
+        """旧事件 (无 api_error 键) 不得被误判为错误。"""
+        r = self._renderer()
+        r._render_model_call(step=1, p={
+            "model": "m", "stop_reason": "stop",
+            "content": "[not an error] just brackets", "reasoning": "",
+            "tool_calls": [], "usage": {},
+        })
+        assert "just brackets" in r._raw_stream.buf
