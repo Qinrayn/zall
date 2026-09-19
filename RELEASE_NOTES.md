@@ -1,51 +1,31 @@
-# zall — Release Notes (0.5.2 · 现实对齐 & 内联化)
+# zall — Release Notes (0.6.0)
 
-面向用户的发布说明。本版由多轮 dogfood（用真实 API 当真人用）驱动，聚焦
-**可用性、内联体验、启动/分发、健壮性**。技术细节见 `CHANGELOG.md`。
+0.5.2 → 0.6.0 的变更。都是多轮真实使用后的常规迭代，无破坏性变更，
+配置文件格式不变。技术细节见 `CHANGELOG.md`。
 
----
+## 变更
 
-## ✨ 亮点
+- `/provider` 重做：列表包含自定义 provider；内置 14 家常见网关目录，
+  名字 + key 即接入（base 自动补全，如 `/provider zhipu`）；直接贴 URL
+  也行；接上后自动探测模型列表；`-p` 落盘。
+- 模型干活期间可以打字：输入实时可见，Enter 排队，回合结束自动发出；
+  Ctrl-C 随时可打断。
+- 提示缓存可观测：状态栏显示上下文剩余与 cache 命中率；Anthropic 默认
+  打缓存断点（`ZALL_ANTHROPIC_CACHE=0` 可关）。
+- 控制台交互对齐 Argus / Codex：参数位 TAB 补全、`/status` `/keys`
+  `/mcp` `/new`、`!` 直接执行 shell、长任务耗时显示为 `1m 05s` 式、
+  配色对比度提升、API 错误只报一次。
+- `/science`：参数位补全、`runall` / `last`、profiles、favorites。
 
-### 1. 关键可用性修复（agent 现在真的能用了）
-- **配置了 API 却显示 `unset`** → 已修：全屏/内联现在都会从 `~/.zall/config.toml` 解析真实模型名与 provider。
-- **配置文件被写坏、越写越大** → 已修：`/model -p` 曾把 `[auth]`/`[model]` 段头重复翻倍。现在写入去重、加载容错，**并会自愈已损坏的配置**。
-- **任务失败后中途就停** → 已修：慢/抖的第三方端点上，一次 `429/5xx/timeout` 曾杀死整个多步任务。现在 **REPL / 全屏 / 一次性三条路径统一做瞬态退避重试**（2s/4s/6s，最多 3 次），恢复后继续任务。
-- **确认门卡在“等待中”** → 已修：全屏 TUI 有了专用确认门，写文件等需确认的操作不再挂死。
+## 修复
 
-### 2. 交互定调：默认内联 REPL（对齐前沿）
-- 默认体验改为**内联 REPL**（像 Claude Code / Codex / Aider / Pi），保留原生滚动/复制粘贴/SSH 友好。
-- 全屏 TUI 变为**可选**：`zall --tui` 显式开启。
+- UTF-8 BOM 导致配置静默解析失败（`[[providers]]` 数组与数字全部失效）。
+- 启动恢复提示会吞掉正在打的首条任务。
+- 404 "model not found" 被误报为 endpoint 问题。
+- 自定义 provider 注册表与 `CONFIG_DIR` 脱节（中文用户名路径下）。
 
-### 3. `@` 文件/目录引用（Claude Code 式）
-- 输入时 `@` 触发**工作区文件/目录补全**（basename 前缀优先）。
-- 提交时 `@真实文件` 会**自动把文件内容注入**发给模型的消息；`@目录/` 注入**一层目录清单**。
-- 三条路径（REPL / 全屏 / 一次性 `zall "…@file…"`）都支持。带大小上限、二进制跳过、去重，安全不炸上下文。
+## 升级
 
-### 4. 启动更快 & 单文件分发（“好装好启动”）
-- 入口导入 **~487ms → ~70ms（约 7×）**；`zall --version` 端到端 ~0.23s（核心依赖改为用时才加载）。
-- 新增 `zall.spec` + `scripts/build_binary.py`：`pip install pyinstaller && python scripts/build_binary.py` 产出**自包含单文件**，目标机无需装 Python/venv/pip。
-
-### 5. 感知延迟 & 诊断
-- 状态栏**动画 spinner + 已耗时**（`◔ thinking 8s…`），慢端点下也能看到“在动”，不再像卡死。
-- `/doctor` 报告**端点延迟**，慢端点会提示 `SLOW endpoint — try /provider or a faster model`。
-
-### 6. 健壮性
-- 中文 Windows / GBK 一系列编码修复；工作区扫描遇 Windows 保留设备名文件（如 `nul`）不再崩。
-- 六维本体论 ① Identity 首次落到运行时（`AgentIdentity` + I-0/I-7 不变量测试）。
-
----
-
-## ⬆️ 升级注意
-
-- **默认不再进全屏**：想要全屏 TUI 请用 `zall --tui`；`--no-tui` 或无参数都是内联 REPL。
-- **配置自愈**：首次运行会把可能损坏的 `~/.zall/config.toml` 规范化重写（保留你的 key/model/api_base 及 `timeout` 等）。
-- **`@` 引用**：`@path` 若解析到真实文件/目录会被展开注入；不是真实路径的 `@token`（如邮箱）原样保留。
-- **端点速度**：若觉得慢，多半是所配置端点本身的延迟（用 `/doctor` 查看），可 `/provider` 切换更快的模型/端点。
-
----
-
-## 🧪 质量
-
-- 本版各轮改动均带**含反例的不变量测试**（IPR-0）；新增 `@`/容错/配置自愈/本体论等测试文件。
-- 通过真实 API dogfood 验证：多步任务能建项目/建库并跑完；`@file` 一次性调用让模型 0 次 `read_file` 直接拿到内容。
+```
+pip install -U zall
+```
