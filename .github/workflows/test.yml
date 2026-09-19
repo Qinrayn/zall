@@ -41,7 +41,7 @@ jobs:
           pip install ruff==0.15.22
           ruff check src/ --output-format=github
 
-      - name: Type-check with mypy (ratchet: errors must not increase)
+      - name: "Type-check with mypy (ratchet: errors must not increase)"
         run: |
           pip install mypy==1.17.0
           python scripts/mypy_ratchet.py
