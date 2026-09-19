@@ -230,6 +230,7 @@ def _rebuild_adapter(state: dict[str, Any] | None, loop: Any | None = None) -> N
     复用 model_switch 热切换: 新 adapter 先换进 loop + 子代理工具, 再关旧的,
     避免 RuntimeError: client has been closed。
     """
+    from zall.cli.config import _detect_provider
     from zall.cli.model_switch import apply_switch
 
     if state is None:

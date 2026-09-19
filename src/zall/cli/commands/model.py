@@ -17,7 +17,6 @@ from typing import Any
 from zall._util.model_registry import (
     _MODEL_PRESETS,
     _PROVIDER_REGISTRY,
-    get_provider_default_model,
     get_provider_display,
     get_provider_tag,
     list_providers,
@@ -38,7 +37,6 @@ from zall.cli.config import (
     _PROVIDER_DISPLAY,
     _config_status,
     _detect_provider,
-    _persist_model_to_config,
     _resolve_model_alias,
 )
 from zall.cli.environment import CwdMeta as _CwdMeta
@@ -778,12 +776,12 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
             custom = key not in _PROVIDER_REGISTRY
             note = f"{host_disp}  [dim](custom)[/]" if custom else host_disp
             if ready.get(key, False):
-                cfg = f"[success]\u2713 ready[/]"
+                cfg = "[success]\u2713 ready[/]"
             else:
-                cfg = f"[dim]\u00b7 needs key[/]"
+                cfg = "[dim]\u00b7 needs key[/]"
             if key == cur_provider:
                 name = f"[accent bold]\u25cf {key}[/]"
-                marker = f"  [accent]current[/]"
+                marker = "  [accent]current[/]"
             else:
                 name = f"[accent]{key}[/]"
                 marker = ""
