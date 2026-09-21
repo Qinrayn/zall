@@ -334,7 +334,7 @@ def _adapter_ctor_params(
                 mod_path, cls_name = str(meta[5]).split(":")
                 cls = getattr(importlib.import_module(mod_path), cls_name)
             else:
-                from zall.adapters import OpenAICompatAdapter as cls  # type: ignore[no-redef]
+                from zall.adapters import OpenAICompatAdapter as cls
         except Exception:
             return {"api_key", "api_base", "model", "timeout"}
     try:
@@ -547,8 +547,9 @@ def apply_switch(
         result.notes.append(endpoint.warn)
     if endpoint.key_source == "none" and target_provider != "ollama":
         result.notes.append(
-            f"no API key found for {target_provider} — set "
-            f"{endpoint_env_hint(target_provider)} or: /provider {target_provider} key=<key>"
+            f"no API key for {target_provider} — run /provider "
+            f"{target_provider} to enter one (hidden prompt), or set "
+            f"{endpoint_env_hint(target_provider)}"
         )
 
     if persist:

@@ -42,6 +42,7 @@ from zall.cli.config import (
 from zall.cli.environment import CwdMeta as _CwdMeta
 from zall.cli.environment import build_system_prompt as _build_system_prompt
 from zall.cli.render import _shared_console
+from zall.cli.select import Choice, choice_menu, secret_prompt
 from zall.core.context import Context as _Context
 from zall.core.model import Message, ToolChoice
 from zall.safety.config import CONFIG_DIR, load_config
@@ -499,8 +500,10 @@ def _show_model_guide(out: Any) -> None:
         c.print('      "my" = "my-model"')
         c.print('      "fast" = "my-model-2"')
         c.print()
-        c.print("  [bold]4. Supported providers[/]")
-        c.print("    [dim]·[/] OpenAI-compatible: any API with /v1/chat/completions endpoint")
+        c.print("  [bold]4. Models & providers[/]")
+        c.print("    [dim]·[/] any OpenAI-compatible API: /provider → 「+ 添加新网关」菜单向导")
+        c.print("      (menu asks key once, autodetects models, saves everything)")
+        c.print("    [dim]·[/] built-in shortcut catalog (14 gateways): /provider zhipu/qwen/kimi/...")
         c.print("    [dim]·[/] Anthropic Claude: set ANTHROPIC_API_KEY env var")
         c.print("    [dim]·[/] Google Gemini: set GOOGLE_API_KEY env var")
         c.print("    [dim]·[/] Ollama: local, no key needed")
@@ -611,17 +614,18 @@ def _parse_switch_args(parts: list[str]) -> dict[str, Any]:
 def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
     """列出或切换模型提供商。**切换立即生效, 无需 /clear**。
 
-    任意 OpenAI 兼容端点三件套即可接入, 不必预注册:
-      /provider mygw base=https://x.com/v1 key=sk-... model=my-model
+    Kimi CLI 交互口径: 交互式全是菜单向导 (↑↓ 选择 · 隐藏贴 key · 自动探测
+    模型), 不用手写任何 key=/base=/model=; 交互接入自动持久化, 下次启动还在。
 
     用法:
-      /provider                       列出所有提供商 (TTY 下可输数字选择) + 配置状态 + 当前
-      /provider <name>                切换到该提供商 (自动选其默认模型, 当前会话立即生效)
+      /provider                       交互菜单: 列出所有提供商 + 配置状态 + 当前,
+                                      选项底部有「＋ 添加新网关」向导入口
+      /provider <name>                切换到该提供商 (自动选其默认模型, 立即生效)
       /provider <name> <model>        切换提供商 + 指定模型
       /provider <name> -p             切换并持久化 (下次启动仍用它)
       /provider <name> key=sk-...     切换并保存该 provider 的 key (config [keys] 段)
       /provider <name> base=<url> key=<key> [model=<id>]
-                                      三件套直接接入 (base URL + API key + model id);
+                                     高级用法 (脚本/非交互): 直接给出网关三要素;
                                       配 -p 时连 provider 一起记住, 之后 /provider <name> 一键切回
     """
     if state is None:
@@ -657,26 +661,31 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
         return "handled"
 
     def _interactive_switch(prov: str) -> str:
-        """选择后切换; 目标 provider 没有 key 时内联询问一次 (回车跳过)。"""
+        """菜单选中后切换; 目标 provider 没有 key 时隐藏式询问一次。
+
+        交互 = 用户明确在选: 一律持久化 (对齐 Kimi /model 写回 config),
+        下次启动仍在; 缺 key 回车跳过则只切不存 key。
+        """
         if not ready.get(prov, False) and prov != "ollama" and _input_fn is not None:
             disp = get_provider_display(prov)
             try:
-                k = (_input_fn(f"  API key for {prov} ({disp}) — paste, Enter to skip: ") or "").strip()
+                k = secret_prompt(f"  API key for {prov} ({disp}) — paste, Enter to skip: ",
+                                  input_fn=_input_fn, is_tty=is_tty)
             except (EOFError, KeyboardInterrupt):
-                c.print()
                 return "handled"
             if k:
-                return _do_switch(prov, key=k)
-        return _do_switch(prov)
+                return _do_switch(prov, persist=True, key=k)
+        return _do_switch(prov, persist=True)
 
-    # ── 智能网关 (2026-09-19 反馈: "只能选列表里的提供商") ──
-    # 目录名/别名/任意 URL 直接接: base 自动补全, key 询问一次, 模型列表
-    # 自动探测并让用户挑 — "三件套"压缩成"一个名字 + 一把 key"。
+    # ── 智能网关 (2026-09-19 反馈: "只能选列表里的提供商"; v0.7 → Kimi 向导) ──
+    # 交互路径只做三件事: 选平台 → 贴 key → 选模型, 全程菜单 + 隐藏输入;
+    # base 自动补全, key 必问, 模型经 /models 探测 — "三件套"压缩成
+    # "一个菜单 + 一把 key", 交互接入自动持久化 (重启还在)。
     is_tty = hasattr(out, "isatty") and out.isatty()
     _input_fn = state.get("_input_fn")
 
     def _gateway_ask_key(name: str, display: str, base: str) -> str | None:
-        """网关接入必问 key; 回车取消整个切换。"""
+        """网关接入必问 key (隐藏输入, Kimi 口径); 回车取消整个切换。"""
         inline_key = str(parsed["key"] or "")
         if inline_key:
             return inline_key
@@ -685,8 +694,9 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
                       f"/provider {name} key=<key> base={base}\n")
             return None
         try:
-            k = (_input_fn(f"  API key for {name} ({display} \u2192 {base}) "
-                           f"\u2014 paste, Enter to cancel: ") or "").strip()
+            k = secret_prompt(f"  Enter API key for {name} ({display} \u2192 {base}) "
+                              f"\u2014 paste, Enter to cancel: ",
+                              input_fn=_input_fn, is_tty=is_tty)
         except (EOFError, KeyboardInterrupt):
             out.write("\n")
             return None
@@ -696,12 +706,17 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
         return k
 
     def _gateway_pick_model(base: str, key: str) -> str:
-        """探测网关模型列表并让用户挑; 失败不阻断 (落当前模型 + 提示手设)。"""
+        """探测网关模型列表 (Kimi: "Verifying API key..." 流程) 并菜单让用户挑。
+
+        探测失败不阻断 (落 "" → 当前模型 + 提示手设); 交互路径用 ↑↓ 菜单
+        (Kimi "Select a model"), 非交互/无输入栈降级输出列表 + 提示。
+        """
+        out.write("  Verifying API key\u2026\n")
         ids = probe_models(base, key)
         if not ids:
             out.write(f"  \u26a0 couldn't list models at {base} "
                       f"(key rejected or no /models endpoint)\n")
-            out.write("    switch proceeds \u2014 set the model with /model <id>\n")
+            out.write("    \u00b7 switch proceeds \u2014 set the model with /model <id>\n")
             return ""
         if cur_model and cur_model in ids:
             out.write(f"  \u00b7 gateway has {len(ids)} models; keeping {cur_model}\n")
@@ -712,24 +727,17 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
                       + (" \u2026" if len(ids) > 8 else "") + "\n")
             out.write("    set with /model <id>\n")
             return ""
-        shown = ids[:15]
-        for i, mid in enumerate(shown, 1):
-            out.write(f"    {i:2d}. {mid}\n")
-        if len(ids) > len(shown):
-            out.write(f"    \u2026 (+{len(ids) - len(shown)} more \u2014 type the id)\n")
-        try:
-            pick = (_input_fn(f"  model [1-{len(shown)}] / id "
-                              f"(Enter = {shown[0]}): ") or "").strip()
-        except (EOFError, KeyboardInterrupt):
-            out.write("\n")
+        pick = choice_menu(
+            out, f"Select a model \u2014 \u00b7 {len(ids)} at {base} (Enter=pick, Ctrl+C=cancel):",
+            [(mid, mid, "") for mid in ids],
+            default_index=0,
+        )
+        if pick is None:
             return ""
-        if not pick:
-            return shown[0]
-        if pick.isdigit() and 1 <= int(pick) <= len(shown):
-            return shown[int(pick) - 1]
         return pick
 
     def _gateway_switch(gw: tuple[str, str, str], model: str, persist: bool) -> str:
+        """智能网关接入: key → 验证/选模型 → 切换 (交互路径默认持久化)。"""
         name, base, display = gw
         key = _gateway_ask_key(name, display, base)
         if key is None:
@@ -742,6 +750,51 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
         )
         _print_switch_result(res, out, show_endpoint=True)
         return "handled"
+
+    def _gateway_wizard() -> str:
+        """「＋ 添加新网关」向导 (Kimi setup 口径): 平台 → URL → key → 模型。
+
+        全部交互输入, 结束时 apply_switch(persist=True) 一步落盘
+        ([[providers]] + [keys] + default model), 重启仍在。
+        """
+        # 1) 平台: 内置目录 + 自定义 URL 一项
+        platform_choices: list[Choice] = [
+            (name, f"{display}  \u00b7  {base}", "")
+            for name, (base, display, _a) in sorted(_KNOWN_GATEWAYS.items())
+        ]
+        platform_choices.append(("__url__", "\uff0b custom URL (any OpenAI-compatible API)", ""))
+        name = choice_menu(
+            out,
+            "Select a platform \u2014 Enter=pick, Ctrl+C=cancel:",
+            platform_choices,
+        )
+        if name is None:
+            return "handled"
+        if name == "__url__":
+            # 自定义 URL: 提示给出示例, 允许裸 host (自动补 https:// + /v1)
+            if _input_fn is None:
+                out.write("  \u2717 custom gateway needs TTY \u2014 non-interactive: "
+                          "/provider <name> base=<url> key=<key>\n")
+                return "handled"
+            try:
+                raw = (_input_fn("  Base URL (e.g. https://api.example.com/v1) "
+                                 "\u2014 Enter to cancel: ") or "").strip()
+            except (EOFError, KeyboardInterrupt):
+                out.write("\n")
+                return "handled"
+            if not raw:
+                out.write("  \u00b7 cancelled\n")
+                return "handled"
+            gw = resolve_gateway(raw)
+            if gw is None:
+                out.write(f"  \u2717 cannot parse URL '{raw}' \u2014 need "
+                          "https://host[/path]\n")
+                return "handled"
+            name, base, display = gw
+        else:
+            base, display, _aliases = _KNOWN_GATEWAYS[name]
+        # 2) key (隐藏输入) → 验证 + 模型菜单 → 切换 (persist=True 落盘)
+        return _gateway_switch((name, base, display), model_arg, persist=True)
 
     if target:
         persist = bool(parsed["persist"])
@@ -763,7 +816,7 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
                 return _gateway_switch(gw, model_arg, persist)
         return _do_switch(target, model_arg, persist, parsed["key"], parsed["base"])
 
-    # ── 列出 (TTY 下可交互数字选择) ──
+    # ── 列出 (TTY 下可交互选择: 菜单 ↑↓ / 数字 / 名字直输) ──
     cur_disp = get_provider_display(cur_provider) if cur_provider else "(unset)"
     if is_tty:
         c = _shared_console(out)
@@ -787,29 +840,33 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
                 marker = ""
             c.print(f"    [dim]{i:2d}[/]  [dim][{get_provider_tag(key)}][/] {name}"
                     f"  {cfg}  [dim]{note}[/]{marker}")
+        c.print(f"    [dim]{len(providers) + 1:2d}[/]  [success]\uff0b 添加新网关[/]"
+                "  [dim]\u00b7 any OpenAI-compatible API[/]")
         c.print()
         c.print("  [dim]switch:[/] number \u00b7 name \u00b7 gateway name \u00b7 URL \u2014 e.g. "
                 "[accent]3[/], [accent]deepseek[/], [accent]zhipu[/], [accent]glm[/], "
                 "[accent]https://api.x.ai/v1[/]")
-        c.print(f"  [dim]known gateways ({len(_KNOWN_GATEWAYS)}, name + key = done, "
-                "base auto):[/] [accent]" + " ".join(sorted(_KNOWN_GATEWAYS)) + "[/]")
-        c.print("  [dim]add any gateway:[/] [accent]/provider <name> base=<url> key=<key> "
-                "[model=<id>][/]  [dim]\u00b7 -p persists[/]")
+        c.print("  [dim]add any OpenAI-compatible API:[/] 选 [success]+\u4e00[/]"
+                " (或直接贴 URL) \u2014 菜单问 key、自动探测模型、自动记住")
         c.print()
         if _input_fn:
-            try:
-                sel = (_input_fn("  select [N] / provider name (empty to stay): ") or "").strip()
-            except (EOFError, KeyboardInterrupt):
-                c.print()
+            # Kimi 交互口径: ↑↓ 菜单主路径; 也可以输数字 / 名字 / URL 直切
+            menu_choices: list[Choice] = [
+                (key, f"{key}  \u00b7  {display}  \u00b7  "
+                      + ("\u2713 ready" if ready.get(key, False) else "\u00b7 needs key"),
+                 "")
+                for key, display, _env, _url in providers
+            ]
+            menu_choices.append(("__url__", "\uff0b 添加新网关 \u00b7 any OpenAI-compatible API", ""))
+            sel = choice_menu(
+                out,
+                "Select a provider \u2014 Enter=pick, Ctrl+C=cancel:",
+                menu_choices,
+            )
+            if sel is None:
                 return "handled"
-            if not sel:
-                return "handled"
-            if sel.isdigit():
-                n = int(sel)
-                if 1 <= n <= len(providers):
-                    return _interactive_switch(providers[n - 1][0])
-                out.write(f"  invalid selection {n}\n")
-                return "handled"
+            if sel == "__url__":
+                return _gateway_wizard()
             return _interactive_switch(sel)
         c.print("  [dim]usage: /provider <name>  (e.g. /provider anthropic)  \u00b7 takes effect immediately[/]")
     else:
@@ -822,10 +879,11 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
             custom_tag = " (custom)" if key not in _PROVIDER_REGISTRY else ""
             out.write(f"    {i:2d}. [{get_provider_tag(key)}] {key:12s} {display}"
                       f"  ({cfg})  {host_disp}{custom_tag}{marker}\n")
-        out.write("  switch: /provider <name-or-number> [model] [-p] [key=...] [base=...]\n")
+        out.write("  switch: /provider <name-or-number> [model] [-p]\n")
         out.write(f"  known gateways ({len(_KNOWN_GATEWAYS)}): {' '.join(sorted(_KNOWN_GATEWAYS))}"
-                  "  — name + key is enough (base auto)\n")
-        out.write("  add any gateway (three fields): /provider mygw base=https://x.com/v1 key=sk-... model=my-model\n")
+                  "  - gateway name is enough (base auto)\n")
+        out.write("  add any OpenAI-compatible API: run /provider in the REPL — the menu\n"
+                  "  asks the key once, auto-detects models, saves everything.\n")
     return "handled"
 
 
@@ -1024,6 +1082,13 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
         c.print("    [dim]·[/] [bold]keyword[/] — fuzzy match (e.g. 'flash' matches all flash models)")
         c.print("    [dim]·[/] [bold]model name[/] — direct full name (e.g. 'gpt-4o-mini')")
         c.print("    [dim]·[/] /model [bold]-p[/] <name> — persist to config")
+        return "handled"
+    elif sel.startswith("/"):
+        # REPL 命令误入模型名: 输入框内斜杠是命令意图, 不是模型名。
+        # 防止把 state.model 污染成 "/exit" 这类 (实测: 模型选择器里
+        # 输 /exit 后提示符变成 ( /exit ) 再也回不去)。
+        c.print(f"  [yellow]'{sel}'[/] [dim]是命令, 不是模型名 — 先 Ctrl+C/回车退出选择,"
+                " 再到提示符运行[/dim]")
         return "handled"
     else:
         # Fuzzy match: search alias, full name, and note

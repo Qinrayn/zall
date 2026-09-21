@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-21
+
+### Kimi 接入向导: 选平台 → 贴 key → 选模型, 全程菜单, 自动落盘 (2026-09-21)
+
+`/provider` 与 `/model` 的交互全面对齐 Kimi CLI: 方向键菜单 + 隐藏密钥输入,
+消灭"每次要手写 base=/key=" 的三件套心智负担。
+
+- **`/provider` 菜单向导**: 列表读合并注册表 (内置 14 家目录 + `[[providers]]`
+  自定义), 每行显示 key 状态/端点 host/custom 标记; 一键切换即持久化 —
+  **修复交互接入不落盘的老 bug** (`_interactive_switch` 曾 `persist=False`,
+  重启后网关消失)。选中缺 key 的 provider 弹隐藏输入, 回车跳过则只切不存。
+- **「＋ 添加新网关」向导**: 任意 OpenAI 兼容 API 三步接入 — 选来源 (内置目录
+  或贴 URL, base 自动补全) → 隐藏输入 key → Verifying 探测 /models →
+  菜单挑模型 → 一键写 `[[providers]]` + `[keys]` + model, 重启还在。
+- **密钥输入重写 (select.py)**: 改为 Windows 原生 msvcrt 逐键读取, 无回显,
+  Enter 提交 / Esc 取消 / 回退键删除; PTY (ConPTY/winpty) 实测嵌套
+  prompt_toolkit Application 与主 PromptSession 双读同一键盘流导致明文泄漏,
+  弃用之。选择菜单改键盘更新高亮 (↑↓ 时指示条实时移动)。
+- **首启 onboarding 改指路式**: 不再弹三字段表单, 改为"运行 /provider, 选
+  平台 → 贴 key → 选模型"指引。
+- **文案去误导**: /provider 底行与 /doctor、/model -g 的 "Supported
+  providers" 改为"内置 14 家目录 + 任意 OpenAI 兼容接口均可接入"，不再
+  暗示只有那 14 家。
+
+### 修复
+
+- 交互接入网关重启后消失 (`persist=False`) → 交互路径一律 `persist=True`。
+- REPL 内密钥输入明文泄漏 (嵌套 Application 双读输入队列) → msvcrt 原生读键。
+- 菜单高亮不随 ↑↓ 更新 → 键盘事件重绘。
+- 首启 onboarding 不再用三字段表单 (避免吞首条任务, 改菜单指路)。
+
 ## [0.6.0] - 2026-09-19
 
 ### 实测反馈轮: /provider 重做 + 干活排队打字 + 对比度/噪声 (2026-09-19)

@@ -16,7 +16,6 @@ from zall._util.model_registry import (
     _provider_api_bases,
     _provider_display,
     _provider_env_vars,
-    _provider_key_urls,
     get_model_provider,
 )
 from zall._util.toml import extract_section_name as _extract_section_name
@@ -28,7 +27,6 @@ _PLACEHOLDER_API_KEY = "your-api-key-here"
 _PROVIDER_ENV_VARS: dict[str, str] = dict(_provider_env_vars)
 _PROVIDER_DISPLAY: dict[str, str] = dict(_provider_display)
 _PROVIDER_DEFAULT_API_BASE: dict[str, str] = dict(_provider_api_bases)
-_PROVIDER_GET_KEY_URL: dict[str, str] = dict(_provider_key_urls)
 
 _MODEL_ALIASES: dict[str, str] = {
     # Agnes aliases all point to agnes-2.0-flash (the only active API name)
@@ -71,27 +69,6 @@ def _config_status() -> dict[str, Any]:
     }
 
 
-def _infer_provider_from_api_base(api_base: str) -> str:
-    """Infer provider from api_base (Item D: based on the full registry)."""
-    ab = (api_base or "").lower()
-    registry = _get_provider_registry()
-    for prov, (_, _, base, _, _, _) in registry.items():
-        if base and base.lower() in ab:
-            return prov
-    # Fallback: keyword matching
-    if "agnes" in ab:
-        return "agnes"
-    if "anthropic" in ab:
-        return "anthropic"
-    if "generativelanguage" in ab or "googleapis" in ab:
-        return "gemini"
-    if "deepseek" in ab:
-        return "deepseek"
-    if "ollama" in ab or "localhost:11434" in ab:
-        return "ollama"
-    return "openai"
-
-
 def _default_api_base_for_model(model_name: str) -> str:
     """Infer default api_base from model_name (Item D: based on the full registry)."""
     registry = _get_provider_registry()
@@ -109,9 +86,10 @@ def _default_api_base_for_model(model_name: str) -> str:
 
 
 def _onboarding(out: Any, input_fn: Any) -> None:
-    """First-run onboarding: guided 3-field setup (base URL + model id + key).
+    """First-run onboarding: 引导接入任意 OpenAI-兼容模型 (Kimi CLI 口径)。
 
-    任意 OpenAI-兼容来源只需这 3 项即可接入。均可回车跳过 (保留当前值)。
+    不强制交互 (不抢输入栈): 只提示下一步 — REPL 里跑 /provider 即进入
+    菜单向导 (选平台 → 贴 key → 选模型, 自动落盘); 或走环境变量。
     """
     status = _config_status()
     if status["ready"]:
@@ -119,41 +97,16 @@ def _onboarding(out: Any, input_fn: Any) -> None:
     from zall.safety.config import ensure_config
 
     ensure_config()
+    out.write("  \u26a0 no API key configured \u2014 connect a model to start.\n")
     if not hasattr(out, "isatty") or not out.isatty():
-        out.write("  ⚠ no API key configured — set ZALL_API_KEY or edit "
+        out.write("  \u00b7 non-interactive: set ZALL_API_KEY (+ ZALL_MODEL), or edit "
                   "~/.zall/config.toml\n")
         out.flush()
         return
-    # Infer provider from api_base to show the correct key URL
-    provider = _infer_provider_from_api_base(status.get("api_base", ""))
-    key_url = _PROVIDER_GET_KEY_URL.get(provider, _PROVIDER_GET_KEY_URL["agnes"])
-    cur_base = (status.get("api_base") or "").strip()
-    cur_model = (status.get("model") or "").strip()
-    out.write("  Welcome to zall — connect a model (works with any OpenAI-compatible API).\n")
-    out.write("  Three things: base URL, model id, API key. Press Enter to keep the default.\n")
-    out.write(f"  (Get a key at {key_url}, or set ZALL_API_KEY.)\n")
-    try:
-        base = (input_fn(f"  1) base URL [{cur_base or 'default'}]: ") or "").strip()
-        model = (input_fn(f"  2) model id [{cur_model or 'default'}]: ") or "").strip()
-        key = (input_fn("  3) API key (Enter to skip): ") or "").strip()
-    except (EOFError, KeyboardInterrupt):
-        out.write("\n")
-        return
-    # 持久化顺序: model (写 name + 推断 base) → base (用户显式 base 覆盖) → key
-    if model:
-        _persist_model_to_config(model)
-        out.write(f"  \u2713 model = {model}\n")
-    if base:
-        from zall.cli.commands.config import _persist_config_key
-        _persist_config_key("api_base", base)
-        out.write(f"  \u2713 api_base = {base}\n")
-    if key:
-        from zall.safety.config import save_api_key
-
-        save_api_key(key)
-        out.write("  \u2713 API key saved to ~/.zall/config.toml\n")
-    elif not (model or base):
-        out.write("  (skipped — edit ~/.zall/config.toml later, or run /config guide)\n")
+    # Kimi 口径: 不弹输入框, 只给一条路 — 菜单向导全流程在 REPL 里 /provider
+    out.write("  \u00b7 any OpenAI-compatible API works: run /provider and pick a gateway\n"
+              "    or paste a URL \u2014 menu asks the key once, saves everything.\n")
+    out.write("  \u00b7 or set ZALL_API_KEY + ZALL_MODEL, then restart.\n")
     out.flush()
 
 

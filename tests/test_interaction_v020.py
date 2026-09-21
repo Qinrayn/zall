@@ -202,21 +202,20 @@ class TestOnboarding:
         _onboarding(out, input_fn=lambda _p: "x")
         assert "no API key" in out.getvalue()
 
-    def test_tty_saves_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_tty_guides_to_provider_without_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_config(monkeypatch, api_key="your-api-key-here")
         monkeypatch.setattr("zall.safety.config.ensure_config", lambda: None)
-        saved: dict = {}
-
-        def fake_save(key: str) -> None:
-            saved["key"] = key
-
-        monkeypatch.setattr("zall.safety.config.save_api_key", fake_save)
-        # v3.x: onboarding 现为 3 段引导 (base URL → model → key); 前两段回车跳过, 只填 key
-        seq = iter(["", "", "sk-entered"])
+        monkeypatch.setattr(
+            "zall.safety.config.save_api_key",
+            lambda key: pytest.fail("should not save — onboarding is guidance only"),
+        )
+        # v0.7: onboarding 不再弹三字段表单, 只指路 /provider 向导
         out = _FakeTTY()
-        _onboarding(out, input_fn=lambda _p: next(seq))
-        assert saved.get("key") == "sk-entered"
-        assert "saved" in out.getvalue()
+        _onboarding(out, input_fn=lambda _p: pytest.fail("no input should be read"))
+        text = out.getvalue()
+        assert "/provider" in text
+        assert "OpenAI-compatible" in text
+        assert "Three things" not in text  # 旧三件套教义已删
 
     def test_tty_skip_does_not_save(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_config(monkeypatch, api_key="")
@@ -227,7 +226,7 @@ class TestOnboarding:
         )
         out = _FakeTTY()
         _onboarding(out, input_fn=lambda _p: "")  # Enter 跳过
-        assert "skipped" in out.getvalue()
+        assert "env vars" in out.getvalue() or "ZALL_API_KEY" in out.getvalue()
 
 
 # ──────────────────────────────────────────────────────────────────────────
