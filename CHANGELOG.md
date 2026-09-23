@@ -2,6 +2,70 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-23
+
+### 免 Python 安装: 下载 zall.exe 即用 + 一条命令装 (2026-09-22)
+
+面向不写代码的用户，把安装压到"下载 / 双击 / 一条命令"，全程不用手动装 Python。
+
+- **CI 自动构建单文件 exe**: ci.yml 新增 `release-exe` 任务 — 推 `v*` tag 即在
+  windows-latest 按 `zall.spec` 打包 PyInstaller 单文件 exe 并附到 GitHub
+  Release。此前 exe 每次手工在本机打；自动构建顺带绕开"中文用户名路径无法
+  构建 PyInstaller"的坑。
+- **README 安装节重写为三路**: ①下载 `zall.exe` 即用（推荐，该节不出现
+  Python）②`uv tool install zall`（uv 自动准备 Python 环境）③pip（开发者）。
+- **exe 形态 `/update` 不再误导**: exe 里 `sys.executable` 指向自身，原 pip
+  升级路径会递归启动本程序；现在照常查 PyPI 新版本，升级提示改为去 Releases
+  重下新 exe（`_is_frozen()` 分支，`_is_dev_install()` 对 frozen 返回 False）。
+
+### 交互语义对齐 Kimi CLI: 双击 Ctrl+C 退出 + 回合级兜底 (2026-09-22)
+
+- **统一外层入口 `console_main`**: console script / `python -m zall` / exe 三路
+  共用 — 启动期 Ctrl+C 安静退 130；`zall --help | head` 这类管道断裂静默退 0，
+  不再甩 traceback。
+- **REPL 双击 Ctrl+C 退出**: 单次 Ctrl+C 打断当前输入并提示 "Ctrl-C again to
+  exit"，2 秒内第二次 → `bye` + 退出码 130（此前按多少次都困在提示符，只能
+  Ctrl+D）。
+- **回合级异常兜底**: 每回合的执行段包进 try/except — 未预期异常只落一行
+  `✗ internal error` 回到提示符，会话原样保留（此前会连会话一起崩）。Ctrl+C
+  是 BaseException，不经此路。
+- 菜单残留按键排空 (`_drain_pending_keys`；POSIX 分支加读取上限，stdin 是持续
+  供数的管道时不死循环)。
+
+### 修复: 首个回合后 REPL 冻结 — 渲染器写锁自死锁 (2026-09-23)
+
+`render_status_bar()` 在持有写锁的情况下调用 `_clear_line()`，后者再次获取同一
+把不可重入锁 → 同线程自死锁。触发条件：任一真回合跑完后，任何斜杠命令（实测
+`/btw`、`/model`）或空回车都会冻住 REPL，屏幕停在最后一行不再响应——命令后回显
+状态行走的正是这条路径。锁改 `threading.RLock`（同线程可重入，跨线程互斥不变）。
+该 bug 自 0.1.0 起就在，0.6.1 已发布代码同样携带。
+
+### 提示行与配色 (2026-09-23)
+
+- **对话行提示符不再暗灰**: 模型名 + `▸` 整行走主题 accent 真彩加粗（原先硬编码
+  ansibrightblack）；`[plan]` 标记单独琥珀槽位；淡色只留给空输入的占位提示。
+- **启动屏只留一行提示**: 常驻 footer 已含 `/ commands · @ files · ? shortcuts`，
+  启动 Tip 行只保留 footer 没有的逃生键位（`/help commands · ! shell · Ctrl-R
+  history · Ctrl-D exit`）；删掉第二行静态提示与 `render_contextual_hint("idle")`
+  的每回合重打（工具/权限/流式这类上下文提示保留）。
+- **选择器/向导子提示不再挂任务占位文案**: `Type a task, / commands, @ files...`
+  原先是所有输入框共用的占位，在 `/model` 选择器上属误导；现在只给 REPL 主提示符。
+
+### /model 上游可用性标注 (2026-09-23)
+
+当前 provider 头部标注 `· upstream /models: N live`（静默探测，3 秒超时，失败
+不阻断）；不在上游列表的条目标 ⚠ — 真·下线模型标 `delisted?`，provider 级条目
+（选中会把模型名设成非模型 id）标 `provider entry — not a model id`。应对
+"配置先行、上游已撤"的模型 id（agnes-2.5、sensenova 下线 deepseek-chat 这类），
+免得切过去才撞 404。
+
+### 测试与工具 (2026-09-23)
+
+- `tests/test_repl_interrupt_semantics.py`: 单次 Ctrl+C 继续 / 双击退 130 / 回合
+  异常不崩 REPL 三条语义定型测试。
+- `scripts/steps_smoke_post_turn.json`: pty 回归冒烟 — 真回合 → 回合后命令 →
+  /exit（老冒烟只走 启动→/help→/exit，碰不到状态行路径，藏了上述死锁一版）。
+
 ## [0.6.1] - 2026-09-21
 
 ### Kimi 接入向导: 选平台 → 贴 key → 选模型, 全程菜单, 自动落盘 (2026-09-21)
