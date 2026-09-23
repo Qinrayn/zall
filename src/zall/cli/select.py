@@ -158,6 +158,34 @@ def _render_menu_text(
     return lines
 
 
+def _drain_pending_keys() -> None:
+    """排空控制台残留按键 (上一菜单数字直选退出后惯按的回车等)。
+
+    残留键会污染下一个菜单 — 第一个 Application 退出后, 紧随其后的
+    Enter 停留在输入队列, 被下一个 prompt_toolkit 菜单当作自己的回车,
+    直接提交第一项 (PTY 实测: 向导平台菜单被误选 Fireworks)。只在菜单
+    即将读取新输入前调用; 无缓冲直接返回。
+    """
+    try:
+        import msvcrt
+        while msvcrt.kbhit():
+            try:
+                msvcrt.getwch()
+            except Exception:
+                break
+    except ImportError:  # POSIX: 非阻塞读取 stdin 中已有字节
+        import select
+        try:
+            for _ in range(256):  # 上限兜底: stdin 是持续供数的管道时不死循环
+                if not select.select([sys.stdin], [], [], 0)[0]:
+                    break
+                sys.stdin.read(1)
+        except (OSError, ValueError):
+            pass
+    except (OSError, ValueError):
+        pass
+
+
 def _ptk_choice_menu(
     out: Any, title: str, choices: Sequence[Choice], *, default_index: int = 0,
 ) -> str | None:
@@ -172,6 +200,8 @@ def _ptk_choice_menu(
     from prompt_toolkit.layout import Layout, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
 
+    # 排空上一菜单残留按键 (数字直选后的惯按回车会污染本菜单)
+    _drain_pending_keys()
     index: list[int] = [default_index if 0 <= default_index < len(choices) else 0]
     result: list[str | None] = [None]  # 结果: 选中 value / None(取消)
 

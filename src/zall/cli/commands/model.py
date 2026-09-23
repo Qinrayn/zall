@@ -988,6 +988,23 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
     _models = _build_dynamic_model_list(_provider_ready, cur, _custom_providers)
     _all_aliases = set(a for a, *_ in _MODEL_PRESETS)
 
+    # ── 上游可用性探测 (Kimi: 列表只认上游 /models) ──
+    # 配置里"支持"≠ 上游"还在" — sensenova 下线 deepseek-chat、agnes-2.5
+    # 曾 503 都是配置先行、上游已撤。对当前 provider 探一次 /models
+    # (3s 超时, 失败静默不阻断), 列表里已下线的预设标警示, 免得切过去
+    # 才撞 404。只探当前 provider: 别家没有生效 key, 探了也是 401。
+    _avail_ids: set[str] | None = None
+    if _provider_ready.get(cur_provider, False):
+        try:
+            from zall.cli.model_switch import probe_models as _probe, provider_endpoint as _pe
+            _ep = _pe(cur_provider)
+            if _ep.api_base:
+                _ids = _probe(_ep.api_base, _ep.api_key, timeout=3.0)
+                if _ids:
+                    _avail_ids: set[str] = set(_ids)
+        except Exception:
+            _avail_ids = None
+
     # de-hardcode: tag/label 派生自 model_registry 单一真相源 (不再在此重复硬编码)
     # A4: 用合并表 (含自定义 provider) 构建标签/显示名, 自定义 provider 也获正确标记。
     from zall.cli.config import _get_provider_registry as _get_merged_registry
@@ -1030,19 +1047,31 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
         if provider != _last_provider:
             label = _PROVIDER_LABEL.get(provider, provider)
             configured = _provider_ready.get(provider, False)
-            if configured:
+            if provider == cur_provider and _avail_ids is not None:
+                c.print(f"  [dim]{label}[/]  [dim]· upstream /models: {len(_avail_ids)} live[/]")
+            elif configured:
                 c.print(f"  [dim]{label}[/]  [dim]· configured[/]")
             else:
                 c.print(f"  [dim]{label}[/]")
             _last_provider = provider
         _idx += 1
         tag = _PROVIDER_TAG.get(provider, "?")
+        _gone = ""
+        if provider == cur_provider and _avail_ids is not None \
+                and alias not in _avail_ids and full_name not in _avail_ids:
+            if alias == provider:
+                # 自定义 provider 的 provider 级条目 (alias=full_name=provider 名,
+                # 选它会把模型名设成 "sensenova" 这种非模型 id) — 不是"已下线",
+                # 是从未是模型 id; 文案要自解释, 别误导成上游撤掉了某个模型。
+                _gone = "  [yellow]\u26a0 provider entry \u2014 not a model id[/]"
+            else:
+                _gone = "  [yellow]\u26a0 not in upstream /models (delisted?)[/]"
         # Current model gets bold/cyan styling
         if alias == cur:
-            c.print(f"    {_idx:2d}. [bold cyan][{tag}][/] [bold cyan]{alias:22s}[/] [dim]{note}[/]  [cyan]← current[/]")
+            c.print(f"    {_idx:2d}. [bold cyan][{tag}][/] [bold cyan]{alias:22s}[/] [dim]{note}[/]  [cyan]\u2190 current[/]{_gone}")
         else:
             cfg_tag = " [dim]· configured[/]" if is_configured else ""
-            c.print(f"    {_idx:2d}. [dim][{tag}][/] {alias:22s} [dim]{note}[/]{cfg_tag}")
+            c.print(f"    {_idx:2d}. [dim][{tag}][/] {alias:22s} [dim]{note}[/]{cfg_tag}{_gone}")
 
     # If current model is custom (not in presets), show it too
     if cur not in _all_aliases and cur != "(unset)":

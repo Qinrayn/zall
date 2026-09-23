@@ -1,0 +1,9 @@
+[
+  {"wait_for": "commands", "timeout": 40},
+  {"wait": 1.0},
+  {"type": "/help\r"},
+  {"wait_for": "detailed usage", "timeout": 30},
+  {"wait": 1.0},
+  {"type": "/exit\r"},
+  {"wait_for": "bye", "timeout": 15}
+]

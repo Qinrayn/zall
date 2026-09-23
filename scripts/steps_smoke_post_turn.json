@@ -1,0 +1,12 @@
+[
+  {"wait_for": "commands", "timeout": 40},
+  {"wait": 1.0},
+  {"type": "what is the capital of France? one word only"},
+  {"wait_for": " tokens", "timeout": 150},
+  {"wait": 2.0},
+  {"type": "/btw hi"},
+  {"wait_for": "btw. ", "timeout": 150},
+  {"wait": 4.0},
+  {"type": "/exit"},
+  {"wait_for": "bye", "timeout": 20}
+]

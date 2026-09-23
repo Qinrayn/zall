@@ -63,10 +63,12 @@ def _build_pt_style() -> Any:
         accent = _pt_color(_C.ACCENT, "ansiyellow")
         subtle = _pt_color(_C.SUBTLE, "ansibrightblack")
         text = _pt_color(_C.STATUS_BAR_TEXT, "ansiwhite")
+        plan = _pt_color(_C.WARN, "ansiyellow")
         panel_bg = "#23211c"  # 深中性底 (与 attic 暖色系一致; 菜单需要不透明底)
         selected_fg = "#14120e"
         return Style.from_dict({
             "prompt": f"{accent} bold",
+            "plan": f"{plan} bold",
             "placeholder": subtle,
             "bottom-toolbar": f"bg:{panel_bg} {text}",
             "completion-menu.completion": f"bg:{panel_bg} {text}",
@@ -586,16 +588,29 @@ def make_prompt_fn(
             from prompt_toolkit.formatted_text import HTML
             from prompt_toolkit.shortcuts import CompleteStyle
 
-            styled_prompt = HTML(f"<ansibrightblack>{_html.escape(prompt_text)}</ansibrightblack>")
+            # 对话行配色 (console 门面纪律: 对比度要够): 提示符整行走主题
+            # accent 加粗 — 模型名/箭头是用户每次落眼的锚点, 不能用暗灰。
+            # 淡色只留给 placeholder (空输入提示)。[plan] 是只读警示, 单独
+            # 琥珀槽位 (style 里 "plan" 类)。
+            _head = prompt_text.replace("[plan]", "").replace("\u25b8", "").strip()
+            _styled = HTML(
+                f"<prompt>{_html.escape(_head)}</prompt> "
+                + ("<plan>[plan]</plan> " if "[plan]" in prompt_text else "")
+                + "<prompt>\u25b8</prompt> "
+            )
 
-            # v1.2: placeholder 提示 (借鉴 Claude Code: 空输入时显示淡色提示)
-            _placeholder = HTML(
-                '<ansibrightblack>Type a task, / commands, @ files... '
-                '(Ctrl-R history, Alt-Enter multiline)</ansibrightblack>'
+            # v1.2: placeholder 提示 (借鉴 Claude Code: 空输入时显示淡色提示)。
+            # 只给 REPL 主提示符 (带 ▸) — 选择器/向导等子提示各自写明要输什么
+            # (如 "select [N] / search keyword:"), 再叠一句 "Type a task" 是
+            # 误导 (实测: /model 选择器上挂着任务提示)。
+            _placeholder = (
+                HTML('<ansibrightblack>Type a task, / commands, @ files... '
+                     '(Ctrl-R history, Alt-Enter multiline)</ansibrightblack>')
+                if "\u25b8" in prompt_text else None
             )
 
             result = pt_prompt(
-                styled_prompt,
+                _styled,
                 completer=completer,
                 history=history,
                 key_bindings=bindings,

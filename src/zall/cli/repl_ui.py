@@ -14,6 +14,7 @@ IPR constraints:
 from __future__ import annotations
 
 import sys
+import time
 from typing import Any
 
 from zall._util.logging import get_zall_logger as _get_zall_logger
@@ -127,7 +128,8 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
       │ directory: ~/zall            │
       │ branch:    master            │
       ╰──────────────────────────────╯
-        Tip: / commands · @ files · ? shortcuts · ! shell
+        Tip: /help commands · ! shell · Ctrl-R history · Ctrl-D exit
+    唯一一行启动提示; 键位已由常驻 footer 承担, 不再叠第二行。
     非 TTY (管道/CI) 降级为单行文本 — 输出契约不变。
     """
     try:
@@ -209,10 +211,11 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
     )
     console.print()
     console.print(_Align(panel, align="center"))
-    # Tip 行 (Codex "Tip:" 对标)
+    # Tip 行 (Codex "Tip:" 对标) — 与常驻 footer (/ commands · @ files · ? shortcuts)
+    # 互补: 这里只留 footer 没有的逃生键位, 启动屏不堆第二行静态提示。
     console.print(
         f"  [{_C.SUBTLE}]Tip:[/] "
-        f"[{_C.DIM}]/ commands \u00b7 @ files \u00b7 ? shortcuts \u00b7 ! shell \u00b7 Ctrl-D exit[/]"
+        f"[{_C.DIM}]/help commands \u00b7 ! shell \u00b7 Ctrl-R history \u00b7 Ctrl-D exit[/]"
     )
     console.print()
 
@@ -583,7 +586,6 @@ def repl(
                   branch=get_cached_cwd_meta(state).git_branch,
                   max_steps=state["max_steps"],
                   verbose=state["verbose"], plan=state.get("plan_mode", False))
-    out.write("  /help commands \u00b7 /science research \u00b7 Ctrl-D exit \u00b7 Ctrl-R search history \u00b7 /plan read-only\n")
     out.flush()
 
     # v2: background update check (non-blocking)
@@ -610,6 +612,7 @@ def repl(
     from zall.cli.typeahead import TypeaheadCollector as _TypeaheadCollector
     _ta: _TypeaheadCollector = _TypeaheadCollector()
     _queued_turns: list[str] = []
+    _last_interrupt_at: float = 0.0  # Ctrl+C 双击退出判定 (2s 窗口)
 
     try:
         while True:
@@ -636,7 +639,15 @@ def repl(
                 out.write("\n  bye\n")
                 return 0
             except KeyboardInterrupt:
-                out.write("\n")
+                # Kimi/Codex 口径: 单次 Ctrl+C 打断的是当前输入 (清行继续);
+                # 2s 内两次 → 退出 (POSIX 惯例码 130) — 否则习惯性双击永远
+                # 困在提示符, 只能 Ctrl+D。
+                now = time.monotonic()
+                if now - _last_interrupt_at < 2.0:
+                    out.write("  bye\n")
+                    return 130
+                _last_interrupt_at = now
+                out.write("\n  \u00b7 Ctrl-C again to exit\n")
                 continue
             if line is None:
                 return 0
@@ -652,221 +663,242 @@ def repl(
                 out.write(f"  \u26a0 input too long ({len(line):,} chars), truncated to 100,000\n")
                 line = line[:100_000]
 
-            if line.startswith("/"):
-                if line.strip() == "/":
-                    from zall.cli.commands import _handle_bare_slash
-                    _handle_bare_slash(out)
-                    continue
-                skind, spayload = _route_skill(line, skills, out)
-                if skind == "task":
-                    line = spayload
-                elif skind == "handled":
-                    continue
-                else:
-                    try:
-                        action = handle_slash(line, state, out, loop)
-                    except Exception as e:
-                        out.write(f"  \u2717 command error: {e}\n")
-                        out.flush()
+            # ── 回合级兜底 (Kimi 口径): REPL 不因未预期异常崩会话 ──
+            # @file 展开 / loop 构建 / step 循环 / 渲染收尾任何一处抛错, 只落一行
+            # 错误回提示符, 会话上下文原样保留 (换模型重试/继续)。
+            # Ctrl+C 不经此路: 它是 BaseException, except Exception 接不住,
+            # 仍由 step 循环的中断语义与外层 console_main 分层处理。
+            try:
+                if line.startswith("/"):
+                    if line.strip() == "/":
+                        from zall.cli.commands import _handle_bare_slash
+                        _handle_bare_slash(out)
                         continue
-                    if action == "exit":
-                        return 0
-                    if action == "clear":
-                        loop = None
-                    # Argus _print_status_bar 纪律: 命令后回显当前状态行
+                    skind, spayload = _route_skill(line, skills, out)
+                    if skind == "task":
+                        line = spayload
+                    elif skind == "handled":
+                        continue
+                    else:
+                        try:
+                            action = handle_slash(line, state, out, loop)
+                        except Exception as e:
+                            out.write(f"  \u2717 command error: {e}\n")
+                            out.flush()
+                            continue
+                        if action == "exit":
+                            return 0
+                        if action == "clear":
+                            loop = None
+                        # Argus _print_status_bar 纪律: 命令后回显当前状态行
+                        _echo_status(state)
+                        continue
+
+                # Codex 交互对标: 裸 "?" = 快捷键卡片 (TUI 内 ? 浮层的控制台同源)
+                if line == "?":
+                    from zall.cli.commands.system import _print_shortcuts
+                    _print_shortcuts(out)
                     _echo_status(state)
                     continue
+                # Codex "! for shell commands": 用户显式命令直接执行, 不经过模型
+                if line.startswith("!") and len(line) > 1:
+                    _run_shell_passthrough(line[1:].strip(), out)
+                    continue
+                if line == "!":
+                    # 实测反馈: 裸 "!" 落到模型变成一个 goal, 还可能撞上 API 错误刷屏。
+                    # 这里给用法提示 (与快捷键卡片口径一致)。
+                    out.write("  ! <command> runs a shell command directly, without the model\n")
+                    out.write("  e.g. !git status · !ls · !python -V\n")
+                    out.flush()
+                    continue
 
-            # Codex 交互对标: 裸 "?" = 快捷键卡片 (TUI 内 ? 浮层的控制台同源)
-            if line == "?":
-                from zall.cli.commands.system import _print_shortcuts
-                _print_shortcuts(out)
-                _echo_status(state)
-                continue
-            # Codex "! for shell commands": 用户显式命令直接执行, 不经过模型
-            if line.startswith("!") and len(line) > 1:
-                _run_shell_passthrough(line[1:].strip(), out)
-                continue
-            if line == "!":
-                # 实测反馈: 裸 "!" 落到模型变成一个 goal, 还可能撞上 API 错误刷屏。
-                # 这里给用法提示 (与快捷键卡片口径一致)。
-                out.write("  ! <command> runs a shell command directly, without the model\n")
-                out.write("  e.g. !git status · !ls · !python -V\n")
-                out.flush()
-                continue
+                # v2.x: @file 引用展开 — 把 @path 解析到的真实文件内容注入消息 (Claude Code 式)。
+                # 只展开真实文件; 非文件 @token 原样保留。slash 命令已在上方返回, 不受影响。
+                line, _injected = expand_at_references(line)
+                if _injected:
+                    out.write(f"  \u00b7 injected {len(_injected)} file(s): {', '.join(_injected[:5])}\n")
+                    out.flush()
 
-            # v2.x: @file 引用展开 — 把 @path 解析到的真实文件内容注入消息 (Claude Code 式)。
-            # 只展开真实文件; 非文件 @token 原样保留。slash 命令已在上方返回, 不受影响。
-            line, _injected = expand_at_references(line)
-            if _injected:
-                out.write(f"  \u00b7 injected {len(_injected)} file(s): {', '.join(_injected[:5])}\n")
-                out.flush()
-
-            if loop is None:
-                # MCP 后台加载收敛 (首个回合构建前保证工具可用)
-                if not mcp_tools:
-                    mcp_tools = _mcp_loader.wait()
-                    state["_mcp_tools"] = mcp_tools
-                    _mcp_log = _mcp_loader.status().get("log", "")
-                    if _mcp_log.strip():
-                        out.write(_mcp_log)
-                loop = build_repl_loop(
-                    line, state, yes, json_mode, stream, out,
-                    max_steps=state.get("max_steps", REPL_MAX_STEPS),
-                    verbose=state.get("verbose", False),
-                    seed_messages=state.pop("resume_messages", None),
-                    plan_mode=state.get("plan_mode", False),
-                    mcp_tools=tuple(mcp_tools),
-                    ext_registry=ext_registry,
-                    strict=state.get("strict", strict),
-                )
                 if loop is None:
-                    continue
-                state["_loop"] = loop
-                # v0.6.0: 更新状态栏
-                renderer = state.get("_renderer")
-                if renderer is not None and hasattr(renderer, "update_status"):
-                    from zall.cli.environment import get_cached_cwd_meta
-                    _meta = get_cached_cwd_meta(state)
-                    renderer.update_status(
-                        model=state.get("model", "") or str(getattr(loop.model_adapter, "model_name", "")),
-                        branch=_meta.git_branch or "",
-                        goal=loop.goal.statement.goal_type.value if hasattr(loop.goal, "statement") else "",
-                        plan=state.get("plan_mode", False),
+                    # MCP 后台加载收敛 (首个回合构建前保证工具可用)
+                    if not mcp_tools:
+                        mcp_tools = _mcp_loader.wait()
+                        state["_mcp_tools"] = mcp_tools
+                        _mcp_log = _mcp_loader.status().get("log", "")
+                        if _mcp_log.strip():
+                            out.write(_mcp_log)
+                    loop = build_repl_loop(
+                        line, state, yes, json_mode, stream, out,
+                        max_steps=state.get("max_steps", REPL_MAX_STEPS),
+                        verbose=state.get("verbose", False),
+                        seed_messages=state.pop("resume_messages", None),
+                        plan_mode=state.get("plan_mode", False),
+                        mcp_tools=tuple(mcp_tools),
+                        ext_registry=ext_registry,
+                        strict=state.get("strict", strict),
                     )
-                confirmed, final_goal = confirm_goal(out, loop.goal, judge_mode="none", yes=yes, strict=strict, input_fn=input_fn)
-                if not confirmed:
-                    out.write("  goal not confirmed; type a new task to retry.\n")
-                    out.flush()
-                    loop = None
-                    state.pop("_loop", None)
-                    continue
-                # 如果用户修改了 goal, 更新 loop 的 goal
-                if final_goal is not None and final_goal is not loop.goal:
-                    # 通过 builder 属性更新 loop 的 goal
-                    if hasattr(loop, "_goal"):
-                        loop._goal = final_goal
-            else:
-                loop.add_user_message(line)
-
-            # 回合开始: 采集键盘输入 (Enter 排队), spinner 状态行实时回显
-            from zall.cli.render import set_typeahead_source as _set_ta_src
-            _ta.start()
-            _set_ta_src(lambda: (_ta.buffer, _ta.queued_count))
-            while True:
-                try:
-                    pre_step_msg_count = len(loop.messages)
-                    result = loop.step()
-                except KeyboardInterrupt:
-                    # stop spinner (防止残留output)
+                    if loop is None:
+                        continue
+                    state["_loop"] = loop
+                    # v0.6.0: 更新状态栏
                     renderer = state.get("_renderer")
-                    if renderer is not None and hasattr(renderer, "_stop_spinner"):
-                        renderer._stop_spinner()
-                    # 流式输出保留: flush buffer + 插入 [Interrupted] 标记
-                    # 不像旧行为完全丢弃已显示的内容, 而是保留用户已看到的 token
-                    if renderer is not None and hasattr(renderer, "interrupt_stream"):
-                        renderer.interrupt_stream()
-                    # E4: rollback messages to pre-step state (discard model partial output)
-                    pre_step_msgs = loop.messages[:pre_step_msg_count]
-                    loop.set_messages(pre_step_msgs)
-                    # Record user_interrupt event in timeline
-                    try:
-                        import time as _time
-
-                        from zall.core.verifiability import EventType as _EventType
-                        loop.recorder.append(
-                            event_id=f"user_interrupt_{loop.step_count}",
-                            ts=int(_time.time() * 1000),
-                            event_type=_EventType.USER_INTERRUPT,
-                            payload={"step": loop.step_count, "partial_output_preserved": True},
+                    if renderer is not None and hasattr(renderer, "update_status"):
+                        from zall.cli.environment import get_cached_cwd_meta
+                        _meta = get_cached_cwd_meta(state)
+                        renderer.update_status(
+                            model=state.get("model", "") or str(getattr(loop.model_adapter, "model_name", "")),
+                            branch=_meta.git_branch or "",
+                            goal=loop.goal.statement.goal_type.value if hasattr(loop.goal, "statement") else "",
+                            plan=state.get("plan_mode", False),
                         )
-                    except Exception:
-                        pass
-                    out.write("\n  [interrupted]\n")
-                    out.flush()
-                    break
-                if result.is_terminal:
-                    if result.egress and result.egress.error:
-                        err = result.egress.error
-                        if is_transient_error(err):
-                            # 噪声收敛 (2026-09-19 实测反馈): 错误全文已由 ✗ error
-                            # 行打印, 这里不再重复 ⚠ 全文 — 只留一行紧凑重试提示
-                            # auto-retry up to 3 times with backoff
+                    confirmed, final_goal = confirm_goal(out, loop.goal, judge_mode="none", yes=yes, strict=strict, input_fn=input_fn)
+                    if not confirmed:
+                        out.write("  goal not confirmed; type a new task to retry.\n")
+                        out.flush()
+                        loop = None
+                        state.pop("_loop", None)
+                        continue
+                    # 如果用户修改了 goal, 更新 loop 的 goal
+                    if final_goal is not None and final_goal is not loop.goal:
+                        # 通过 builder 属性更新 loop 的 goal
+                        if hasattr(loop, "_goal"):
+                            loop._goal = final_goal
+                else:
+                    loop.add_user_message(line)
+
+                # 回合开始: 采集键盘输入 (Enter 排队), spinner 状态行实时回显
+                from zall.cli.render import set_typeahead_source as _set_ta_src
+                _ta.start()
+                _set_ta_src(lambda: (_ta.buffer, _ta.queued_count))
+                while True:
+                    try:
+                        pre_step_msg_count = len(loop.messages)
+                        result = loop.step()
+                    except KeyboardInterrupt:
+                        # stop spinner (防止残留output)
+                        renderer = state.get("_renderer")
+                        if renderer is not None and hasattr(renderer, "_stop_spinner"):
+                            renderer._stop_spinner()
+                        # 流式输出保留: flush buffer + 插入 [Interrupted] 标记
+                        # 不像旧行为完全丢弃已显示的内容, 而是保留用户已看到的 token
+                        if renderer is not None and hasattr(renderer, "interrupt_stream"):
+                            renderer.interrupt_stream()
+                        # E4: rollback messages to pre-step state (discard model partial output)
+                        pre_step_msgs = loop.messages[:pre_step_msg_count]
+                        loop.set_messages(pre_step_msgs)
+                        # Record user_interrupt event in timeline
+                        try:
                             import time as _time
 
-                            from zall._util.backoff import backoff_delay
-                            retried = False
-                            interrupted = False
-                            for attempt in range(1, 4):
-                                delay = round(backoff_delay(attempt), 1)  # G13: 指数+抖动
-                                out.write(f"  · retry {attempt}/3 in {delay}s · ctrl-c to stop\n")
-                                out.flush()
-                                _time.sleep(delay)
-                                try:
-                                    # stop spinner before retry
-                                    renderer = state.get("_renderer")
-                                    if renderer is not None and hasattr(renderer, "_stop_spinner"):
-                                        renderer._stop_spinner()
-                                    result = loop.retry_step()  # v0.4.9 (A2): no step_count drift
-                                except KeyboardInterrupt:
-                                    out.write("  · interrupted\n")
+                            from zall.core.verifiability import EventType as _EventType
+                            loop.recorder.append(
+                                event_id=f"user_interrupt_{loop.step_count}",
+                                ts=int(_time.time() * 1000),
+                                event_type=_EventType.USER_INTERRUPT,
+                                payload={"step": loop.step_count, "partial_output_preserved": True},
+                            )
+                        except Exception:
+                            pass
+                        out.write("\n  [interrupted]\n")
+                        out.flush()
+                        break
+                    if result.is_terminal:
+                        if result.egress and result.egress.error:
+                            err = result.egress.error
+                            if is_transient_error(err):
+                                # 噪声收敛 (2026-09-19 实测反馈): 错误全文已由 ✗ error
+                                # 行打印, 这里不再重复 ⚠ 全文 — 只留一行紧凑重试提示
+                                # auto-retry up to 3 times with backoff
+                                import time as _time
+
+                                from zall._util.backoff import backoff_delay
+                                retried = False
+                                interrupted = False
+                                for attempt in range(1, 4):
+                                    delay = round(backoff_delay(attempt), 1)  # G13: 指数+抖动
+                                    out.write(f"  · retry {attempt}/3 in {delay}s · ctrl-c to stop\n")
                                     out.flush()
-                                    interrupted = True
+                                    _time.sleep(delay)
+                                    try:
+                                        # stop spinner before retry
+                                        renderer = state.get("_renderer")
+                                        if renderer is not None and hasattr(renderer, "_stop_spinner"):
+                                            renderer._stop_spinner()
+                                        result = loop.retry_step()  # v0.4.9 (A2): no step_count drift
+                                    except KeyboardInterrupt:
+                                        out.write("  · interrupted\n")
+                                        out.flush()
+                                        interrupted = True
+                                        break
+                                    if result.is_terminal and result.egress and result.egress.error:
+                                        if not is_transient_error(result.egress.error):
+                                            break  # non-transient → fall through to error handler
+                                        # still transient, continue retry loop
+                                    else:
+                                        retried = True
+                                        break  # step succeeded
+                                if retried:
+                                    continue  # go back to step loop
+                                if interrupted:
+                                    # 用户已主动中断 — 不再补"API 仍不可用" (实测反馈: 明明
+                                    # 是我停的, 还刷 API 错误信息)
+                                    loop = None
+                                    state.pop("_loop", None)
                                     break
-                                if result.is_terminal and result.egress and result.egress.error:
-                                    if not is_transient_error(result.egress.error):
-                                        break  # non-transient → fall through to error handler
-                                    # still transient, continue retry loop
-                                else:
-                                    retried = True
-                                    break  # step succeeded
-                            if retried:
-                                continue  # go back to step loop
-                            if interrupted:
-                                # 用户已主动中断 — 不再补"API 仍不可用" (实测反馈: 明明
-                                # 是我停的, 还刷 API 错误信息)
-                                loop = None
-                                state.pop("_loop", None)
+                                # all retries exhausted
+                                out.write("  · API still unavailable after 3 retries. Try /model to switch models.\n")
+                                out.flush()
                                 break
-                            # all retries exhausted
-                            out.write("  · API still unavailable after 3 retries. Try /model to switch models.\n")
-                            out.flush()
-                            break
-                        if "max_steps" in err or "MAX_STEPS" in err:
-                            out.write("  \u00b7 context limit reached, starting fresh conversation\n")
+                            if "max_steps" in err or "MAX_STEPS" in err:
+                                out.write("  \u00b7 context limit reached, starting fresh conversation\n")
+                            else:
+                                out.write(f"  \u2717 {err[:100]}\n")
+                                out.write("  session ended (terminal)\n")
                         else:
-                            out.write(f"  \u2717 {err[:100]}\n")
                             out.write("  session ended (terminal)\n")
-                    else:
-                        out.write("  session ended (terminal)\n")
-                    loop = None
-                    state.pop("_loop", None)
-                    break
-                if result.kind == "awaiting_input":
-                    _save_repl_state(loop, state)
-                    # 在 prompt 前显示折叠工具提示 (便于用户发现 /expand)
-                    renderer = state.get("_renderer")
-                    if renderer is not None and hasattr(renderer, "folded_count"):
-                        fc = renderer.folded_count
-                        if fc > 0:
-                            out.write(f"  [{fc} tool(s) folded · type /expand <N> to show, /expand all to show all]\n")
-                    # v1.2: 上下文 footer 提示 (借鉴 Claude Code)
-                    if renderer is not None and hasattr(renderer, "render_contextual_hint"):
-                        renderer.render_contextual_hint("idle")
-                    # verbose: 会话累计用量行 (Codex FinalOutput 口径)
-                    if state.get("verbose"):
-                        _usage_line = _format_turn_usage(state)
-                        if _usage_line:
-                            out.write(f"  {_usage_line}\n")
-                    out.write("\n")
-                    break
-            # 回合结束: 停采集, 排队消息转交外层循环逐条提交 (不回提示符)
-            _ta.stop()
-            _set_ta_src(None)
-            _queued_turns.extend(_ta.drain())
-            if _ta.buffer:
-                out.write(f"  \u00b7 typed ahead \"{_ta.buffer[:40]}\" (not sent — Enter would have queued it)\n")
-            out.flush()
+                        loop = None
+                        state.pop("_loop", None)
+                        break
+                    if result.kind == "awaiting_input":
+                        _save_repl_state(loop, state)
+                        # 在 prompt 前显示折叠工具提示 (便于用户发现 /expand)
+                        renderer = state.get("_renderer")
+                        if renderer is not None and hasattr(renderer, "folded_count"):
+                            fc = renderer.folded_count
+                            if fc > 0:
+                                out.write(f"  [{fc} tool(s) folded · type /expand <N> to show, /expand all to show all]\n")
+                        # v1.2: 上下文 footer 提示 (借鉴 Claude Code)
+                        if renderer is not None and hasattr(renderer, "render_contextual_hint"):
+                            renderer.render_contextual_hint("idle")
+                        # verbose: 会话累计用量行 (Codex FinalOutput 口径)
+                        if state.get("verbose"):
+                            _usage_line = _format_turn_usage(state)
+                            if _usage_line:
+                                out.write(f"  {_usage_line}\n")
+                        out.write("\n")
+                        break
+                # 回合结束: 停采集, 排队消息转交外层循环逐条提交 (不回提示符)
+                _ta.stop()
+                _set_ta_src(None)
+                _queued_turns.extend(_ta.drain())
+                if _ta.buffer:
+                    out.write(f"  \u00b7 typed ahead \"{_ta.buffer[:40]}\" (not sent — Enter would have queued it)\n")
+                out.flush()
+            except Exception as e:
+                # 回合中断时采集线程必须停 — 否则提示符处键盘被 typeahead 吞掉
+                try:
+                    _ta.stop()
+                    _set_ta_src(None)
+                except Exception:
+                    pass
+                out.write(f"  \u2717 internal error: {e}\n")
+                if state.get("verbose"):
+                    import traceback as _tb
+                    _tb.print_exc()
+                else:
+                    out.write("  (session kept — retry, /model to switch, or rerun with --verbose for traceback)\n")
+                out.flush()
+                continue
     finally:
         # v0.4.9 (A3): 退出时停止持久 spinner 线程
         _renderer = state.get("_renderer")
