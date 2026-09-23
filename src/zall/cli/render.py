@@ -683,7 +683,10 @@ class CliRenderer:
         self._verbose = verbose
         self._disable_spinner = disable_spinner
         self._raw_stream = stream or sys.stderr
-        self._write_lock = threading.Lock()
+        # RLock: 同线程可重入 — render_status_bar 持锁内再调 _clear_line (也取锁),
+        # 普通 Lock 会自死锁 (实测: 首个回合后再执行任何命令 → REPL 卡死在
+        # _echo_status)。跨线程互斥语义不变。
+        self._write_lock = threading.RLock()
         self._console = _shared_console(self._raw_stream)
         self._is_tty = self._raw_stream.isatty()
         self._supports_ansi = self._detect_ansi_capability()
@@ -1890,20 +1893,15 @@ class CliRenderer:
         """v1.2: 根据当前状态动态显示相关提示 (借鉴 Claude Code footer hints)。
 
         state:
-          - "idle": 空闲等待输入
+          - "idle": 空闲等待输入 —— 不打印: 静态键位提示已在启动 Tip 行 +
+            常驻 footer 里, 每回合重打一遍是纯噪音 (console 门面纪律: 简洁)
           - "tool": 工具执行中
           - "permission": 权限等待
           - "streaming": 流式输出中
         """
-        if not self._is_tty:
+        if not self._is_tty or state == "idle":
             return
         hints = {
-            "idle": (
-                f"  [{_C.SUBTLE}]/help commands"
-                f" {_G.BULLET} Ctrl-D exit"
-                f" {_G.BULLET} Ctrl-R search history"
-                f" {_G.BULLET} /plan read-only[/]"
-            ),
             "tool": (
                 f"  [{_C.SUBTLE}]Ctrl-C interrupt"
                 f" {_G.BULLET} /expand show folded[/]"
@@ -1918,7 +1916,9 @@ class CliRenderer:
                 f"  [{_C.SUBTLE}]Ctrl-C interrupt (preserves output)[/]"
             ),
         }
-        hint = hints.get(state, hints["idle"])
+        hint = hints.get(state)
+        if hint is None:
+            return
         with self._write_lock:
             self._console.print(hint)
 
