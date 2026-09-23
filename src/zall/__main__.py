@@ -1,3 +1,3 @@
-from zall.cli import main
+from zall.cli import console_main
 
-raise SystemExit(main())
+raise SystemExit(console_main())

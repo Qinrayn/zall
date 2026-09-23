@@ -27,6 +27,36 @@
 
 ## 📦 Installation
 
+### 方式一 · 下载即用（推荐，无需任何编程环境）
+
+打开 [Releases 页面](https://github.com/qinrayn/zall/releases)，下载最新的 `zall.exe`，放到任意文件夹（或桌面），双击运行或在终端里执行：
+
+```powershell
+.\zall.exe init
+```
+
+单文件、自包含，Windows 10/11 x64 直接可用 —— **不需要安装 Python，不需要命令行知识**。
+
+### 方式二 · 一条命令安装（uv，自动配好 Python）
+
+不想下载 exe、想用命令行包管理的话，[uv](https://docs.astral.sh/uv/) 会自动准备运行环境，全程一条命令、无需手动安装 Python：
+
+```powershell
+# Windows (PowerShell)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv tool install zall
+```
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv tool install zall
+```
+
+装完直接敲 `zall` 启动；想先试用不安装，用 `uvx zall --version`。
+
+### 方式三 · pip（已有 Python 环境）
+
 ```bash
 pip install zall
 ```

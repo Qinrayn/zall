@@ -68,7 +68,7 @@ Issues = "https://github.com/qinrayn/zall/issues"
 CI = "https://github.com/qinrayn/zall/actions"
 
 [project.scripts]
-zall = "zall.cli:main"
+zall = "zall.cli:console_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

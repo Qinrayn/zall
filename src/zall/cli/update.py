@@ -58,7 +58,12 @@ def _is_dev_install() -> bool:
       - 未经 pip 安装 (直接源码运行, PackageNotFoundError)
       - editable 安装 (pip install -e)
       - 本地路径安装 (direct_url.json 的 file:// 来源)
+
+    注意: PyInstaller exe (frozen) 同样没有 dist-info, 但那是对外正式
+    分发形态 — 走 _is_frozen() 分支 (查新照常, 升级=重新下载), 不归 dev。
     """
+    if _is_frozen():
+        return False
     try:
         from importlib import metadata
         dist = metadata.distribution("zall")
@@ -72,6 +77,15 @@ def _is_dev_install() -> bool:
     except Exception:
         # PackageNotFoundError (源码运行) 或元数据异常 → 保守视为 dev
         return True
+
+
+def _is_frozen() -> bool:
+    """PyInstaller 单文件 exe 形态 (sys.frozen + _MEIPASS 双标记)。"""
+    return bool(getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"))
+
+
+def _releases_url() -> str:
+    return "https://github.com/qinrayn/zall/releases"
 
 
 def _get_installed_version_pip() -> str:
@@ -223,6 +237,18 @@ def perform_update(out: Any = None) -> bool:
     Returns: True 表示升级成功
     """
     stream = out or sys.stderr
+    if _is_frozen():
+        # exe 无法自升级 (pip 在 exe 里不存在; sys.executable 是 zall.exe
+        # 自己, 传 -m pip 会递归启动本程序) — 指路 Releases 重下新 exe
+        latest = _fetch_latest_version()
+        if latest and _compare_versions(latest, get_current_version()) > 0:
+            stream.write(f"  new version {latest} available — download the "
+                         f"new zall.exe from {_releases_url()}\n")
+        else:
+            stream.write(f"  already up to date (exe is updated by re-downloading "
+                         f"from {_releases_url()})\n")
+        stream.flush()
+        return False
     if _is_dev_install():
         # 依赖混淆防护: 绝不在 dev/本地安装上跑 pip upgrade —
         # PyPI 的 `zall` 是同名陌生包, 升级会顶掉本地项目

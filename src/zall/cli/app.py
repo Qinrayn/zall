@@ -212,3 +212,28 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def console_main() -> int:
+    """统一外层入口 (console_scripts / python -m / PyInstaller exe 共用)。
+
+    REPL 内部自己处理 Ctrl+C (提示符 / 单步 / 重试三层都有), 但启动窗口
+    (argparse、onboarding) 与 one-shot run() 中断会裸甩 traceback — 观感
+    即"崩了"。成熟 CLI (Kimi Code / pip) 的惯例: 中断安静退 130, 下游
+    提前关管道 (--help | head) 时静默退 0。
+    """
+    try:
+        return main()
+    except KeyboardInterrupt:
+        try:
+            sys.stdout.write("\n")  # ^C 后提示符落在新行
+        except Exception:
+            pass
+        return 130
+    except BrokenPipeError:
+        import os
+        try:  # 把 stdout 指到 devnull, 防解释器退出 flush 时再抛
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except Exception:
+            pass
+        return 0
