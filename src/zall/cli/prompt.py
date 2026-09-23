@@ -98,14 +98,20 @@ def _footer_right_segments(state: dict[str, Any]) -> list[str]:
     ctx = int(state.get("ctx_tokens", 0) or 0)
     if ctx:
         try:
-            from zall._util.model_registry import get_window_size
-            from zall.core.cache_stats import context_remaining_percent
-            window = int(get_window_size(model) or 0)
-            pct = context_remaining_percent(ctx, window)
-            if pct is not None:
-                right.append(f"ctx {pct}% left / {window // 1000}k")
+            from zall._util.model_registry import get_window_size, window_size_known
+            from zall.core.cache_stats import context_remaining_percent, format_tokens
+            if window_size_known(model):
+                # 窗口已知 → 百分比 + 窗口大小 (Codex footer 口径)
+                window = int(get_window_size(model) or 0)
+                pct = context_remaining_percent(ctx, window)
+                if pct is not None:
+                    right.append(f"ctx {pct}% left / {window // 1000}k")
+                else:
+                    right.append(f"ctx {format_tokens(ctx)}")
             else:
-                right.append(f"ctx {ctx} tok")
+                # 窗口未知 (未探测/未配置/不在内置表) — 不伪造 "32K" 或百分比,
+                # 只显示已用 token 数 (诚实的原始数据, Kimi 显示真实 usage 同口径)
+                right.append(f"ctx {format_tokens(ctx)}")
         except Exception:
             right.append(f"ctx {ctx} tok")
     stats = state.get("cache_stats")

@@ -140,47 +140,94 @@ class TestCmdModel:
         assert "usage: /model" in out.getvalue()
         assert "model" not in state  # 未设置
 
-    def test_picker_select_by_number(self) -> None:
+    def test_picker_select_by_number(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _isolate_model(monkeypatch)
         state: dict = {}
         out = _FakeTTY()
-        state["_input_fn"] = lambda _p: "1"
+        # ptk 菜单在无终端测试必然失败 → 走单行降级 (与真实非终端环境一致)
+        state["_input_fn"] = _menu_fallback(monkeypatch, "1")
         cmd_model("", out, None, state)
-        # Should pick a valid model (first in sorted list)
+        # Should pick a valid model (first in the menu list)
         assert state.get("model") is not None
         assert isinstance(state["model"], str)
         assert len(state["model"]) > 0
 
-    def test_picker_type_name(self) -> None:
+    def test_picker_type_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _isolate_model(monkeypatch)
         state: dict = {}
         out = _FakeTTY()
-        state["_input_fn"] = lambda _p: "deepseek"
+        # "deepseek" 过滤出唯一匹配 (alias/note 含 DeepSeek) → 选中
+        state["_input_fn"] = _menu_fallback(monkeypatch, "deepseek")
         cmd_model("", out, None, state)
         assert state["model"] == "deepseek-chat"
 
-    def test_picker_empty_input_no_change(self) -> None:
+    def test_picker_empty_input_no_change(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _isolate_model(monkeypatch)
         state: dict = {"model": "keep-me"}
         out = _FakeTTY()
-        state["_input_fn"] = lambda _p: ""
+        state["_input_fn"] = _menu_fallback(monkeypatch, "")
         cmd_model("", out, None, state)
+        # 空输入 → 默认选中当前行 (default_index=当前模型) → 无变化
         assert state["model"] == "keep-me"
 
-    def test_picker_rejects_non_model_input(self) -> None:
+    def test_picker_rejects_non_model_input(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Counterexample: picker input明显non-model名 (eg. 中文/逗号) → warning并preserve当前, 不设垃圾名."""
+        _isolate_model(monkeypatch)
         state: dict = {"model": "keep-me"}
         out = _FakeTTY()
-        state["_input_fn"] = lambda _p: "继续，"
+        state["_input_fn"] = _menu_fallback(monkeypatch, "继续，")
         cmd_model("", out, None, state)
         assert state["model"] == "keep-me"  # 未改
-        # New smart mode: fuzzy search shows "no match" message instead of "invalid chars"
-        assert "no match" in out.getvalue() or "model name contains invalid characters" in out.getvalue()
+        # 自由文本回退路径: 非法字符直接拒绝提示, 而不是设垃圾名
+        assert "no match" in out.getvalue()
 
-    def test_picker_accepts_custom_alnum_model(self) -> None:
-        """Happy path: picker input自定义model名 (字母数字) → accept (用户 api_base 支持)."""
+    def test_picker_command_word_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Counterexample: 选择器里输 /exit → 是命令, 拒绝当模型名 (不污染 state)."""
+        _isolate_model(monkeypatch)
+        state: dict = {"model": "keep-me"}
+        out = _FakeTTY()
+        state["_input_fn"] = _menu_fallback(monkeypatch, "/exit")
+        cmd_model("", out, None, state)
+        assert state["model"] == "keep-me"
+        assert "命令" in out.getvalue() or "command" in out.getvalue()
+
+    def test_picker_accepts_custom_alnum_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Happy path: 过滤无匹配 → 自由文本 (自定义模型名, 字母数字) → 直接切换."""
+        _isolate_model(monkeypatch)
         state: dict = {}
         out = _FakeTTY()
-        state["_input_fn"] = lambda _p: "my-custom-Model_42"
+        state["_input_fn"] = _menu_fallback(monkeypatch, "my-custom-Model_42")
         cmd_model("", out, None, state)
         assert state["model"] == "my-custom-Model_42"
+
+
+def _menu_fallback(monkeypatch: pytest.MonkeyPatch, value: str):
+    """让 /model 选择器的 ptk 渲染失败 → 走单行降级路径, 注入单次输入。
+
+    与真实"无终端/渲染失败"环境同一条代码路径 (choice_menu 的 except 兜底),
+    保证测到的是真降级逻辑而不是测试特例。
+    """
+    import zall.cli.select as _select_mod
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("no tty in tests")
+
+    monkeypatch.setattr(_select_mod, "_ptk_choice_menu", _boom)
+    return lambda _p: value
+
+
+def _isolate_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 /model 的探测与配置压成"全新安装": 无生产凭据, 无自定义 provider。
+
+    model.py 用 `from ... import load_config` (绑定导入), 直接 patch 上游无效;
+    patch 模块内的名字才是唯一入口。探测关掉 → 列表 = 内置全量预设,
+    不依赖网络/本机真实 config (deterministic)。
+    """
+    import zall.cli.commands.model as _model_mod
+
+    monkeypatch.setattr(_model_mod, "_detect_configured_providers", lambda: {})
+    monkeypatch.setattr(_model_mod, "_probe_configured_providers", lambda _p: {})
+    monkeypatch.setattr(_model_mod, "load_config", lambda: {})
 
 
 # ──────────────────────────────────────────────────────────────────────────

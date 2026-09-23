@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import platform
+import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,22 @@ from zall.safety.config import CONFIG_DIR, load_config
 # ── Dynamic model discovery ──
 
 
+def _is_placeholder_key(key: str) -> bool:
+    """占位/示例 key (不是真凭据) 判定 — 别让残留的假 key 把 provider 算成"已配置"。
+
+    实测: config 里留过 anthropic = "sk-secret-456" 这类测试值, 列表因此混进
+    Anthropic。按分隔符切段后整段命中标记词才算 (真 key 是无分隔随机串, 撞不上;
+    "sk-secret-456" → ["sk","secret","456"] 命中 "secret")。
+    """
+    k = (key or "").strip().lower()
+    if not k or k == "your-api-key-here":
+        return True
+    markers = {"secret", "placeholder", "changeme", "dummy", "fake", "example",
+               "testkey", "yourkey", "xxx", "xxxx", "sk-xxx", "none", "null"}
+    segments = {s for s in re.split(r"[^a-z0-9]+", k) if s}
+    return bool(segments & markers) or k in markers
+
+
 def _detect_configured_providers() -> dict[str, bool]:
     """Scan env vars and config to detect which providers have valid API keys.
 
@@ -76,7 +94,7 @@ def _detect_configured_providers() -> dict[str, bool]:
 
     # Determine which provider the global api_key actually belongs to
     global_key_provider: str | None = None
-    if api_key and api_key != "your-api-key-here":
+    if api_key and not _is_placeholder_key(api_key):
         # Infer from configured model name
         if model_name:
             global_key_provider = get_model_provider(model_name, registry=merged_registry)
@@ -86,7 +104,8 @@ def _detect_configured_providers() -> dict[str, bool]:
 
     for provider, (_display, env_var, _base, _url, _prefixes, _adapter) in merged_registry.items():
         # Check env var first (exact per-provider match)
-        if env_var and os.environ.get(env_var, "").strip():
+        _env_key = os.environ.get(env_var, "").strip() if env_var else ""
+        if _env_key and not _is_placeholder_key(_env_key):
             configured[provider] = True
             continue
         # Check provider-specific config key ([keys].<provider>, 旧字段 fallback)
@@ -96,7 +115,7 @@ def _detect_configured_providers() -> dict[str, bool]:
             if isinstance(_pkeys, dict):
                 prov_key = str(_pkeys.get(provider) or "").strip()
             prov_key = prov_key or str(cfg.get(f"{provider}_api_key", "") or "").strip()
-        if prov_key and prov_key != "your-api-key-here":
+        if prov_key and not _is_placeholder_key(prov_key):
             configured[provider] = True
             continue
         # Check global api_key — only marks the inferred provider
@@ -145,6 +164,105 @@ def _build_dynamic_model_list(
         x[0],                                   # by alias
     ))
     return result
+
+
+_ROW_WARN_NOT_LIVE = "not in upstream /models"
+
+
+def _probe_configured_providers(providers: list[str]) -> dict[str, list[str]]:
+    """并行探测多个 provider 的上游 /models (3s 超时, 失败静默)。
+
+    返回 {provider: [model_id, ...]}; 没返回的 provider 即探测失败/不支持
+    (Anthropic 原生端点、网关未实现 /models 等) — 调用方回落预设列表。
+
+    G7: 探测顺带收集 context_length 注入 model_registry._LIVE_WINDOWS —
+    /models 元数据是窗口大小的**事实来源** (如 sensenova 网关 deepseek-v4-flash
+    实为 1M, 内置表只写过 128k 旧值), 使 footer/水位/压缩用真实窗口。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from zall._util.model_registry import set_live_windows
+    from zall.cli.model_switch import probe_models, provider_endpoint
+
+    lock = threading.Lock()
+    windows: dict[str, int] = {}
+
+    def _one(p: str) -> tuple[str, list[str] | None]:
+        try:
+            ep = provider_endpoint(p)
+            if not ep.api_base:
+                return p, None
+            _w: dict[str, int] = {}
+            ids = probe_models(ep.api_base, ep.api_key, timeout=3.0,
+                               windows_out=_w)
+            with lock:
+                windows.update(_w)
+            return p, ids
+        except Exception:
+            return p, None
+
+    found: dict[str, list[str]] = {}
+    try:
+        with ThreadPoolExecutor(max_workers=min(6, len(providers))) as pool:
+            for prov, ids in pool.map(_one, providers):
+                if ids:
+                    found[prov] = list(ids)
+    except Exception:
+        return {}
+    # G7: 本次探测结果整体替换 live 表 (upstream 元数据变更后不残留旧值)
+    try:
+        set_live_windows(windows)
+    except Exception:
+        pass
+    return found
+
+
+def _build_display_rows(
+    models: list[tuple[str, str, str, str, bool]],
+    avail: dict[str, list[str]],
+    cur: str,
+    configured_any: bool,
+) -> tuple[list[tuple[str, str, str, str, bool]], list[str]]:
+    """把全量预设裁剪成"这台机器能用的模型"。
+
+    用户口径: 只配了商汤, 不该被一长串别家预设刷屏; 列表要列可用模型。
+      - 已配置且探到上游 /models → 只列 live id (note 沿用同名预设的说明),
+        配置里上游已撤的 id 不再出现;
+      - 已配置但探不到 (Anthropic/Ollama 类端点) → 照旧列预设;
+      - 未配置的 provider → 只要有一个已配置就折叠成一行提示 (全新安装一个
+        都没配时保持全量预设, 否则列表空得没法选);
+      - 当前模型不在 live 列表里 (自定义名/上游已撤) 补一行并标警示 —
+        "现在用的是什么"永远可见。
+    返回 (rows, 被折叠的 provider)。
+    """
+    notes: dict[tuple[str, str], str] = {}
+    for alias, full_name, note, provider, _ in models:
+        notes.setdefault((provider, full_name), note)
+        notes.setdefault((provider, alias), note)
+
+    rows: list[tuple[str, str, str, str, bool]] = []
+    hidden: list[str] = []
+    emitted: set[str] = set()
+    for alias, full_name, note, provider, is_configured in models:
+        ids = avail.get(provider)
+        if ids is not None:
+            if provider in emitted:
+                continue
+            emitted.add(provider)
+            has_cur = False
+            for mid in ids:
+                rows.append((mid, mid, notes.get((provider, mid), ""), provider, True))
+                has_cur = has_cur or mid == cur
+            if not has_cur and (alias == cur or full_name == cur):
+                rows.append((alias, full_name, _ROW_WARN_NOT_LIVE, provider, True))
+            continue
+        if not is_configured and configured_any:
+            if provider not in emitted:
+                emitted.add(provider)
+                hidden.append(provider)
+            continue
+        rows.append((alias, full_name, note, provider, is_configured))
+    return rows, hidden
 
 
 # extracted from _legacy.py lines 1407-1590
@@ -568,7 +686,7 @@ def _print_switch_result(
 
 def _switch_model_and_report(
     state: dict[str, Any], loop: Any | None, model: str, persist: bool, out: Any,
-    *, as_model_cmd: bool = False,
+    *, as_model_cmd: bool = False, provider: str | None = None,
 ) -> None:
     """切换 model (走统一热切换通路); 目标 adapter 建不起来时只记 model 名。
 
@@ -578,7 +696,9 @@ def _switch_model_and_report(
     """
     from zall.cli.model_switch import apply_switch
 
-    res = apply_switch(state, loop, model=model, persist=persist)
+    # provider 显式给出时用于上游 live id (裸模型名推断不出归属); 预设走原推断。
+    res = apply_switch(state, loop, model=model, provider=provider or None,
+                       persist=persist)
     if res.ok:
         _print_switch_result(res, out, as_model_cmd=as_model_cmd)
         return
@@ -712,7 +832,14 @@ def cmd_provider(arg: str, out: Any, loop: Any | None = None, state: dict[str, A
         (Kimi "Select a model"), 非交互/无输入栈降级输出列表 + 提示。
         """
         out.write("  Verifying API key\u2026\n")
-        ids = probe_models(base, key)
+        windows: dict[str, int] = {}
+        ids = probe_models(base, key, windows_out=windows)
+        if windows:
+            try:
+                from zall._util.model_registry import set_live_windows
+                set_live_windows(windows)
+            except Exception:
+                pass
         if not ids:
             out.write(f"  \u26a0 couldn't list models at {base} "
                       f"(key rejected or no /models endpoint)\n")
@@ -985,25 +1112,21 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
     # ── Dynamic model discovery ──
     _provider_ready = _detect_configured_providers()
     _custom_providers = load_config().get("providers", [])
+
+    # ── 上游可用性探测 (列表只认上游 /models) ──
+    # 配置里"支持"≠ 上游"还在" — sensenova 下线 deepseek-chat、agnes-2.5
+    # 曾 503 都是配置先行、上游已撤。对每个"已配置"的 provider 并行探一次
+    # /models (3s 超时, 失败静默): 探到的 live id 直接作为该组可选模型列出,
+    # 列表呈现"你能用的"。未配置的 provider 不探 (没 key, 探了也是 401)。
+    _probe_targets = [p for p, ready in _provider_ready.items() if ready]
+    _avail_by_provider = (_probe_configured_providers(_probe_targets)
+                          if _probe_targets else {})
+    # Ollama 是本地服务: "配好了"= 本机真在跑 (探到 /models); 没跑就不占列表
+    if _provider_ready.get("ollama") and not _avail_by_provider.get("ollama"):
+        _provider_ready["ollama"] = False
+
     _models = _build_dynamic_model_list(_provider_ready, cur, _custom_providers)
     _all_aliases = set(a for a, *_ in _MODEL_PRESETS)
-
-    # ── 上游可用性探测 (Kimi: 列表只认上游 /models) ──
-    # 配置里"支持"≠ 上游"还在" — sensenova 下线 deepseek-chat、agnes-2.5
-    # 曾 503 都是配置先行、上游已撤。对当前 provider 探一次 /models
-    # (3s 超时, 失败静默不阻断), 列表里已下线的预设标警示, 免得切过去
-    # 才撞 404。只探当前 provider: 别家没有生效 key, 探了也是 401。
-    _avail_ids: set[str] | None = None
-    if _provider_ready.get(cur_provider, False):
-        try:
-            from zall.cli.model_switch import probe_models as _probe, provider_endpoint as _pe
-            _ep = _pe(cur_provider)
-            if _ep.api_base:
-                _ids = _probe(_ep.api_base, _ep.api_key, timeout=3.0)
-                if _ids:
-                    _avail_ids: set[str] = set(_ids)
-        except Exception:
-            _avail_ids = None
 
     # de-hardcode: tag/label 派生自 model_registry 单一真相源 (不再在此重复硬编码)
     # A4: 用合并表 (含自定义 provider) 构建标签/显示名, 自定义 provider 也获正确标记。
@@ -1012,6 +1135,13 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
     _PROVIDER_TAG = {p: get_provider_tag(p) for p in _merged_registry}
     _PROVIDER_LABEL = {p: get_provider_display(p) for p in _merged_registry}
 
+    # 显示行 = 裁剪后的可用模型 (见 _build_display_rows); 未配置的 provider 折叠
+    _rows, _hidden_providers = _build_display_rows(
+        _models, _avail_by_provider, cur, configured_any=any(_provider_ready.values()))
+    # live id → provider: 选中裸模型 id 时显式带上归属 provider
+    _live_provider = {mid: p for p, ids in _avail_by_provider.items() for mid in ids}
+    _row_names = {r[1] for r in _rows}
+
     if not is_tty:
         # ── Plain text output ──
         out.write(f"  current model: {cur}\n")
@@ -1019,142 +1149,85 @@ def cmd_model(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any]
         out.write("  available:\n")
         _last_provider = None
         _idx = 0
-        for alias, full_name, note, provider, is_configured in _models:
+        for alias, full_name, note, provider, is_configured in _rows:
             if provider != _last_provider:
                 label = _PROVIDER_LABEL.get(provider, provider)
-                out.write(f"  {label}:\n")
+                _ids = _avail_by_provider.get(provider)
+                out.write(f"  {label}{f' ({len(_ids)} live upstream)' if _ids else ''}:\n")
                 _last_provider = provider
             _idx += 1
             mark = "  ← current" if alias == cur else ""
             out.write(f"    {_idx:2d}. [{_PROVIDER_TAG.get(provider, '?')}] {alias:22s} {note}{mark}\n")
-        if cur not in _all_aliases and cur != "(unset)":
+        if _hidden_providers:
+            _names = ", ".join(_PROVIDER_LABEL.get(p, p) for p in _hidden_providers)
+            out.write(f"  · not configured: {_names}  (/provider to connect)\n")
+        if cur not in _all_aliases and cur != "(unset)" and cur not in _row_names:
             _idx += 1
             out.write(f"    {_idx:2d}. [{_PROVIDER_TAG.get(cur_provider, '?')}] {cur:22s} (current)\n")
         out.write("  usage: /model <name>  (eg. /model gpt-4o-mini, /model flash)\n")
         out.write("         /model -p <name>  (persist to config)\n")
         return "handled"
 
-    # ── Rich TTY output ──
+# ── Rich TTY output: ↑↓ 菜单主路径 (Kimi 交互口径) ──
+    # 列表裁剪与上游探测已由 _build_display_rows 完成; 这里把"这台机器能
+    # 用的模型"直接作为菜单项: ↑↓/jk 移动 · 数字直选 · 打字即过滤 · Enter
+    # 确认; 过滤无匹配时 Enter 把输入原文交回 (自由文本 = 直接输名字切换,
+    # 另做字符校验, 防止把 state.model 污染成垃圾名)。
     from zall.cli.render import _shared_console
+    from zall.cli.select import choice_menu as _pick
+
     c = _shared_console(out)
-    c.print(f"  [bold]current model:[/] [cyan]{cur}[/]  [dim]·[/]  {_PROVIDER_DISPLAY.get(cur_provider, cur_provider)}")
+    c.print(f"  [bold]current model:[/] [cyan]{cur}[/]  [dim]·[/]  "
+            f"{_PROVIDER_DISPLAY.get(cur_provider, cur_provider)}")
     c.print()
 
-    # Group by provider
-    _last_provider = None
-    _idx = 0
-    for alias, full_name, note, provider, is_configured in _models:
-        if provider != _last_provider:
-            label = _PROVIDER_LABEL.get(provider, provider)
-            configured = _provider_ready.get(provider, False)
-            if provider == cur_provider and _avail_ids is not None:
-                c.print(f"  [dim]{label}[/]  [dim]· upstream /models: {len(_avail_ids)} live[/]")
-            elif configured:
-                c.print(f"  [dim]{label}[/]  [dim]· configured[/]")
-            else:
-                c.print(f"  [dim]{label}[/]")
-            _last_provider = provider
-        _idx += 1
-        tag = _PROVIDER_TAG.get(provider, "?")
-        _gone = ""
-        if provider == cur_provider and _avail_ids is not None \
-                and alias not in _avail_ids and full_name not in _avail_ids:
-            if alias == provider:
-                # 自定义 provider 的 provider 级条目 (alias=full_name=provider 名,
-                # 选它会把模型名设成 "sensenova" 这种非模型 id) — 不是"已下线",
-                # 是从未是模型 id; 文案要自解释, 别误导成上游撤掉了某个模型。
-                _gone = "  [yellow]\u26a0 provider entry \u2014 not a model id[/]"
-            else:
-                _gone = "  [yellow]\u26a0 not in upstream /models (delisted?)[/]"
-        # Current model gets bold/cyan styling
-        if alias == cur:
-            c.print(f"    {_idx:2d}. [bold cyan][{tag}][/] [bold cyan]{alias:22s}[/] [dim]{note}[/]  [cyan]\u2190 current[/]{_gone}")
-        else:
-            cfg_tag = " [dim]· configured[/]" if is_configured else ""
-            c.print(f"    {_idx:2d}. [dim][{tag}][/] {alias:22s} [dim]{note}[/]{cfg_tag}{_gone}")
+    _menu_choices: list[Choice] = []
+    _cur_idx = 0
+    for i, (alias, full_name, note, provider, _is_cfg) in enumerate(_rows):
+        _parts = [_PROVIDER_LABEL.get(provider, provider)]
+        if note and note != _ROW_WARN_NOT_LIVE:
+            _parts.append(note)
+        if full_name == cur or alias == cur:
+            _parts.append("\u2190 current")
+            _cur_idx = i
+        if note == _ROW_WARN_NOT_LIVE:
+            _parts.append(f"\u26a0 {note}")
+        _menu_choices.append((full_name, alias, " \u00b7 ".join(dict.fromkeys(_parts))))
+    # 当前模型不在显示行 (自定义名/上游刚撤) → 补一行, "现在用的是什么"可见
+    if cur != "(unset)" and cur not in _row_names and cur not in _all_aliases:
+        _menu_choices.append((cur, cur, "custom \u00b7 \u2190 current"))
+        _cur_idx = len(_menu_choices) - 1
 
-    # If current model is custom (not in presets), show it too
-    if cur not in _all_aliases and cur != "(unset)":
-        _idx += 1
-        c.print("  [dim]Custom:[/]")
-        c.print(f"    {_idx:2d}. [dim][{_PROVIDER_TAG.get(cur_provider, '?')}][/] [bold cyan]{cur:22s}[/] [cyan]← current[/]")
+    _sel = _pick(
+        out,
+        f"Select a model \u2014 {len(_menu_choices)} available \u00b7 "
+        "\u2191\u2193 move \u00b7 type to filter \u00b7 Enter=pick, Ctrl+C=cancel",
+        _menu_choices,
+        default_index=_cur_idx,
+        free_text=True,
+        # ptk 渲染失败时降级单行选择 — 读取走 REPL 注入的输入 (可测)
+        input_fn=_input_fn,
+    )
+    if not _sel:
+        return "handled"  # 取消 — 什么都不改
 
-    c.print()
-    fn = _input_fn
-    if not fn:
-        return "handled"
-    try:
-        sel = (fn("  select [N] / search keyword: ") or "").strip()
-    except (EOFError, KeyboardInterrupt):
-        c.print()
-        return "handled"
-    if not sel:
-        return "handled"
-
-    # Selection logic: number → preset; keyword → fuzzy match alias or search all
-    if sel.isdigit():
-        n = int(sel)
-        # Build flat list for index lookup
-        flat_models = [(a, f) for a, f, _, _, _ in _models]
-        if cur not in _all_aliases and cur != "(unset)":
-            flat_models.append((cur, cur))
-        if 1 <= n <= len(flat_models):
-            name = flat_models[n - 1][1]
-        else:
-            c.print(f"  [red]invalid selection {n}[/], model unchanged")
-            return "handled"
-    elif sel == "?":
-        # Show detailed info about all models
-        c.print()
-        c.print("  [dim]You can type:[/]")
-        c.print("    [dim]·[/] [bold]N[/] — select by number")
-        c.print("    [dim]·[/] [bold]keyword[/] — fuzzy match (e.g. 'flash' matches all flash models)")
-        c.print("    [dim]·[/] [bold]model name[/] — direct full name (e.g. 'gpt-4o-mini')")
-        c.print("    [dim]·[/] /model [bold]-p[/] <name> — persist to config")
-        return "handled"
-    elif sel.startswith("/"):
-        # REPL 命令误入模型名: 输入框内斜杠是命令意图, 不是模型名。
-        # 防止把 state.model 污染成 "/exit" 这类 (实测: 模型选择器里
-        # 输 /exit 后提示符变成 ( /exit ) 再也回不去)。
-        c.print(f"  [yellow]'{sel}'[/] [dim]是命令, 不是模型名 — 先 Ctrl+C/回车退出选择,"
-                " 再到提示符运行[/dim]")
-        return "handled"
+    if _sel in {v for v, _l, _d in _menu_choices}:
+        name = _sel
     else:
-        # Fuzzy match: search alias, full name, and note
-        sel_lower = sel.lower().strip()
-        scored: list[tuple[int, str]] = []
+        # 自由文本 (过滤无匹配 Enter 回传): 直接按名字切换, 校验防止污染
+        if _sel.startswith("/"):
+            c.print(f"  [yellow]'{_sel}'[/] [dim]是命令, 不是模型名 — "
+                    "先 Ctrl+C/回车退出选择, 再到提示符运行[/dim]")
+            return "handled"
+        allowed_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._/@:")
+        if not all(ch in allowed_chars for ch in _sel):
+            c.print(f"  [dim]no match for[/] '{_sel}' [dim]— model unchanged[/dim]"
+                    " [dim](在菜单里输入名字过滤, 或 /model <名字>)[/dim]")
+            return "handled"
+        name = _resolve_model_alias(_sel)
 
-        # Scan all presets + custom current model
-        for alias, full_name, note, provider, _ in _models:
-            full_str = f"{alias} {full_name} {note} {provider}".lower()
-            if sel_lower in full_str:
-                # Prefer exact alias match over partial match
-                score = 3 if sel_lower == alias.lower() else (2 if sel_lower in alias.lower() else (1 if sel_lower in full_name.lower() else 0))
-                scored.append((score, full_name))
-        if cur not in _all_aliases and cur != "(unset)":
-            if sel_lower in cur.lower():
-                scored.append((2, cur))
-
-        if not scored:
-            # No fuzzy match — try direct resolve_model_alias as fallback
-            resolved = _resolve_model_alias(sel)
-            # Validate the name has proper chars
-            allowed_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._/@:")
-            if all(c in allowed_chars for c in sel):
-                name = resolved
-            else:
-                c.print(f"  [dim]no match for[/] '{sel}' [dim]— model unchanged[/] [dim](try '?' for help)[/]")
-                return "handled"
-        else:
-            # Multiple fuzzy matches — pick highest score, or warn
-            scored.sort(key=lambda x: (-x[0], x[1]))
-            name = scored[0][1]
-            if len(scored) > 1 and scored[0][0] == scored[1][0]:
-                matches = [s[1] for s in scored[:5]]
-                c.print(f"  [dim]multiple matches:[/] {', '.join(matches)}")
-                c.print(f"  [dim]selected:[/] {name} [dim](use number to pick specific)[/]")
-
-    _switch_model_and_report(state, loop, name, False, out)
+    _switch_model_and_report(state, loop, name, False, out,
+                             provider=_live_provider.get(name))
     return "handled"
 
 

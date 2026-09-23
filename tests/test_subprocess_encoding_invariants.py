@@ -52,7 +52,9 @@ def _call_span(src: str, idx: int) -> tuple[int, int] | None:
 def _violations(source: str) -> list[int]:
     """Return character offsets of text=True calls lacking encoding=."""
     found: list[int] = []
-    for m in re.finditer(r"text=True", source):
+    # (?<![\w]) 排除 *_text 之类非 subprocess 参数 (free_text=True 是菜单函数
+    # 的关键字, 不是子进程的 text= 开关), 保留对 text=True 调用的覆盖。
+    for m in re.finditer(r"(?<![\w])text=True", source):
         span = _call_span(source, m.start())
         if span is None:
             continue

@@ -61,6 +61,8 @@ __all__ = [
     "cmd_verify",
     # F1: 配置一等化 (/config)
     "cmd_config",
+    # F2: 跨会话记忆 (/memory)
+    "cmd_memory",
 ]
 
 # Import from _common (shared infrastructure)
@@ -183,6 +185,7 @@ from zall.cli.commands.system import (
     cmd_forget_permissions,
     cmd_help,
     cmd_init,
+    cmd_memory,
     cmd_revert,
     cmd_review,
     cmd_update,

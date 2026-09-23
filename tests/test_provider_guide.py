@@ -89,7 +89,7 @@ class TestChoiceMenuDegrade:
     def test_ptk_success_prints_picked_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Happy path: ptk 返回 → 补印 '▸ label' 一行 (菜单退出后可见选了什么)。"""
         monkeypatch.setattr("zall.cli.select._ptk_choice_menu",
-                            lambda *a, **k: "zhipu")
+                            lambda *a, **k: (False, "zhipu"))
         out = io.StringIO()
         val = choice_menu(out, "Select a provider", self._CHOICES,
                           input_fn=lambda _: "1", is_tty=True)
@@ -203,7 +203,11 @@ def _prov_env(monkeypatch: pytest.MonkeyPatch) -> dict:
         ms, "apply_switch",
         lambda state, loop=None, **kw: captures["switch"].append(kw) or {"ok": True},
     )
-    monkeypatch.setattr(ms, "probe_models", lambda base, key: ["grok-3", "grok-3-mini"])
+    monkeypatch.setattr(
+        ms, "probe_models",
+        lambda base, key, timeout=8.0, transport=None, windows_out=None:
+            ["grok-3", "grok-3-mini"],
+    )
     monkeypatch.setattr(m, "_print_switch_result", lambda *a, **k: None)
     return {"m": m, "captures": captures, "out": _FakeTTY()}
 
@@ -217,7 +221,7 @@ class TestProviderMenuPersist:
         from zall.cli.commands.model import cmd_provider
 
         monkeypatch.setattr("zall.cli.select._ptk_choice_menu",
-                            lambda *a, **k: "deepseek")
+                            lambda *a, **k: (False, "deepseek"))
         state: dict[str, Any] = {"_input_fn": lambda _p: "sk-abc"}
         assert cmd_provider("", _prov_env["out"], None, state) == "handled"
         kw = _prov_env["captures"]["switch"][0]
@@ -231,7 +235,7 @@ class TestProviderMenuPersist:
         from zall.cli.commands.model import cmd_provider
 
         monkeypatch.setattr("zall.cli.select._ptk_choice_menu",
-                            lambda *a, **k: "zhipu")
+                            lambda *a, **k: (False, "zhipu"))
         # 隐藏输入由 secret_prompt 单测覆盖; 这里只关心 key 是否落盘
         monkeypatch.setattr(_prov_env["m"], "secret_prompt",
                             lambda *a, **k: "sk-zhipu")
@@ -255,7 +259,7 @@ class TestProviderMenuPersist:
         from zall.cli.commands.model import cmd_provider
 
         monkeypatch.setattr("zall.cli.select._ptk_choice_menu",
-                            lambda *a, **k: None)
+                            lambda *a, **k: (False, None))
         state: dict[str, Any] = {"_input_fn": lambda _p: "sk-abc"}
         assert cmd_provider("", _prov_env["out"], None, state) == "handled"
         assert _prov_env["captures"]["switch"] == []
@@ -272,7 +276,7 @@ class TestProviderWizard:
 
         seq = iter(["__url__", "__url__", "grok-3"])  # 主菜单→平台菜单→模型菜单
         monkeypatch.setattr("zall.cli.select._ptk_choice_menu",
-                            lambda *a, **k: next(seq))
+                            lambda *a, **k: (False, next(seq)))
         # key 走隐藏输入 (secret_prompt 单测覆盖); URL 是明文输入, 走注入 fn
         monkeypatch.setattr(_prov_env["m"], "secret_prompt",
                             lambda *a, **k: "sk-gw")
@@ -297,7 +301,7 @@ class TestProviderWizard:
 
         seq = iter(["__url__", "__url__"])  # 主菜单 → 平台菜单
         monkeypatch.setattr("zall.cli.select._ptk_choice_menu",
-                            lambda *a, **k: next(seq))
+                            lambda *a, **k: (False, next(seq)))
         state: dict[str, Any] = {"_input_fn": lambda _p: ""}  # Enter 取消
         assert cmd_provider("", _prov_env["out"], None, state) == "handled"
         assert _prov_env["captures"]["switch"] == []
@@ -310,7 +314,7 @@ class TestProviderWizard:
 
         seq = iter(["__url__", "grok", None])  # 主→平台菜单→模型菜单 (取消=不挑模型)
         monkeypatch.setattr("zall.cli.select._ptk_choice_menu",
-                            lambda *a, **k: next(seq))
+                            lambda *a, **k: (False, next(seq)))
         monkeypatch.setattr(_prov_env["m"], "secret_prompt",
                             lambda *a, **k: "sk-grok")
         state: dict[str, Any] = {"_input_fn": lambda _p: ""}  # 非 None 才走交互 key 分支

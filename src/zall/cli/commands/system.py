@@ -955,3 +955,90 @@ def cmd_verify(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any
     return "handled"
 
 
+
+
+@slash_command("/memory", description="show/add/remove cross-session memory (user profile etc.)",
+               category=_CATEGORY_SESSION)
+def cmd_memory(arg: str, out: Any, loop: Any | None = None, state: dict[str, Any] | None = None) -> str:
+    """跨会话记忆 CLI 入口 (core.memory.SessionMemory 的交互面)。
+
+    记忆持久化在 ~/.zall/memory.jsonl, 注入每个新会话的 system prompt
+    (USER MEMORY 段), 让模型记住用户的身份/偏好/项目知识/错误模式。
+
+    用法:
+      /memory                       列出全部记忆 (按类型分组)
+      /memory add <text>           添加一条 (默认 user_profile: 身份/偏好)
+      /memory add project_knowledge <text>
+      /memory add error_patterns <text>
+      /memory add decisions <text>
+      /memory rm <number>          按序号删除一条
+      /memory clear                清空全部记忆
+
+    注意: 新记忆在下一个新会话生效 (当前会话的 system prompt 已固定)。
+    """
+    from zall.core.memory import MEMORY_TYPES, get_session_memory
+
+    mem = get_session_memory()
+    parts = (arg or "").strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+
+    _labels = {
+        "user_profile": "User profile",
+        "project_knowledge": "Project knowledge",
+        "error_patterns": "Error patterns",
+        "decisions": "Decisions",
+    }
+
+    def _list() -> None:
+        items = mem.list_all()
+        if not items:
+            out.write('  (no memories yet) — try /memory add "我叫小张, 偏好中文回复"\n')
+            return
+        for i, m in enumerate(items):
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(m.get("ts", 0)))
+            t = _labels.get(str(m.get("type", "?")), str(m.get("type", "?")))
+            out.write(f"  [{i}] ({t}) {m.get('content', '')}  [{ts}]\n")
+        out.write(f"\n  {len(items)} memory entries — 下一会话注入 system prompt (USER MEMORY)\n")
+
+    if sub == "add":
+        body = parts[1].strip() if len(parts) > 1 else ""
+        mtype = "user_profile"
+        rest = body
+        first = body.split(None, 1)[0].strip() if body else ""
+        if first in MEMORY_TYPES:
+            mtype = first
+            rest = body[len(first):].strip()
+        if not rest:
+            out.write("  usage: /memory add <text>  |  /memory add <type> <text>\n")
+            return "handled"
+        if mem.add(mtype, rest, source="user"):
+            out.write(f"  [+] {mtype}: {rest[:60]}{'...' if len(rest) > 60 else ''}\n")
+        else:
+            out.write("  could not add memory (invalid type or save failed)\n")
+        return "handled"
+    if sub == "rm":
+        num = parts[1].strip() if len(parts) > 1 else ""
+        try:
+            idx = int(num)
+        except ValueError:
+            out.write("  usage: /memory rm <number>\n")
+            return "handled"
+        items = mem.list_all()
+        if idx < 0 or idx >= len(items):
+            out.write(f"  no memory at index {idx} (have {len(items)})\n")
+            return "handled"
+        content = items[idx]["content"]
+        if mem.remove(content):
+            out.write(f"  ✓ removed: {content}\n")
+        else:
+            out.write("  remove failed\n")
+        return "handled"
+    if sub == "clear":
+        mem.clear()
+        out.write("  ✓ all memories cleared\n")
+        return "handled"
+    if sub:
+        out.write(f"  unknown subcommand '{sub}' (try: add | rm <n> | clear)\n")
+        return "handled"
+    _list()
+    return "handled"

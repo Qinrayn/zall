@@ -181,14 +181,14 @@ class SessionMemory:
         """Persist to disk (JSONL) — B9: 原子write, 崩溃不丢数据。"""
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            # 写临时file, 再原子 rename
+            # 写临时file, 再原子 rename (mkstemp 保证临时名在各平台合法)
             import tempfile as _tf
-            tmp_path = self._path.parent / f".memory_{_tf._get_default_tempdir().replace('/', '_')}.tmp"  # type: ignore[attr-defined]
-            with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+            fd, tmp_path = _tf.mkstemp(suffix=".tmp", prefix=".memory_", dir=self._path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
                 f.writelines(json.dumps(m, ensure_ascii=False) + "\n" for m in self._memories)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(str(tmp_path), str(self._path))
+            os.replace(tmp_path, str(self._path))
             return True
         except OSError:
             return False

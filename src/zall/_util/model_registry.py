@@ -65,11 +65,30 @@ _KNOWN_WINDOWS: dict[str, int] = {
 _DEFAULT_WINDOW: int = 32000
 
 # A2 (provider 一等化): 自定义 provider 的 window/price 运行时覆盖表。
-# 由 cli/config._merge_custom_providers() 在启动时填充 (从 TOML [[providers]] 的
+# 由 cli/config.py _merge_custom_providers() 在启动时填充 (从 TOML [[providers]] 的
 # window_size / price_in / price_out 字段)。get_window_size()/get_price() 先查此表,
 # 再查内置 _KNOWN_WINDOWS/_KNOWN_PRICES。这样自定义模型不再一律拿到默认 32000 / $3+$15。
 _CUSTOM_WINDOWS: dict[str, int] = {}
 _CUSTOM_PRICES: dict[str, tuple[float, float]] = {}
+
+# 上游元数据表 (G7): /model 探测 /models 时顺带抓回的 context_length, 按模型 id
+# 存这里。优先级高于内置 _KNOWN_WINDOWS 的猜测: 网关在 /models 里声明的 context 是
+# 该模型在当前网关下的**事实**, 而内置表只是常见模型名的近似 (同名模型不同网关
+# 可能给的 context 不同, 如 sensenova 网关上 deepseek-v4-flash = 1M)。
+# 未探测/不可用网关 (Anthropic 原生 / 失败) → 空表, 查校回退 _KNOWN_WINDOWS。
+_LIVE_WINDOWS: dict[str, int] = {}
+
+
+def set_live_windows(context_map: dict[str, int]) -> None:
+    """注入上游 /models 探测到的 context_length 表 (keyed by 模型 id)。
+
+    覆盖语义: 整体替换 — 调用方传的是"本次探测到的一组模型", 旧探测结果
+    (网关可能已换) 不应残留。探测失败 → 传空表即可清掉。
+    """
+    _LIVE_WINDOWS.clear()
+    for k, v in (context_map or {}).items():
+        if v and v > 0:
+            _LIVE_WINDOWS[str(k)] = int(v)
 
 
 def set_custom_windows(prices_map: dict[str, int]) -> None:
@@ -144,17 +163,33 @@ _SORTED_PRICES: list[tuple[str, tuple[float, float]]] = sorted(
 )
 
 
+def _sort_live() -> list[tuple[str, int]]:
+    """_LIVE_WINDOWS 前缀匹配视图 (按 key 长度降序, 更长的前缀优先)。"""
+    return sorted(_LIVE_WINDOWS.items(), key=lambda x: -len(x[0]))
+
+
 def get_window_size(model_name: str) -> int:
-    """查modelwindow大小。已知modelreturn精确值, 未知return保守default值。
+    """查 model 窗口大小。已知 model 返回精确值, 未知返回保守默认值。
 
     A2: 先查自定义 provider 运行时覆盖表 (_CUSTOM_WINDOWS), 再查内置表。
+    G7: 上游 /models 探测到的 context (context_length) 优先于内置常规表 —
+        探测结果是该模型在当前网关下的真实上限 (常见反例: sensenova 网关
+        上 deepseek-v4-flash 实为 1M, 内置表只写过 128k 旧值)。
     """
     if not model_name:
         return _DEFAULT_WINDOW
-    # A2: 自定义 provider 覆盖优先 (精确 + 前缀)
+    # 自定义 provider 显式配置优先 (A2 契约: 用户配置的是最高优先级 —
+    # 是逃生阀, 用户在自己网关上可能想留安全余量, 该覆盖探测值)。
     if model_name in _CUSTOM_WINDOWS:
         return _CUSTOM_WINDOWS[model_name]
     for known, size in sorted(_CUSTOM_WINDOWS.items(), key=lambda x: -len(x[0])):
+        if model_name.startswith(known):
+            return size
+    # G7: 上游真实上限其次 (探测存在时) — 用户没显式配置的模型,
+    # 用网关在 /models 里声明的 context_length, 而非内置猜测/默认 32K。
+    if model_name in _LIVE_WINDOWS:
+        return _LIVE_WINDOWS[model_name]
+    for known, size in _sort_live():
         if model_name.startswith(known):
             return size
     # B1 fix: 先精确匹配完整名称
@@ -165,6 +200,34 @@ def get_window_size(model_name: str) -> int:
         if model_name.startswith(known):
             return size
     return _DEFAULT_WINDOW
+
+
+def window_size_known(model_name: str) -> bool:
+    """模型 window 是否**已知** (非默认兜底值 32K)。
+
+    区分两种未知:
+      - 已探测/已配置/内置表已知 → 精确值, 展示层可放心显示 window 与百分比
+      - 完全未知 (回落 _DEFAULT_WINDOW) → 展示层不应伪造 "32K" 或算百分比,
+        只显示已用 token 数 (诚实的原始数据)。
+    """
+    if not model_name:
+        return False
+    if model_name in _CUSTOM_WINDOWS:
+        return True
+    for known, _size in _CUSTOM_WINDOWS.items():
+        if model_name.startswith(known):
+            return True
+    if model_name in _LIVE_WINDOWS:
+        return True
+    for known, _size in _sort_live():
+        if model_name.startswith(known):
+            return True
+    if model_name in _KNOWN_WINDOWS:
+        return True
+    for known, _size in _SORTED_WINDOWS:
+        if model_name.startswith(known):
+            return True
+    return False
 
 
 def get_price(model_name: str) -> tuple[float, float]:

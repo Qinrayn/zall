@@ -184,3 +184,32 @@ def _isolate_always_allow(tmp_path_factory, monkeypatch):
         "zall.cli.responder._always_allow_path", lambda: fake_path
     )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _freeze_live_windows(monkeypatch):
+    """G7: 测试期间冻结 `_LIVE_WINDOWS` 写入, 防后台探测线程污染注入值。
+
+    REPL / cmd_model 的 /models 探测 (REPL 启动 harvest、/model 菜单) 在
+    **后台线程**跑, 本机有真 key 时会真探测并 set_live_windows(整体替换)。
+    若某个后台线程恰好在"monkeypatch 注入 dict"的测试执行期间完成, 会把
+    注入值清掉 → 全量跑挂 / 单文件过 (时序 flaky)。autouse 把更新入口
+    (set_live_windows) 在每测期间替换为 no-op: 后台线程对真实表 write 被
+    挡住, 测试用 monkeypatch.setattr(mr, "_LIVE_WINDOWS", …) 的显式注入
+    仍生效。
+    """
+    import zall._util.model_registry as _mr
+
+    monkeypatch.setattr(_mr, "_CUSTOM_WINDOWS", {})
+    monkeypatch.setattr(_mr, "_CUSTOM_PRICES", {})
+    monkeypatch.setattr(_mr, "_LIVE_WINDOWS", {})
+    monkeypatch.setattr(_mr, "set_live_windows", lambda _m: None)
+    # `_merge_custom_providers()` (经 cmd_model/cmd_provider 等路径触发) 会把
+    # 真实 ~/.zall/config.toml 的 window_size/provider 注入上面三个全局表并
+    # 残留 — 与 always_allow.json 同类的"真实机器配置泄漏进测试"问题, 必须
+    # 每测前重置, 否则先跑过该路径的测试会污染后跑测试的 live/custom 表
+    # (实测: 全量跑时 live_window 测试拿到 128000 而非注入的 1048576)。
+    import zall.cli.model_switch as _msw
+
+    monkeypatch.setattr(_msw, "harvest_live_windows", lambda *a, **k: 0)
+    yield

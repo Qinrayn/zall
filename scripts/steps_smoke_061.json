@@ -1,0 +1,21 @@
+[
+  {"wait": 3.5},
+  {"wait_for": "Type a task", "timeout": 10},
+  {"type": "/provider zhipu"},
+  {"wait_for": "API key for zhipu", "timeout": 10},
+  {"type": "sk-zhipu-test-123"},
+  {"type": "\r"},
+  {"wait_for": "persisted", "timeout": 15},
+  {"wait": 1.5},
+  {"type": "/model"},
+  {"wait_for": "Select a model", "timeout": 8},
+  {"wait": 0.8},
+  {"type": "\u001b[B"},
+  {"wait": 0.4},
+  {"type": "\r"},
+  {"wait_for": "persisted", "timeout": 10},
+  {"wait": 1.0},
+  {"type": "/exit"},
+  {"wait_for": "bye", "timeout": 10},
+  {"wait": 0.8}
+]

@@ -876,11 +876,11 @@ class CliRenderer:
         else:
             self._console.print(f"  [{_C.SUBTLE}]{_G.BULLET} {kind} (step {step})[/]")
 
-    # ── Spinner: rotating braille precision pattern ──
+# ── Spinner ──
     # O9: 单线程复用 (而非每次 model_call_start 创建新 Thread)
-
-    _SPIN_FRAMES = ("\u28cb", "\u28d9", "\u28f6", "\u28e7", "\u28cf", "\u28df",
-                     "\u28bf", "\u28fb", "\u28fd", "\u28fe")
+    # 帧取 _G.SPINNER_FRAMES (句点) 而非盲文 U+28xx — 盲文缺字形时等待行
+    # 整行空白 (实测在 Consolas/中文终端下形同空行)。按 use_ascii_glyphs
+    # 切换动态取值, 不缓存类属性。
 
     def _spinner_loop(self) -> None:
         """持久 spinner 线程: 循环等待 _spinner_trigger, 触发后旋转直到 _spinner_stop。
@@ -903,7 +903,8 @@ class CliRenderer:
                 if self._spinner_shutdown.is_set():
                     return
                 elapsed = time.time() - self._spinner_start
-                frame = self._SPIN_FRAMES[idx % len(self._SPIN_FRAMES)]
+                frames = _G.SPINNER_FRAMES
+                frame = frames[idx % len(frames)]
                 idx += 1
                 # v1.4: stall 检测 — 颜色渐变 (正常→警告→危险)
                 if elapsed > 30:
@@ -1470,7 +1471,8 @@ class CliRenderer:
         if elapsed < 3.0:
             return  # 短工具不显示进度
         name = _display_tool_name(tool_id)
-        frame = self._SPIN_FRAMES[int(elapsed * 2) % len(self._SPIN_FRAMES)]
+        frames = _G.SPINNER_FRAMES
+        frame = frames[int(elapsed * 2) % len(frames)]
         accent = _ANSI_MAP.get(_C.ACCENT, "")
         dim = _ANSI_MAP.get(_C.DIM, "")
         rst = _ANSI_RESET

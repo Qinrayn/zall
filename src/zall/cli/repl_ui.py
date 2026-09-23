@@ -14,6 +14,7 @@ IPR constraints:
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from typing import Any
 
@@ -221,18 +222,26 @@ def _print_banner(out: Any, *, model: str | None, branch: str | None,
 
 
 def _format_status_context(state: dict[str, Any]) -> str:
-    """上下文剩余短句 ("62% left") — 供状态行/命令后回显 (Codex footer 口径)。"""
+    """上下文剩余短句 ("ctx 52% left / 128k") — 状态行/命令后回显。
+
+    窗口已知 (已探测/已配置/内置表) → 百分比 + 窗口大小; 窗口未知 → 只显示
+    已用 token 数 (不伪造 "32K" 或百分比 — Kimi 显示真实 usage 同口径)。
+    """
     ctx = int(state.get("ctx_tokens", 0) or 0)
     if not ctx:
         return ""
     model = str(state.get("model") or "")
     try:
-        from zall._util.model_registry import get_window_size
-        from zall.core.cache_stats import context_remaining_percent
-        pct = context_remaining_percent(ctx, int(get_window_size(model) or 0))
+        from zall._util.model_registry import get_window_size, window_size_known
+        from zall.core.cache_stats import context_remaining_percent, format_tokens
+        if window_size_known(model):
+            pct = context_remaining_percent(ctx, int(get_window_size(model) or 0))
+            if pct is not None:
+                return f"ctx {pct}% left / {int(get_window_size(model) or 0) // 1000}k"
+            return f"ctx {format_tokens(ctx)}"
+        return f"ctx {format_tokens(ctx)}"
     except Exception:
-        pct = None
-    return f"ctx {pct}% left" if pct is not None else f"ctx {ctx} tok"
+        return f"ctx {ctx} tok"
 
 
 def _format_status_cache(state: dict[str, Any]) -> str:
@@ -570,6 +579,25 @@ def repl(
     else:
         input_fn = input_fn or input
     state["_input_fn"] = input_fn
+
+    # G7: 后台探测上游 /models 的 context_length, 注入窗口元数据 (非阻塞)。
+    # 这样 footer/状态栏/水位压缩从第一个回合起就用该网关该模型的真实窗口
+    # (如 sensenova 网关上 deepseek-v4-flash = 1M, 而不是内置表旧值 128k 或
+    # 默认 32k), 不用等用户先跑一次 /model。失败静默 — 探测本来就是尽力而为。
+    try:
+        from zall.cli.commands.model import _detect_configured_providers as _cfg_providers
+        from zall.cli.model_switch import harvest_live_windows as _harvest_windows
+
+        def _harvest_in_background() -> None:
+            try:
+                _configured = [p for p, ok in _cfg_providers().items() if ok]
+                _harvest_windows(_configured, timeout=3.0)
+            except Exception:
+                pass
+        _hb = threading.Thread(target=_harvest_in_background, daemon=True)
+        _hb.start()
+    except Exception as _harvest_err:
+        _log.warning("live window harvest skipped: %s", _harvest_err)  # 探测失败不阻断
 
     # CLI --continue/-r: 启动期恢复会话 (设 state["resume_messages"], 供下方 loop 构建 seed)
     if resume_session:

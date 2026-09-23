@@ -86,6 +86,19 @@ def select_prompt(
 # ──────────────────────────────────────────────────────────────────────────
 
 
+def _filter_visible(
+    choices: Sequence[Choice], text: str,
+) -> list[Choice]:
+    """按输入文本过滤选项 (子串匹配 value/label/desc, 不区分大小写)。
+
+    空文本 → 原列表。ptk 菜单与单行降级共用, 纯函数可直接测。
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return list(choices)
+    return [c for c in choices if t in f"{c[0]} {c[1]} {c[2]}".lower()]
+
+
 def choice_menu(
     out: Any,
     title: str,
@@ -94,36 +107,46 @@ def choice_menu(
     input_fn: Callable[[str], str] | None = None,
     default_index: int = 0,
     is_tty: bool | None = None,
+    free_text: bool = False,
 ) -> str | None:
     """↑↓ 方向键菜单选择, 回车确认, Ctrl+C 取消 (Kimi CLI 交互口径)。
 
-    真 TTY → prompt_toolkit Application 实时菜单 (↑/↓/j/k 移动, 数字直选,
-    Enter 确认); Ctrl+C/Esc 取消 → None (不再追问); prompt_toolkit 渲染
-    失败 (无终端/环境) → 降级数字选择 (select_prompt, input_fn 注入可测)。
-    契约一致: 返回选中 value; 取消/EOF → None。
+    真 TTY → prompt_toolkit Application 实时菜单: ↑/↓/j/k 移动, 数字直选,
+    直接打字 = 过滤 (匹配 value/label/desc, 窗口随过滤收窄), Enter 确认;
+    Esc 先清过滤再取消, Ctrl+C 直接取消 → None。prompt_toolkit 渲染
+    失败 (无终端/环境) → 单行降级 (input_fn 注入可测): 数字 → 下标,
+    文本 → 过滤出唯一匹配则选中 (多匹配取首个并提示), 无匹配 + free_text
+    → 原样返回文本 (调用方决定是"直接输名字"的意图)。
+    契约: 返回选中 value / free_text 文本 / None (取消)。
     """
     if not choices:
         return None
     if is_tty is None:
         is_tty = bool(hasattr(out, "isatty") and out.isatty())
     if is_tty:
+        is_text = False
         value: str | None = None
         built_ok = False
         try:
-            value = _ptk_choice_menu(out, title, choices, default_index=default_index)
+            is_text, value = _ptk_choice_menu(
+                out, title, choices, default_index=default_index,
+                free_text=free_text,
+            )
             built_ok = True
         except Exception:
-            pass  # ptk 渲染失败 → 走数字降级, 不把失败当取消
+            pass  # ptk 渲染失败 → 单行降级继续, 不把失败当取消
         if built_ok:
             if value is None:
                 return None  # 用户取消 (Ctrl+C/Esc) — 取消就是取消, 不追问
+            if is_text:
+                return value  # 无匹配的自由文本 (free_text=True 时才有)
             label = next(
                 (lbl for _v, lbl, _d in choices if _v == value),
                 str(value),
             )
             out.write(f"    \u25b8 {label}\n")
             return value
-        # ptk 失败 → 数字降级继续 (下面统一处理)
+        # ptk 失败 → 单行降级继续 (下面统一处理)
     if input_fn is None:
         out.write("  \u00b7 cancelled\n")
         return None
@@ -139,22 +162,63 @@ def choice_menu(
     except (EOFError, KeyboardInterrupt):
         out.write("  \u00b7 cancelled\n")
         return None
-    idx = parse_selection(raw, len(choices), default_index=default)
-    return choices[idx][0]
+    raw = (raw or "").strip()
+    if not raw:
+        # 空输入 → 默认项 (通常是"当前项", 切换为无操作)
+        return choices[parse_selection(raw, len(choices), default_index=default)][0]
+    if raw.isdigit():
+        idx = parse_selection(raw, len(choices), default_index=default)
+        return choices[idx][0]
+    vis = _filter_visible(choices, raw)
+    if len(vis) == 1:
+        return vis[0][0]
+    if len(vis) > 1:
+        out.write(f"  \u00b7 multiple matches ({len(vis)}): "
+                  f"{', '.join(v[0] for v in vis[:5])} \u2014 picked first\n")
+        return vis[0][0]
+    if free_text:
+        return raw  # 无匹配 → 自由文本交给调用方 (直接输入名字语义)
+    out.write("  \u00b7 no match\n")
+    return None
+
+
+def _menu_window(current: int, total: int, max_h: int = 18) -> tuple[int, int]:
+    """超长菜单滑窗 (start, end): 当前项始终可见。纯函数, 可单测。"""
+    if total <= max_h:
+        return (0, total)
+    half = max_h // 2
+    start = max(0, min(current - half, total - max_h))
+    return (start, start + max_h)
 
 
 def _render_menu_text(
     title: str, choices: Sequence[Choice], *, current: int,
+    filter_text: str = "", window: tuple[int, int] | None = None,
 ) -> list[str]:
-    """渲染菜单文本行: 当前项以箭头标记 (纯函数, 供 ptk 与单测共用)。"""
+    """渲染菜单文本行: 当前项以箭头标记 (纯函数, 供 ptk 与单测共用)。
+
+    filter_text 非空 → 菜单底部显示过滤输入 (type-to-filter 交互);
+    window 给定 → 只渲染该段 (滑窗, 附 "… N more" 提示行)。
+    """
     lines = [f"  {title}"]
-    for i, (_value, label, desc) in enumerate(choices):
+    if window is None:
+        window = (0, len(choices))
+    start, end = window
+    for i in range(start, end):
+        _value, label, desc = choices[i]
         prefix = "  \u25b8 " if i == current else "    "
         line = f"{prefix}{label}"
         if desc:
             line += f"  \u00b7  {desc}"
         lines.append(line)
-    lines.append("  (\u2191\u2193/ jk 选择 \u00b7 Enter 确认 \u00b7 Ctrl+C 取消)")
+    if window != (0, len(choices)):
+        n = len(choices) - (end - start)
+        hint = " \u2014 type to filter" if not filter_text else ""
+        lines.append(f"  (\u2026 {n} more{hint})")
+    if filter_text:
+        lines.append(f"  [filter: {filter_text}]  Enter=pick (filtered) \u00b7 Backspace edit")
+    else:
+        lines.append("  (\u2191\u2193/ jk \u79fb\u52a8 \u00b7 \u8f93\u5165\u8fc7\u6ee4 \u00b7 Enter \u786e\u8ba4 \u00b7 Ctrl+C \u53d6\u6d88)")
     return lines
 
 
@@ -188,9 +252,12 @@ def _drain_pending_keys() -> None:
 
 def _ptk_choice_menu(
     out: Any, title: str, choices: Sequence[Choice], *, default_index: int = 0,
-) -> str | None:
-    """prompt_toolkit 方向键菜单 (Kimi Code CLI 交互骨架, 非 TUI 全屏)。
+    free_text: bool = False,
+) -> tuple[bool, str | None]:
+    """prompt_toolkit 方向键 + 输入过滤菜单 (Kimi Code CLI 交互骨架, 非 TUI 全屏)。
 
+    返回 (is_text, value): is_text=True 表示 value 是过滤无匹配时 Enter 的
+    自由文本 (仅 free_text=True 时可能); value=None → 用户取消。
     prompt_toolkit 负责菜单区域渲染与按键; 退出时 ptk 恢复屏幕, 选中结果
     由 choice_menu 补印一行 (▸ ...) 保留于终端。内部失败会 raise,
     由 choice_menu 降级兜底。
@@ -203,10 +270,25 @@ def _ptk_choice_menu(
     # 排空上一菜单残留按键 (数字直选后的惯按回车会污染本菜单)
     _drain_pending_keys()
     index: list[int] = [default_index if 0 <= default_index < len(choices) else 0]
-    result: list[str | None] = [None]  # 结果: 选中 value / None(取消)
+    filter_text: list[str] = [""]
+    # 结果: (is_free_text, value) — value None 表示取消
+    result: list[tuple[bool, str | None]] = [(False, None)]
+
+    def _visible() -> list[Choice]:
+        return _filter_visible(choices, filter_text[0])
 
     def _render() -> str:
-        return "\n".join(_render_menu_text(title, choices, current=index[0]))
+        vis = _visible()
+        cur = index[0] if index[0] < len(vis) else (len(vis) - 1 if vis else 0)
+        win = _menu_window(cur, len(vis))
+        lines = _render_menu_text(
+            title, vis, current=cur, filter_text=filter_text[0], window=win,
+        )
+        if not vis and filter_text[0].strip():
+            # 过滤无匹配: 提示 + 给出"直接使用该文本"入口 (free_text 时)
+            lines.insert(1, "  \u00b7 no match for " + filter_text[0]
+                         + (" \u2014 Enter to use as-is" if free_text else ""))
+        return "\n".join(lines)
 
     # 单个可变 control: 方向键只改 .text + invalidate, 不能替换对象 —
     # Window 持有的是构造时的引用, 换对象不会重绘 (移动光标失效)。
@@ -221,32 +303,68 @@ def _ptk_choice_menu(
     @kb.add("down")
     @kb.add("j")
     def _down(e: Any) -> None:
-        index[0] = (index[0] + 1) % len(choices)
-        _refresh(e.app)
+        vis = _visible()
+        if vis:
+            index[0] = (index[0] + 1) % len(vis)
+            _refresh(e.app)
 
     @kb.add("up")
     @kb.add("k")
     def _up(e: Any) -> None:
-        index[0] = (index[0] - 1) % len(choices)
+        vis = _visible()
+        if vis:
+            index[0] = (index[0] - 1) % len(vis)
         _refresh(e.app)
 
     @kb.add("enter")
     def _pick(e: Any) -> None:
-        result[0] = choices[index[0]][0]
-        e.app.exit()
+        vis = _visible()
+        if vis:
+            result[0] = (False, vis[index[0] % len(vis)][0])
+            e.app.exit()
+        elif filter_text[0].strip() and free_text:
+            result[0] = (True, filter_text[0].strip())
+            e.app.exit()
+        # 过滤无匹配且无 free_text → 不退出 (继续输入), 无副作用
+
+    @kb.add("escape")
+    def _esc(e: Any) -> None:
+        if filter_text[0]:
+            filter_text[0] = ""
+            index[0] = default_index if 0 <= default_index < len(choices) else 0
+            _refresh(e.app)
+        else:
+            e.app.exit()  # 取消
 
     @kb.add("c-c")
-    @kb.add("escape")
     def _cancel(e: Any) -> None:
-        e.app.exit()
+        e.app.exit()  # 取消 (留 result None)
+
+    @kb.add("backspace")
+    def _del(e: Any) -> None:
+        if filter_text[0]:
+            filter_text[0] = filter_text[0][:-1]
+            _refresh(e.app)
 
     for digit in "123456789":
         @kb.add(digit)
         def _digit(e: Any, _d: str = digit) -> None:
+            vis = _visible()
             n = int(_d)
-            if 1 <= n <= len(choices):
-                result[0] = choices[n - 1][0]
+            if 1 <= n <= len(vis):
+                result[0] = (False, vis[n - 1][0])
                 e.app.exit()
+
+    @kb.add("<any>")
+    def _type(e: Any) -> None:
+        # KeyPressEvent 只有 .data (键的字符/序列), 没有 .key — 用 .data
+        ch = e.data
+        if len(ch) == 1 and ch.isprintable():
+            filter_text[0] += ch
+            vis = _visible()
+            if vis:
+                index[0] = min(index[0], len(vis) - 1)
+            _refresh(e.app)
 
     app: Application[Any] = Application(
         layout=Layout(Window(control, height=len(_render().splitlines()), wrap_lines=False)),
@@ -254,7 +372,11 @@ def _ptk_choice_menu(
         full_screen=False,
     )
     app.run()
-    return result[0]
+    if result[0][0]:
+        return (True, result[0][1])
+    if result[0][1] is None:
+        return (False, None)
+    return (False, result[0][1])
 
 
 # ──────────────────────────────────────────────────────────────────────────

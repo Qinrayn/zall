@@ -36,6 +36,7 @@ __all__ = [
     "provider_endpoint",
     "probe_models",
     "resolve_gateway",
+    "harvest_live_windows",
 ]
 
 
@@ -119,11 +120,16 @@ def resolve_gateway(token: str) -> tuple[str, str, str] | None:
 
 
 def probe_models(api_base: str, api_key: str, timeout: float = 8.0,
-                 transport: Any = None) -> list[str] | None:
+                 transport: Any = None,
+                 windows_out: dict[str, int] | None = None) -> list[str] | None:
     """探测 OpenAI 兼容网关的模型列表 (GET /models)。
 
     返回排序后的模型 id 列表; 端点不支持 / key 被拒 / 网络失败 → None
     (调用方据此提示, 不猜)。transport 参数供测试注入 httpx.MockTransport。
+
+    G7: windows_out 非 None 时, 顺带收集每个模型的 context_length (若上游
+    提供) — 这是模型窗口的**事实来源** (/models 元数据, 非内置猜测表)。
+    调用方 (cmd_model/cmd_provider) 注入 model_registry._LIVE_WINDOWS。
     """
     if not api_base:
         return None
@@ -139,9 +145,49 @@ def probe_models(api_base: str, api_key: str, timeout: float = 8.0,
         data = resp.json().get("data", [])
         ids = sorted({str(m.get("id")) for m in data
                       if isinstance(m, dict) and m.get("id")})
+        if windows_out is not None:
+            for m in data:
+                if not isinstance(m, dict):
+                    continue
+                mid = str(m.get("id") or "")
+                ctx = m.get("context_length")
+                if mid and isinstance(ctx, (int, float)) and ctx > 0:
+                    windows_out[mid] = int(ctx)
         return ids or None
     except Exception:
         return None
+
+
+def harvest_live_windows(providers: list[str], timeout: float = 3.0) -> int:
+    """探测一组 provider 的上游 /models 并注入窗口元数据 (G7)。
+
+    返回收集到的 context_length 条数; 供 REPL 启动时后台线程用 — 这样
+    不用等用户跑 /model,footer/水位/压缩也能拿到真实 context_length。
+    任何失败静默 (探测本来就是尽力而为)。
+    """
+    try:
+        from zall._util.model_registry import set_live_windows
+
+        windows: dict[str, int] = {}
+        for p in providers:
+            try:
+                ep = provider_endpoint(p)
+            except Exception:
+                ep = None
+            if ep is None or not getattr(ep, "api_base", ""):
+                continue
+            try:
+                _w: dict[str, int] = {}
+                probe_models(ep.api_base, ep.api_key, timeout=timeout,
+                             windows_out=_w)
+                windows.update(_w)
+            except Exception:
+                continue
+        if windows:
+            set_live_windows(windows)
+        return len(windows)
+    except Exception:
+        return 0
 
 
 @dataclass(frozen=True)

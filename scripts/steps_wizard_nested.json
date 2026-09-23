@@ -1,0 +1,20 @@
+[
+  {"wait": 3.5},
+  {"wait_for": "Type a task", "timeout": 10},
+  {"type": "/provider"},
+  {"wait_for": "Select a provider", "timeout": 10},
+  {"wait": 0.6},
+  {"type": "7"},
+  {"wait_for": "Select a platform", "timeout": 10},
+  {"wait": 0.7},
+  {"type": "jj"},
+  {"wait_for": "API key for groq", "timeout": 8},
+  {"type": "sk-groq-jj-7"},
+  {"wait": 0.4},
+  {"type": "3"},
+  {"wait_for": "persisted", "timeout": 20},
+  {"wait": 1.0},
+  {"type": "/exit"},
+  {"wait_for": "bye", "timeout": 10},
+  {"wait": 0.8}
+]

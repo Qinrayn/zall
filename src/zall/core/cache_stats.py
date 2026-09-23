@@ -39,6 +39,8 @@ __all__ = [
 
 # Codex 同口径: 系统提示 + 工具 schema 等"永远在场"的固定底座, 从窗口里扣除,
 # 使百分比反映"用户可影响的部分" — 首次提问后即接近 100% left, 而非一上来就掉两成。
+# 注意: 小窗口 (如 llama.cpp 8192) 下固定 12K 底座会吞掉整窗 → context_remaining_percent
+# 内部取 min(baseline, window//4) 自适应, 底座最多占窗口 1/4。
 BASELINE_TOKENS = 12000
 
 
@@ -207,7 +209,9 @@ def context_remaining_percent(
     """上下文剩余百分比 (baseline-normalized, Codex 口径)。
 
     window 未知 (<=0) → None (调用方不显示, 不猜)。
-    window <= baseline → 0 (退化, 与 Codex 一致)。
+    baseline 自适应: 固定 12K 底座在窗口 <= 12K 时会吞掉整窗 (永远 0%),
+    或在小窗口上吃掉大半 (32K 窗口前 37% 都显示 100% left) → 底座取
+    min(baseline, window//4), 小窗口的读数才可信。
     分子分母同减 baseline, 使"刚开新会话"显示接近 100%。
     """
     try:
@@ -217,10 +221,11 @@ def context_remaining_percent(
         return None
     if window <= 0:
         return None
-    if window <= baseline:
+    baseline_eff = min(max(0, int(baseline)), window // 4) if window >= 4 else 0
+    effective = window - baseline_eff
+    if effective <= 0:
         return 0
-    effective = window - baseline
-    used_eff = max(0, used - baseline)
+    used_eff = max(0, used - baseline_eff)
     remaining = max(0, effective - used_eff)
     return int(round(max(0.0, min(1.0, remaining / effective)) * 100))
 
